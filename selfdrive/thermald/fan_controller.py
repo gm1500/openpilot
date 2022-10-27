@@ -21,7 +21,7 @@ class TiciFanController(BaseFanController):
     self.controller = PIDController(k_p=0, k_i=4e-3, k_f=1, neg_limit=-80, pos_limit=0, rate=(1 / DT_TRML))
 
   def update(self, max_cpu_temp: float, ignition: bool) -> int:
-    self.controller.neg_limit = -(80 if ignition else 30)
+    self.controller.neg_limit = -(100 if ignition else 100)
     self.controller.pos_limit = -(30 if ignition else 0)
 
     if ignition != self.last_ignition:
