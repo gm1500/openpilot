@@ -96,7 +96,7 @@ void Sidebar::updateState(const UIState &s) {
   }
   setProperty("connectStatus", QVariant::fromValue(connectStatus));
 
-  float tempC = getMemoryTempC();
+  float tempC = deviceState.getMemoryTempC();
   for (auto const & t : deviceState.getCpuTempC()){
     if (t > tempC){
       tempC = t;
