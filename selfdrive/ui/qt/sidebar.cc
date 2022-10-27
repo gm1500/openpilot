@@ -96,12 +96,25 @@ void Sidebar::updateState(const UIState &s) {
   }
   setProperty("connectStatus", QVariant::fromValue(connectStatus));
 
-  ItemStatus tempStatus = {{tr("TEMP"), tr("HIGH")}, danger_color};
+  float tempC = getMemoryTempC();
+  for (auto const & t : deviceState.getCpuTempC()){
+    if (t > tempC){
+      tempC = t;
+    }
+  }
+  for (auto const & t : deviceState.getGpuTempC()){
+    if (t > tempC){
+      tempC = t;
+    }
+  }
+  char val[6];
+  snprintf(val, sizeof(val), "%.0f", tempC);
+  ItemStatus tempStatus = {{tr("TEMP"), val}, danger_color};
   auto ts = deviceState.getThermalStatus();
   if (ts == cereal::DeviceState::ThermalStatus::GREEN) {
-    tempStatus = {{tr("TEMP"), tr("GOOD")}, good_color};
+    tempStatus = {{tr("TEMP"), val}, good_color};
   } else if (ts == cereal::DeviceState::ThermalStatus::YELLOW) {
-    tempStatus = {{tr("TEMP"), tr("OK")}, warning_color};
+    tempStatus = {{tr("TEMP"), val}, warning_color};
   }
   setProperty("tempStatus", QVariant::fromValue(tempStatus));
 
