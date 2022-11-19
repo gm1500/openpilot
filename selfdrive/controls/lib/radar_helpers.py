@@ -134,9 +134,9 @@ class Cluster():
     return {
       "dRel": float(lead_msg.x[0] - RADAR_TO_CAMERA),
       "yRel": float(-lead_msg.y[0]),
-      "vRel": float(lead_msg.v[0] - v_ego),
-      "vLead": float(lead_msg.v[0]),
-      "vLeadK": float(lead_msg.v[0]),
+      "vRel": float((lead_msg.v[0] * 1.16424224) - v_ego),
+      "vLead": float(lead_msg.v[0]) * 1.16424224,
+      "vLeadK": float(lead_msg.v[0]) * 1.16424224,
       "aLeadK": float(0),
       "aLeadTau": _LEAD_ACCEL_TAU,
       "fcw": False,
