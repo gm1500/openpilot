@@ -33,6 +33,7 @@ class LateralPlanner:
     self.factor2 = (CP.centerToFront * CP.mass) / (CP.wheelbase * CP.tireStiffnessRear)
     self.last_cloudlog_t = 0
     self.solution_invalid_cnt = 0
+    self.v_model_scale = 0.0
 
     self.path_xyz = np.zeros((TRAJECTORY_SIZE, 3))
     self.velocity_xyz = np.zeros((TRAJECTORY_SIZE, 3))
@@ -49,17 +50,22 @@ class LateralPlanner:
     self.lat_mpc.reset(x0=self.x0)
 
   def update(self, sm):
+    self.v_model_scale = 1.0 #default scale at 1.0
+    v_ego = sm['carState'].vEgo
+    # Compute model v_ego scale and scale e2e
+    if len(sm['modelV2'].temporalPose.trans) and sm['modelV2'].temporalPose.trans[0] > 0 and v_ego > 0:
+      self.v_model_scale = v_ego / sm['modelV2'].temporalPose.trans[0]
     # clip speed , lateral planning is not possible at 0 speed
     measured_curvature = sm['controlsState'].curvature
 
     # Parse model predictions
     md = sm['modelV2']
     if len(md.position.x) == TRAJECTORY_SIZE and len(md.orientation.x) == TRAJECTORY_SIZE:
-      self.path_xyz = np.column_stack([md.position.x, md.position.y, md.position.z])
+      self.path_xyz = np.column_stack([np.array(md.position.x) * self.v_model_scale, np.array(md.position.y) * self.v_model_scale, md.position.z])
       self.t_idxs = np.array(md.position.t)
       self.plan_yaw = np.array(md.orientation.z) * self.v_model_scale
       self.plan_yaw_rate = np.array(md.orientationRate.z) * self.v_model_scale
-      self.velocity_xyz = np.column_stack([md.velocity.x, md.velocity.y, md.velocity.z]) * self.v_model_scale
+      self.velocity_xyz = np.column_stack([np.array(md.velocity.x) * self.v_model_scale, np.array(md.velocity.y) * self.v_model_scale, md.velocity.z])
       car_speed = np.linalg.norm(self.velocity_xyz, axis=1)
       self.v_plan = np.clip(car_speed, MIN_SPEED, np.inf)
       self.v_ego = self.v_plan[0]
