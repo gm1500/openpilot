@@ -63,7 +63,7 @@ class LongitudinalPlanner:
     if (len(model_msg.position.x) == 33 and
        len(model_msg.velocity.x) == 33 and
        len(model_msg.acceleration.x) == 33):
-      x = np.interp(T_IDXS_MPC, T_IDXS, model_msg.position.x) * model_scale# * T_IDXS_MPC
+      x = np.interp(T_IDXS_MPC, T_IDXS, model_msg.position.x) * model_scale * T_IDXS_MPC * model_scale
       v = np.interp(T_IDXS_MPC, T_IDXS, model_msg.velocity.x) * model_scale
       a = np.interp(T_IDXS_MPC, T_IDXS, model_msg.acceleration.x)
       j = np.zeros(len(T_IDXS_MPC))
