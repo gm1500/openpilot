@@ -64,8 +64,8 @@ class LateralPlanner:
       self.path_xyz = np.column_stack([np.array(md.position.x) * self.v_model_scale, np.array(md.position.y) * self.v_model_scale, md.position.z])
       #self.path_xyz = np.column_stack([md.position.x, np.array(md.position.y) * self.v_model_scale, md.position.z])
       self.t_idxs = np.array(md.position.t)
-      self.plan_yaw = np.array(md.orientation.z)# * self.v_model_scale
-      self.plan_yaw_rate = np.array(md.orientationRate.z)# * self.v_model_scale
+      self.plan_yaw = np.array(md.orientation.z) * self.v_model_scale
+      self.plan_yaw_rate = np.array(md.orientationRate.z) * self.v_model_scale
 
     # Lane change logic
     desire_state = md.meta.desireState
