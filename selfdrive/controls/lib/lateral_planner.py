@@ -65,7 +65,7 @@ class LateralPlanner:
       self.t_idxs = np.array(md.position.t)
       self.plan_yaw = np.array(md.orientation.z) * self.v_model_scale
       self.plan_yaw_rate = np.array(md.orientationRate.z) * self.v_model_scale
-      self.velocity_xyz = np.column_stack([md.velocity.x, md.velocity.y, md.velocity.z]) * self.v_model_scale
+      self.velocity_xyz = np.column_stack([np.array(md.velocity.x) * self.v_model_scale, np.array(md.velocity.y) * self.v_model_scale, md.velocity.z])
       car_speed = np.linalg.norm(self.velocity_xyz, axis=1)
       self.v_plan = np.clip(car_speed, MIN_SPEED, np.inf)
       self.v_ego = self.v_plan[0]
