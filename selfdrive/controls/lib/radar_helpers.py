@@ -140,7 +140,7 @@ class Cluster():
     if v_ego > 0 and vision_v_ego > 0:
       vision_velocity_factor = v_ego / vision_v_ego
       corrected_v_lead = lead_msg.v[0] * vision_velocity_factor
-      corrected_a_lead = lead_msg.a[0] * vision_velocity_factor
+      corrected_a_lead = lead_msg.a[0]# * vision_velocity_factor
     
     # Learn if constant acceleration
     if abs(float(corrected_a_lead)) < 0.5:
