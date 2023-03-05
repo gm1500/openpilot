@@ -309,12 +309,16 @@ class CarInterface(CarInterfaceBase):
     elif candidate == CAR.SILVERADO:
       ret.minEnableSpeed = -1.
       ret.minSteerSpeed = -1 * CV.MPH_TO_MS
-      ret.mass = 2400. + STD_CARGO_KG
-      ret.wheelbase = 3.745
+      ret.mass = 2500. + STD_CARGO_KG
+      ret.wheelbase = 3.75
       ret.steerRatio = 16.3
-      ret.centerToFront = ret.wheelbase * .49
-      ret.steerActuatorDelay = 0.11
+      ret.centerToFront = ret.wheelbase * 0.5
       tire_stiffness_factor = 1.0
+      ret.stopAccel = -0.25
+      ret.longitudinalTuning.kpV = [2.4, 2.4]
+      ret.longitudinalTuning.kiV = [0.16]
+      ret.longitudinalActuatorDelayUpperBound = 0.15
+      ret.longitudinalActuatorDelayLowerBound = 0.15
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
     elif candidate == CAR.EQUINOX:
