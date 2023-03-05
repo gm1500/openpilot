@@ -76,7 +76,7 @@ class LatControlTorque(LatControl):
       setpoint = desired_lateral_accel + low_speed_factor * min(abs(desired_curvature), abs(mean_curvature)) * sign(desired_curvature)
       measurement = actual_lateral_accel + low_speed_factor * min(abs(actual_curvature), abs(mean_curvature)) * sign(actual_curvature)
       error = setpoint - measurement
-      gravity_lateral_accel = -params.roll * ACCELERATION_DUE_TO_GRAVITY
+      gravity_lateral_accel = -params.roll * ACCELERATION_DUE_TO_GRAVITY * 1.16
       pid_log.error = CarInterfaceBase.torque_from_lateral_accel_linear(error, self.torque_params, error,
                                                      lateral_accel_deadzone, friction_compensation=False,
                                                       v_ego=CS.vEgo, g_lat_accel=0., lateral_jerk_desired=0.0)
