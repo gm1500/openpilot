@@ -307,7 +307,7 @@ class CarInterface(CarInterfaceBase):
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
     elif candidate == CAR.SILVERADO:
-      ret.minEnableSpeed = -1.
+      ret.minEnableSpeed = 10.
       ret.minSteerSpeed = -1 * CV.MPH_TO_MS
       ret.mass = 2500. + STD_CARGO_KG
       ret.wheelbase = 3.75
