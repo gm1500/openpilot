@@ -133,13 +133,14 @@ class Cluster():
   def get_RadarState_from_vision(self, lead_msg, v_ego, model_v_ego):
     v_ego_error_factor = clip(v_ego / (model_v_ego + 1e-3), 0.7, 1.3)
     lead_v_pred = lead_msg.v[0] * v_ego_error_factor
+    lead_a_pred = lead_msg.a[0] * v_ego_error_factor
     return {
       "dRel": float(lead_msg.x[0] - RADAR_TO_CAMERA),
       "yRel": float(-lead_msg.y[0]),
       "vRel": float(lead_v_pred - v_ego),
       "vLead": float(lead_v_pred),
       "vLeadK": float(lead_v_pred),
-      "aLeadK": float(lead_msg.a[0]),
+      "aLeadK": float(lead_a_pred),
       "aLeadTau": 0.0,
       "fcw": False,
       "modelProb": float(lead_msg.prob),
