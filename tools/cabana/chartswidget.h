@@ -46,6 +46,7 @@ public:
     QVector<QPointF> step_vals;
     uint64_t last_value_mono_time = 0;
     QPointF track_pt{};
+    SegmentTree segment_tree;
   };
 
 signals:
@@ -96,6 +97,8 @@ private:
   double cur_sec = 0;
   const QString mime_type = "application/x-cabanachartview";
   SeriesType series_type = SeriesType::Line;
+  bool is_scrubbing = false;
+  bool resume_after_scrub = false;
   friend class ChartsWidget;
  };
 
