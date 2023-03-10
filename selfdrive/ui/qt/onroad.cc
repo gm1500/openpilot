@@ -656,6 +656,11 @@ void AnnotatedCameraWidget::paintGL() {
     // for replay of old routes, never go to widecam
     wide_cam_requested = wide_cam_requested && s->scene.calibration_wide_valid;
     CameraWidget::setStreamType(wide_cam_requested ? VISION_STREAM_WIDE_ROAD : VISION_STREAM_ROAD);
+    
+    bool reversing = int(sm["carState"].getCarState().getGearShifter()) == 4;
+    if(reversing) {
+      CameraWidget::setStreamType(VISION_STREAM_DRIVER);
+    }
 
     s->scene.wide_cam = CameraWidget::getStreamType() == VISION_STREAM_WIDE_ROAD;
     if (s->scene.calibration_valid) {
