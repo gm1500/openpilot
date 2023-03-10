@@ -1,6 +1,6 @@
 import numpy as np
 from common.realtime import sec_since_boot, DT_MDL
-from common.numpy_fast import interp
+from common.numpy_fast import interp, clip
 from system.swaglog import cloudlog
 from selfdrive.controls.lib.lateral_mpc_lib.lat_mpc import LateralMpc
 from selfdrive.controls.lib.lateral_mpc_lib.lat_mpc import N as LAT_MPC_N
@@ -33,7 +33,7 @@ class LateralPlanner:
     self.factor2 = (CP.centerToFront * CP.mass) / (CP.wheelbase * CP.tireStiffnessRear)
     self.last_cloudlog_t = 0
     self.solution_invalid_cnt = 0
-    self.v_model_scale = 0.0
+    self.v_model_scale = 1.0
 
     self.path_xyz = np.zeros((TRAJECTORY_SIZE, 3))
     self.velocity_xyz = np.zeros((TRAJECTORY_SIZE, 3))
@@ -50,11 +50,11 @@ class LateralPlanner:
     self.lat_mpc.reset(x0=self.x0)
 
   def update(self, sm):
-    self.v_model_scale = 1.0 #default scale at 1.0
-    v_ego = sm['carState'].vEgo
-    # Compute model v_ego scale and scale e2e
-    if len(sm['modelV2'].temporalPose.trans) and sm['modelV2'].temporalPose.trans[0] > 0 and v_ego > 0:
-      self.v_model_scale = v_ego / sm['modelV2'].temporalPose.trans[0]
+    # obtain model speed compare to wheel speed and clip 30%
+    if len(sm['modelV2'].temporalPose.trans):
+      self.v_model_scale = clip(sm['carState'].vEgo / (sm['modelV2'].temporalPose.trans[0] + 1e-3), 0.7, 1.3)
+    else:
+      self.v_model_scale = 1.0
     # clip speed , lateral planning is not possible at 0 speed
     measured_curvature = sm['controlsState'].curvature
 
