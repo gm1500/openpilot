@@ -665,12 +665,9 @@ void AnnotatedCameraWidget::paintGL() {
       CameraWidget::setStreamType(VISION_STREAM_DRIVER);
     }
     
-    bool signaling = sm["carState"].getCarState().getLeftBlinker() || sm["carState"].getCarState().getRightBlinker():
-
+    bool signaling = sm["carState"].getCarState().getLeftBlinker() || sm["carState"].getCarState().getRightBlinker();
     if(signaling) {
-
       CameraWidget::setStreamType(VISION_STREAM_DRIVER);
-
     }
 
     s->scene.wide_cam = CameraWidget::getStreamType() == VISION_STREAM_WIDE_ROAD;
