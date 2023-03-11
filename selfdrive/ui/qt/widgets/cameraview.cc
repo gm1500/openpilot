@@ -66,7 +66,7 @@ mat4 get_driver_view_transform(int screen_width, int screen_height, int stream_w
   const float yscale = stream_height * driver_view_ratio / stream_width;
   const float xscale = yscale*screen_height/screen_width*stream_width/stream_height;
   mat4 transform = (mat4){{
-    xscale,  0.0, 0.0, 0.0,
+    -xscale,  0.0, 0.0, 0.0,
     0.0,  yscale, 0.0, 0.0,
     0.0,  0.0, 1.0, 0.0,
     0.0,  0.0, 0.0, 1.0,
