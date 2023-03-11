@@ -200,8 +200,8 @@ class CarInterface(CarInterfaceBase):
       ret.stopAccel = -0.25
       #ret.longitudinalTuning.kpV = [2.4, 2.4]
       #ret.longitudinalTuning.kiV = [0.08]
-      ret.longitudinalActuatorDelayUpperBound = 0.5
-      ret.longitudinalActuatorDelayLowerBound = 0.5
+      ret.longitudinalActuatorDelayUpperBound = 0.9
+      ret.longitudinalActuatorDelayLowerBound = 0.45
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
     elif candidate == CAR.EQUINOX:
