@@ -205,7 +205,7 @@ class CarInterface(CarInterfaceBase):
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
       ret.lateralTuning.torque.kp = 2.0
       ret.lateralTuning.torque.kf = 1.0
-      ret.lateralTuning.torque.ki = 0.00001
+      ret.lateralTuning.torque.ki = 0.0001
 
     elif candidate == CAR.EQUINOX:
       ret.mass = 3500. * CV.LB_TO_KG + STD_CARGO_KG
