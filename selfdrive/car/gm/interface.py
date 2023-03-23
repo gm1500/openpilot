@@ -199,7 +199,7 @@ class CarInterface(CarInterfaceBase):
       tire_stiffness_factor = 1.0
       ret.stopAccel = -0.25
       ret.longitudinalTuning.kpV = [2.4, 1.2]
-      ret.longitudinalTuning.kiV = [0.08]
+      ret.longitudinalTuning.kiV = [0.16]
       ret.longitudinalActuatorDelayUpperBound = 0.5
       #ret.longitudinalActuatorDelayLowerBound = 0.5
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
