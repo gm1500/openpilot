@@ -68,8 +68,8 @@ class CarInterface(CarInterfaceBase):
       ret.radarUnavailable = True  # no radar
       ret.pcmCruise = True
       ret.safetyConfigs[0].safetyParam |= Panda.FLAG_GM_HW_CAM
-      ret.minEnableSpeed = 5 * CV.KPH_TO_MS
-      ret.minSteerSpeed = 10 * CV.KPH_TO_MS
+      ret.minEnableSpeed = -1#5 * CV.KPH_TO_MS
+      ret.minSteerSpeed = -1#10 * CV.KPH_TO_MS
 
       # Tuning for experimental long
       ret.longitudinalTuning.kpV = [2.0, 1.5]
@@ -197,13 +197,21 @@ class CarInterface(CarInterfaceBase):
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
     elif candidate == CAR.SILVERADO:
-      ret.mass = 2200. + STD_CARGO_KG
+      ret.mass = 2500. + STD_CARGO_KG
       ret.wheelbase = 3.75
       ret.steerRatio = 16.3
       ret.centerToFront = ret.wheelbase * 0.5
       tire_stiffness_factor = 1.0
+      ret.stopAccel = -0.4
+      ret.longitudinalTuning.kpV = [2.4, 1.2]
+      ret.longitudinalTuning.kiV = [0.16]
+      #ret.longitudinalActuatorDelayUpperBound = 0.67
+      #ret.longitudinalActuatorDelayLowerBound = 0.5
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
-
+      ret.lateralTuning.torque.kp = 2.0
+      ret.lateralTuning.torque.kf = 1.0
+      ret.lateralTuning.torque.ki = 0.0001
+      
     elif candidate == CAR.EQUINOX:
       ret.mass = 3500. * CV.LB_TO_KG + STD_CARGO_KG
       ret.wheelbase = 2.72
