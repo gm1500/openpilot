@@ -219,11 +219,16 @@ class CarInterface(CarInterfaceBase):
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
     elif candidate == CAR.SILVERADO:
-      ret.mass = 2200. + STD_CARGO_KG
+      ret.mass = 2500. + STD_CARGO_KG
       ret.wheelbase = 3.75
       ret.steerRatio = 16.3
       ret.centerToFront = ret.wheelbase * 0.5
       tire_stiffness_factor = 1.0
+      ret.steerActuatorDelay = 0.5
+      ret.vEgoStopping = 0.1
+      ret.stopAccel = -0.25
+      ret.longitudinalTuning.kpV = [2.4, 1.2]
+      ret.longitudinalTuning.kiV = [0.16]
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
     elif candidate == CAR.EQUINOX:
