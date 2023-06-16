@@ -224,7 +224,7 @@ class CarInterface(CarInterfaceBase):
       ret.steerRatio = 16.3
       ret.centerToFront = ret.wheelbase * 0.5
       tire_stiffness_factor = 1.0
-      ret.steerActuatorDelay = 0.5
+      ret.steerActuatorDelay = 0.1
       ret.vEgoStopping = 0.1
       ret.stopAccel = -0.25
       ret.longitudinalTuning.kpV = [2.4, 1.2]
