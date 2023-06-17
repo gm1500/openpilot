@@ -224,13 +224,13 @@ class CarInterface(CarInterfaceBase):
       ret.steerRatio = 16.3
       ret.centerToFront = ret.wheelbase * 0.5
       tire_stiffness_factor = 1.0
-      ret.steerActuatorDelay = 0.1
+      ret.steerActuatorDelay = 0.5
       ret.vEgoStopping = 0.1
       ret.stopAccel = -0.25
       ret.longitudinalTuning.kpV = [2.4, 1.2]
       ret.longitudinalTuning.kiV = [0.16]
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
-      ret.lateralTuning.torque.kf = 1.2
+      ret.lateralTuning.torque.kf = 0.6
 
     elif candidate == CAR.EQUINOX:
       ret.mass = 3500. * CV.LB_TO_KG + STD_CARGO_KG
