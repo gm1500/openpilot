@@ -230,7 +230,8 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kpV = [2.4, 1.2]
       ret.longitudinalTuning.kiV = [0.16]
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
-      #ret.lateralTuning.torque.kf = 0.6
+      ret.lateralTuning.torque.kf = 0.85
+      ret.lateralTuning.torque.ki = 0.0
 
     elif candidate == CAR.EQUINOX:
       ret.mass = 3500. * CV.LB_TO_KG + STD_CARGO_KG
