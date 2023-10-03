@@ -312,8 +312,8 @@ class LongitudinalMpc:
       # Fake a fast lead car, so mpc can keep running in the same mode
       x_lead = 50.0
       v_lead = v_ego + 10.0
-      a_lead = 0.0
-      a_lead_tau = _LEAD_ACCEL_TAU
+      a_lead = 2.0
+      a_lead_tau = 0
 
     # MPC will not converge if immediate crash is expected
     # Clip lead distance to what is still possible to brake for
