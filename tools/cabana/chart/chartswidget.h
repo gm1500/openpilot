@@ -54,6 +54,7 @@ signals:
   void seriesChanged();
 
 private:
+  QSize minimumSizeHint() const override;
   void resizeEvent(QResizeEvent *event) override;
   bool event(QEvent *event) override;
   void alignCharts();
@@ -120,7 +121,7 @@ class ZoomCommand : public QUndoCommand {
 public:
   ZoomCommand(ChartsWidget *charts, std::pair<double, double> range) : charts(charts), range(range), QUndoCommand() {
     prev_range = charts->is_zoomed ? charts->zoomed_range : charts->display_range;
-    setText(QObject::tr("Zoom to %1-%2").arg(range.first, 0, 'f', 1).arg(range.second, 0, 'f', 1));
+    setText(QObject::tr("Zoom to %1-%2").arg(range.first, 0, 'f', 2).arg(range.second, 0, 'f', 2));
   }
   void undo() override { charts->setZoom(prev_range.first, prev_range.second); }
   void redo() override { charts->setZoom(range.first, range.second); }
