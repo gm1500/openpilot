@@ -3,6 +3,8 @@ import bz2
 import math
 import json
 import os
+import pathlib
+import psutil
 import shutil
 import subprocess
 import time
@@ -56,7 +58,6 @@ PROCS = {
   "selfdrive.navd.navd": 0.4,
   "system.loggerd.uploader": 3.0,
   "system.loggerd.deleter": 0.1,
-  "selfdrive.locationd.laikad": (1.0, 80.0),  # TODO: better GPS setup in testing closet
 }
 
 PROCS.update({
@@ -152,6 +153,8 @@ class TestOnroad(unittest.TestCase):
       cls.segments = cls.segments[:-1]
 
     finally:
+      cls.gpu_procs = {psutil.Process(int(f.name)).name() for f in pathlib.Path('/sys/devices/virtual/kgsl/kgsl/proc/').iterdir() if f.is_dir()}
+
       if proc is not None:
         proc.terminate()
         if proc.wait(60) is None:
@@ -296,6 +299,9 @@ class TestOnroad(unittest.TestCase):
     # check for big leaks. note that memory usage is
     # expected to go up while the MSGQ buffers fill up
     self.assertLessEqual(max(mems) - min(mems), 3.0)
+
+  def test_gpu_usage(self):
+    self.assertEqual(self.gpu_procs, {"weston", "_ui", "mapsd", "camerad", "selfdrive.modeld.modeld"})
 
   def test_camera_processing_time(self):
     result = "\n"
