@@ -42,7 +42,7 @@ class CarControllerParams:
       self.MAX_GAS = 4095
       self.MAX_ACC_REGEN = 1514
       self.INACTIVE_REGEN = 1554
-      self.ZERO_GAS = 1730
+      self.ZERO_GAS = 1880
       # Camera ACC vehicles have no regen while enabled.
       # Camera transitions to MAX_ACC_REGEN from ZERO_GAS and uses friction brakes instantly
       max_regen_acceleration = 0.
