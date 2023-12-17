@@ -231,7 +231,7 @@ class CarInterface(CarInterfaceBase):
       ret.tireStiffnessFactor = 1.0
       ret.stopAccel = -0.25
       ret.minSteerSpeed = -1
-      ret.longitudinalTuning.kpV = [1.5, 1.5]
+      ret.longitudinalTuning.kpV = [2.0, 1.5]
       ret.longitudinalTuning.kiV = [0.72]
       # On the Bolt, the ECM and camera independently check that you are either above 5 kph or at a stop
       # with foot on brake to allow engagement, but this platform only has that check in the camera.
