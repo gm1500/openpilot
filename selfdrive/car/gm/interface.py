@@ -232,7 +232,7 @@ class CarInterface(CarInterfaceBase):
       ret.stopAccel = -0.25
       ret.minSteerSpeed = -1
       ret.longitudinalTuning.kpV = [2.4, 1.5]
-      ret.longitudinalTuning.kiV = [0.72]
+      ret.longitudinalTuning.kiV = [1.0]
       # On the Bolt, the ECM and camera independently check that you are either above 5 kph or at a stop
       # with foot on brake to allow engagement, but this platform only has that check in the camera.
       # TODO: check if this is split by EV/ICE with more platforms in the future
