@@ -212,7 +212,7 @@ class TestFwFingerprintTiming(unittest.TestCase):
 
   def test_startup_timing(self):
     # Tests worse-case VIN query time and typical present ECU query time
-    vin_ref_time = 1.0
+    vin_ref_time = 1.2
     present_ecu_ref_time = 0.75
 
     def fake_get_ecu_addrs(*_, timeout):
@@ -232,22 +232,22 @@ class TestFwFingerprintTiming(unittest.TestCase):
     self.total_time = 0.0
     with (mock.patch("openpilot.selfdrive.car.isotp_parallel_query.IsoTpParallelQuery.get_data", self.fake_get_data)):
       for _ in range(self.N):
-        get_vin(fake_socket, fake_socket, 1)
+        get_vin(fake_socket, fake_socket, (0, 1))
     self._assert_timing(self.total_time / self.N, vin_ref_time)
     print(f'get_vin, query time={self.total_time / self.N} seconds')
 
   @pytest.mark.timeout(60)
   def test_fw_query_timing(self):
-    total_ref_time = 6.1
+    total_ref_time = 6.5
     brand_ref_times = {
       1: {
         'body': 0.1,
         'chrysler': 0.3,
         'ford': 0.2,
-        'honda': 0.45,
+        'honda': 0.55,
         'hyundai': 0.65,
         'mazda': 0.2,
-        'nissan': 0.4,
+        'nissan': 0.8,
         'subaru': 0.45,
         'tesla': 0.2,
         'toyota': 1.6,
