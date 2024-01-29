@@ -227,7 +227,7 @@ class CarInterface(CarInterfaceBase):
     elif candidate == CAR.SILVERADO:
       ret.mass = 2450.
       ret.wheelbase = 3.75
-      ret.steerRatio = 17.32
+      ret.steerRatio = 18.03
       ret.centerToFront = ret.wheelbase * 0.5
       ret.tireStiffnessFactor = 1.0
       #ret.steerActuatorDelay = 0.2
