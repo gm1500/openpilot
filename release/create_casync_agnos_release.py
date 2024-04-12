@@ -1,17 +1,21 @@
+#!/usr/bin/env python3
 import argparse
 import json
 import pathlib
 import tempfile
+import time
 from openpilot.common.basedir import BASEDIR
 from openpilot.system.hardware.tici.agnos import StreamingDecompressor, unsparsify, noop, AGNOS_MANIFEST_FILE
 from openpilot.system.updated.casync.common import create_casync_from_file
+from openpilot.system.version import get_agnos_version
 
 
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="creates a casync release")
   parser.add_argument("output_dir", type=str, help="output directory for the channel")
-  parser.add_argument("version", type=str, help="version of agnos this is")
+  parser.add_argument("working_dir", type=str, help="working directory")
+  parser.add_argument("--version", type=str, help="version of agnos this is", default=get_agnos_version())
   parser.add_argument("--manifest", type=str, help="json manifest to create agnos release from", \
                         default=str(pathlib.Path(BASEDIR) / AGNOS_MANIFEST_FILE))
   args = parser.parse_args()
@@ -19,9 +23,12 @@ if __name__ == "__main__":
   output_dir = pathlib.Path(args.output_dir)
   output_dir.mkdir(parents=True, exist_ok=True)
 
+  working_dir = pathlib.Path(args.working_dir)
+  working_dir.mkdir(parents=True, exist_ok=True)
+
   manifest_file = pathlib.Path(args.manifest)
 
-  with tempfile.NamedTemporaryFile() as entry_file:
+  with tempfile.NamedTemporaryFile(dir=str(working_dir)) as entry_file:
     entry_path = pathlib.Path(entry_file.name)
 
     with open(manifest_file) as f:
@@ -29,6 +36,7 @@ if __name__ == "__main__":
 
     for entry in manifest:
       print(f"creating casync agnos build from {entry}")
+      start = time.monotonic()
       downloader = StreamingDecompressor(entry['url'])
 
       parse_func = unsparsify if entry['sparse'] else noop
@@ -42,4 +50,8 @@ if __name__ == "__main__":
         for chunk in parsed_chunks:
           f.write(chunk)
 
+      print(f"downloaded in {time.monotonic() - start}")
+
+      start = time.monotonic()
       create_casync_from_file(entry_path, output_dir, f"agnos-{args.version}-{entry['name']}")
+      print(f"created casnc in {time.monotonic() - start}")
