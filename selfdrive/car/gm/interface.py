@@ -191,6 +191,8 @@ class CarInterface(CarInterfaceBase):
       # TODO: check if this is split by EV/ICE with more platforms in the future
       if ret.openpilotLongitudinalControl:
         ret.minEnableSpeed = -1.
+        ret.vEgoStopping = 0.50
+        ret.vEgoStarting = 0.50
         ret.stopAccel = -0.39
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
