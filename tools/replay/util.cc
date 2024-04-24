@@ -5,6 +5,7 @@
 #include <openssl/sha.h>
 
 #include <cassert>
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstring>
@@ -318,6 +319,23 @@ std::string decompressBZ2(const std::byte *in, size_t in_size, std::atomic<bool>
 }
 
 void precise_nano_sleep(int64_t nanoseconds) {
+#ifdef __APPLE__
+  const long estimate_ns = 1 * 1e6;  // 1ms
+  struct timespec req = {.tv_nsec = estimate_ns};
+  uint64_t start_sleep = nanos_since_boot();
+  while (nanoseconds > estimate_ns) {
+    nanosleep(&req, nullptr);
+    uint64_t end_sleep = nanos_since_boot();
+    nanoseconds -= (end_sleep - start_sleep);
+    start_sleep = end_sleep;
+  }
+  // spin wait
+  if (nanoseconds > 0) {
+    while ((nanos_since_boot() - start_sleep) <= nanoseconds) {
+      std::this_thread::yield();
+    }
+  }
+#else
   struct timespec req, rem;
 
   req.tv_sec = nanoseconds / 1e9;
@@ -326,6 +344,7 @@ void precise_nano_sleep(int64_t nanoseconds) {
     // Retry sleep if interrupted by a signal
     req = rem;
   }
+#endif
 }
 
 std::string sha256(const std::string &str) {
@@ -335,4 +354,27 @@ std::string sha256(const std::string &str) {
   SHA256_Update(&sha256, str.c_str(), str.size());
   SHA256_Final(hash, &sha256);
   return util::hexdump(hash, SHA256_DIGEST_LENGTH);
+}
+
+// MonotonicBuffer
+
+void *MonotonicBuffer::allocate(size_t bytes, size_t alignment) {
+  assert(bytes > 0);
+  void *p = std::align(alignment, bytes, current_buf, available);
+  if (p == nullptr) {
+    available = next_buffer_size = std::max(next_buffer_size, bytes);
+    current_buf = buffers.emplace_back(std::aligned_alloc(alignment, next_buffer_size));
+    next_buffer_size *= growth_factor;
+    p = current_buf;
+  }
+
+  current_buf = (char *)current_buf + bytes;
+  available -= bytes;
+  return p;
+}
+
+MonotonicBuffer::~MonotonicBuffer() {
+  for (auto buf : buffers) {
+    free(buf);
+  }
 }
