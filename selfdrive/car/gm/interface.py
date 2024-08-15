@@ -242,7 +242,7 @@ class CarInterface(CarInterfaceBase):
     elif candidate == CAR.SILVERADO:
       ret.mass = 2450.
       ret.wheelbase = 3.75
-      ret.steerRatio = 6
+      ret.steerRatio = 24
       ret.centerToFront = ret.wheelbase * 0.5
       ret.tireStiffnessFactor = 1.0
       # On the Bolt, the ECM and camera independently check that you are either above 5 kph or at a stop
