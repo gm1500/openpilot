@@ -242,7 +242,7 @@ class CarInterface(CarInterfaceBase):
     elif candidate == CAR.SILVERADO:
       ret.mass = 2450.
       ret.wheelbase = 3.75
-      ret.steerRatio = 17.5
+      ret.steerRatio = 17.3
       ret.centerToFront = ret.wheelbase * 0.5
       ret.tireStiffnessFactor = 1.0
       # On the Bolt, the ECM and camera independently check that you are either above 5 kph or at a stop
@@ -251,7 +251,7 @@ class CarInterface(CarInterfaceBase):
       if ret.openpilotLongitudinalControl:
         ret.minEnableSpeed = -1.
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
-      ret.steerActuatorDelay = 0.3
+      ret.steerActuatorDelay = 0.25
 
     elif candidate == CAR.EQUINOX:
       ret.mass = 3500. * CV.LB_TO_KG
