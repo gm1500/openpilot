@@ -77,7 +77,7 @@ class Track:
     if abs(self.aLeadK) < 0.5:
       self.aLeadTau.x = min(max(self.aLeadTau, 1e-2) * 1.1, _LEAD_ACCEL_TAU)
     else:
-      self.aLeadTau.update(0.0)
+      self.aLeadTau.x = *= 0.9
 
     self.cnt += 1
 
