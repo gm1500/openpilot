@@ -43,7 +43,7 @@ POLICY_METADATA_PATH = Path(__file__).parent / 'models/driving_policy_metadata.p
 LAT_SMOOTH_SECONDS = 0.1
 LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
-RECOVERY_POWER = 1.5 # The higher this number the more aggressively the model will recover to lanecenter, too high and it will ping-pong
+RECOVERY_POWER = 2.0 # The higher this number the more aggressively the model will recover to lanecenter, too high and it will ping-pong
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                           lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
