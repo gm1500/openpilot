@@ -24,7 +24,7 @@ BUTTONS_DICT = {CruiseButtons.RES_ACCEL: ButtonType.accelCruise, CruiseButtons.D
 NON_LINEAR_TORQUE_PARAMS = {
   CAR.BOLT_EUV: [2.6531724862969748, 1.0, 0.1919764879840985, 0.009054123646805178],
   CAR.ACADIA: [4.78003305, 1.0, 0.3122, 0.05591772],
-  CAR.SILVERADO: [3.29974374, 1.0, 0.25571356, 0.0465122]
+  CAR.SILVERADO: [3.8, 0.81, 0.21, 0.0465122]
 }
 
 NEURAL_PARAMS_PATH = os.path.join(BASEDIR, 'selfdrive/car/torque_data/neural_ff_weights.json')
@@ -61,8 +61,8 @@ class CarInterface(CarInterfaceBase):
     # ToDo: To generalize to other GMs, explore tanh function as the nonlinear
     non_linear_torque_params = NON_LINEAR_TORQUE_PARAMS.get(self.CP.carFingerprint)
     assert non_linear_torque_params, "The params are not defined"
-    a, b, c, _ = non_linear_torque_params
-    steer_torque = (sig(latcontrol_inputs.lateral_acceleration * a) * b) + (latcontrol_inputs.lateral_acceleration * c)
+    a, b, c, d = non_linear_torque_params
+    steer_torque = (sig(latcontrol_inputs.lateral_acceleration * a) * b) + (latcontrol_inputs.lateral_acceleration * c) + d
     return float(steer_torque) + friction
 
   def torque_from_lateral_accel_neural(self, latcontrol_inputs: LatControlInputs, torque_params: car.CarParams.LateralTorqueTuning, lateral_accel_error: float,
