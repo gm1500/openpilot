@@ -30,7 +30,19 @@ LP_FILTER_CUTOFF_HZ = 1.2
 JERK_LOOKAHEAD_SECONDS = 0.19
 JERK_GAIN = 0.3
 LAT_ACCEL_REQUEST_BUFFER_SECONDS = 1.0
-VERSION = 1
+
+# Lane-center feedback from previewed curvature error. This is restricted to
+# gentle turns so it shapes the planner request without influencing tight turns.
+CENTER_PREVIEW_A = 4.5
+CENTER_PREVIEW_B = 0.25
+K_Y = 0.06
+K_PSI = 0.025
+
+# Outward corrections when measured curvature is tighter than requested.
+K_APEX = 0.40
+K_CUT = 0.60
+
+VERSION = 2
 
 class LatControlTorque(LatControl):
   def __init__(self, CP, CI, dt):
@@ -56,12 +68,52 @@ class LatControlTorque(LatControl):
     self.pid.set_limits(self.lateral_accel_from_torque(self.steer_max, self.torque_params),
                         self.lateral_accel_from_torque(-self.steer_max, self.torque_params))
 
+  @staticmethod
+  def _shape_desired_lateral_accel(desired_curvature, measured_curvature, v_ego):
+    base_desired_lateral_accel = desired_curvature * v_ego ** 2
+    desired_lateral_accel = base_desired_lateral_accel
+    desired_lateral_accel_magnitude = abs(base_desired_lateral_accel)
+
+    # Preview curvature error as heading and cross-track error. Fade this out
+    # for tight turns, where the model request should remain authoritative.
+    preview_distance = float(np.clip(CENTER_PREVIEW_A + CENTER_PREVIEW_B * v_ego, 4.0, 20.0))
+    curvature_error = desired_curvature - measured_curvature
+    heading_error = curvature_error * preview_distance
+    cross_track_error = 0.5 * curvature_error * preview_distance ** 2
+
+    tight_curve = abs(desired_curvature) * v_ego > 0.25
+    if desired_lateral_accel_magnitude < 2.5 and not tight_curve:
+      speed_scale = np.clip((v_ego - 3.0) / 4.0, 0.0, 1.0)
+      center_term = (K_Y * cross_track_error + K_PSI * v_ego * heading_error) * speed_scale
+      max_center = 0.40 * (desired_lateral_accel_magnitude + 0.5)
+      desired_lateral_accel += float(np.clip(center_term, -max_center, max_center))
+
+    # CUT applies symmetrically whenever measured curvature magnitude exceeds
+    # the request. Preserve the source behavior for opposite-sign curvature.
+    inside_excess = max(0.0, abs(measured_curvature) - abs(desired_curvature))
+    if inside_excess > 0.0:
+      cut_guard = -K_CUT * v_ego ** 2 * inside_excess * np.sign(desired_curvature)
+      max_cut_guard = 0.50 * (desired_lateral_accel_magnitude + 0.5)
+      desired_lateral_accel += float(np.clip(cut_guard, -max_cut_guard, max_cut_guard))
+
+    # Apex guard is directional and stacks with CUT only when both curvatures
+    # have the same nonzero sign and measured curvature is tighter.
+    same_sign = np.sign(desired_curvature) == np.sign(measured_curvature) and np.sign(desired_curvature) != 0.0
+    cutting_inside = same_sign and abs(measured_curvature) > abs(desired_curvature)
+    if cutting_inside:
+      inside_delta = abs(measured_curvature) - abs(desired_curvature)
+      apex_guard = -K_APEX * v_ego ** 2 * inside_delta * np.sign(desired_curvature)
+      max_apex_guard = 0.40 * (desired_lateral_accel_magnitude + 0.5)
+      desired_lateral_accel += float(np.clip(apex_guard, -max_apex_guard, max_apex_guard))
+
+    return float(desired_lateral_accel)
+
   def update(self, active, CS, VM, params, steer_limited_by_safety, desired_curvature, curvature_limited, lat_delay):
     pid_log = log.ControlsState.LateralTorqueState.new_message()
     pid_log.version = VERSION
     measured_curvature = -VM.calc_curvature(math.radians(CS.steeringAngleDeg - params.angleOffsetDeg), CS.vEgo, params.roll)
     measurement = measured_curvature * CS.vEgo ** 2
-    future_desired_lateral_accel = desired_curvature * CS.vEgo ** 2
+    future_desired_lateral_accel = self._shape_desired_lateral_accel(desired_curvature, measured_curvature, CS.vEgo)
     self.lat_accel_request_buffer.append(future_desired_lateral_accel)
 
     roll_compensation = params.roll * ACCELERATION_DUE_TO_GRAVITY
