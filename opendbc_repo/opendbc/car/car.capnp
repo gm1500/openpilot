@@ -489,6 +489,7 @@ struct CarParams {
   centerToFront @19 :Float32;   # [m] distance from center of mass to front axle
   steerRatio @20 :Float32;      # [] ratio of steering wheel angle to front wheel angle
   steerRatioRear @21 :Float32;  # [] ratio of steering wheel angle to rear wheel angle (usually 0)
+  wheelRadius @78 :Float32;
 
   # things we can derive
   rotationalInertia @22 :Float32;    # [kg*m2] body rotational inertia
