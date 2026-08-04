@@ -16,7 +16,7 @@ NetworkLocation = structs.CarParams.NetworkLocation
 NON_LINEAR_TORQUE_PARAMS = {
   CAR.CHEVROLET_BOLT_EUV: [2.6531724862969748, 1.0, 0.1919764879840985, 0.009054123646805178],
   CAR.GMC_ACADIA: [4.78003305, 1.0, 0.3122, 0.05591772],
-  CAR.CHEVROLET_SILVERADO: [3.29974374, 1.0, 0.25571356, 0.0465122]
+  CAR.CHEVROLET_SILVERADO: [3.8, 0.81, 0.24, 0.0465122]
 }
 
 
@@ -67,9 +67,13 @@ class CarInterface(CarInterfaceBase):
   def torque_from_lateral_accel(self) -> TorqueFromLateralAccelCallbackType:
     if self.CP.carFingerprint in NON_LINEAR_TORQUE_PARAMS:
       torque_values, lataccel_values = self.get_lataccel_torque_siglin()
+      offline_latAccelFactor = self.CP.lateralTuning.torque.latAccelFactor
 
       def torque_from_lateral_accel_siglin(lateral_acceleration: float, torque_params: structs.CarParams.LateralTorqueTuning):
-        return np.interp(lateral_acceleration, lataccel_values, torque_values)
+        # Scale the non-linear shape by the ratio of offline to learned latAccelFactor,
+        # so torqued's learned gain adjusts the curve magnitude while preserving the shape
+        scale = offline_latAccelFactor / float(torque_params.latAccelFactor)
+        return np.interp(lateral_acceleration, lataccel_values, torque_values) * scale
       return torque_from_lateral_accel_siglin
     else:
       return self.torque_from_lateral_accel_linear
@@ -77,9 +81,11 @@ class CarInterface(CarInterfaceBase):
   def lateral_accel_from_torque(self) -> LateralAccelFromTorqueCallbackType:
     if self.CP.carFingerprint in NON_LINEAR_TORQUE_PARAMS:
       torque_values, lataccel_values = self.get_lataccel_torque_siglin()
+      offline_latAccelFactor = self.CP.lateralTuning.torque.latAccelFactor
 
       def lateral_accel_from_torque_siglin(torque: float, torque_params: structs.CarParams.LateralTorqueTuning):
-        return np.interp(torque, torque_values, lataccel_values)
+        scale = offline_latAccelFactor / float(torque_params.latAccelFactor)
+        return np.interp(torque / scale, torque_values, lataccel_values)
       return lateral_accel_from_torque_siglin
     else:
       return self.lateral_accel_from_torque_linear
@@ -190,7 +196,13 @@ class CarInterface(CarInterfaceBase):
       # TODO: check if this is split by EV/ICE with more platforms in the future
       if ret.openpilotLongitudinalControl:
         ret.minEnableSpeed = -1.
+        ret.stopAccel = -0.37
+        ret.longitudinalActuatorDelay = 0.35
+        #ret.longitudinalTuning.kf = 1.05
+        ret.longitudinalTuning.kiV = [0.05, 0.05]
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
+      ret.steerActuatorDelay = 0.27
+      ret.minSteerSpeed = -1
 
     elif candidate == CAR.CHEVROLET_EQUINOX:
       CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
