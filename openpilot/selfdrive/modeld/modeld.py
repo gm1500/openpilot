@@ -50,14 +50,16 @@ BIG_MODEL_TIMEOUT = 60
 # substantial E2E/lane disagreement.
 LANE_LOCK_MIN_SPEED = 8.0             # m/s (about 29 km/h)
 LANE_LOCK_MIN_LINE_PROB = 0.92
-LANE_LOCK_MAX_WEIGHT = 0.85
+LANE_LOCK_MAX_WEIGHT = 0.75
 LANE_LOCK_MAX_PATH_DISAGREEMENT = 0.55 # m
 LANE_LOCK_MAX_WIDTH_CHANGE = 0.45      # m across fitted horizon
 LANE_LOCK_MAX_CURVATURE_DELTA = 0.0015 # 1/m
+LANE_LOCK_MAX_LANE_CHANGE_PROB = 0.10
 LANE_LOCK_ENGAGE_TIME = 1.5            # seconds
 LANE_LOCK_RELEASE_TIME = 0.30          # seconds
 
 _lane_lock_weight = 0.0
+_lane_lock_correction = 0.0
 
 
 def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float) -> float:
@@ -67,7 +69,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
   with the E2E path. Small E2E in-lane offsets are corrected; a substantial
   disagreement releases lane lock rather than forcing a questionable line.
   """
-  global _lane_lock_weight
+  global _lane_lock_weight, _lane_lock_correction
   target_weight = 0.0
   curvature_delta = 0.0
 
@@ -78,7 +80,10 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
       right_y = model_output['lane_lines'][0, 2, :, 0].astype(np.float64)
       left_prob = float(model_output['lane_lines_prob'][0, 1])
       right_prob = float(model_output['lane_lines_prob'][0, 2])
+      desire_state = model_output['desire_state'][0]
+      lane_change_prob = float(desire_state[log.Desire.laneChangeLeft] + desire_state[log.Desire.laneChangeRight])
       x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
+      lookahead = float(np.clip(1.5 * v_ego, 12.0, 30.0))
 
       # Ignore very-near and distant predictions; fit the usable road ahead.
       fit = (x >= 5.0) & (x <= 35.0)
@@ -88,6 +93,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
       good_lines = (
         left_prob >= LANE_LOCK_MIN_LINE_PROB and
         right_prob >= LANE_LOCK_MIN_LINE_PROB and
+        lane_change_prob <= LANE_LOCK_MAX_LANE_CHANGE_PROB and
         np.all(np.isfinite(left_y[fit])) and
         np.all(np.isfinite(right_y[fit])) and
         np.all((lane_width[fit] >= 2.9) & (lane_width[fit] <= 4.5)) and
@@ -98,7 +104,6 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
         # Quadratic lane-center fit: y = ax^2 + bx + c.
         # c is lateral offset, b is heading error, and 2a is road curvature.
         a, b, c = np.polyfit(x[fit], center_y[fit], 2)
-        lookahead = float(np.clip(1.5 * v_ego, 12.0, 30.0))
         slope = 2.0 * a * lookahead + b
         lane_geometry_curvature = 2.0 * a / ((1.0 + slope * slope) ** 1.5)
 
@@ -112,16 +117,25 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
         # Do not override a substantial E2E deviation: it can indicate a
         # merge, construction markings, an obstacle, or an intended maneuver.
         plan = model_output['plan'][0, :, Plan.POSITION]
-        e2e_y_at_lookahead = float(np.interp(lookahead, plan[:, 0], plan[:, 1]))
-        lane_y_at_lookahead = float(np.polyval((a, b, c), lookahead))
+        plan_x, plan_y = plan[:, 0], plan[:, 1]
+        plan_horizon = (plan_x >= 0.0) & (plan_x <= lookahead + 5.0)
+        valid_plan = (
+          np.all(np.isfinite(plan[plan_horizon])) and
+          np.count_nonzero(plan_horizon) >= 2 and
+          plan_x[0] <= lookahead <= plan_x[-1] and
+          np.all(np.diff(plan_x[plan_horizon]) > 0.0)
+        )
 
-        if abs(e2e_y_at_lookahead - lane_y_at_lookahead) <= LANE_LOCK_MAX_PATH_DISAGREEMENT:
-          target_weight = LANE_LOCK_MAX_WEIGHT
-          curvature_delta = float(np.clip(
-            lane_curvature - e2e_curvature,
-            -LANE_LOCK_MAX_CURVATURE_DELTA,
-            LANE_LOCK_MAX_CURVATURE_DELTA,
-          ))
+        if valid_plan and np.isfinite(lane_curvature):
+          e2e_y_at_lookahead = float(np.interp(lookahead, plan_x, plan_y))
+          lane_y_at_lookahead = float(np.polyval((a, b, c), lookahead))
+          if abs(e2e_y_at_lookahead - lane_y_at_lookahead) <= LANE_LOCK_MAX_PATH_DISAGREEMENT:
+            target_weight = LANE_LOCK_MAX_WEIGHT
+            curvature_delta = float(np.clip(
+              lane_curvature - e2e_curvature,
+              -LANE_LOCK_MAX_CURVATURE_DELTA,
+              LANE_LOCK_MAX_CURVATURE_DELTA,
+            ))
   except (KeyError, IndexError, TypeError, ValueError, np.linalg.LinAlgError):
     target_weight = 0.0
     curvature_delta = 0.0
@@ -131,8 +145,10 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
   time_constant = LANE_LOCK_ENGAGE_TIME if target_weight > _lane_lock_weight else LANE_LOCK_RELEASE_TIME
   _lane_lock_weight += (target_weight - _lane_lock_weight) * DT_MDL / time_constant
   _lane_lock_weight = float(np.clip(_lane_lock_weight, 0.0, LANE_LOCK_MAX_WEIGHT))
+  target_correction = target_weight * curvature_delta
+  _lane_lock_correction += (target_correction - _lane_lock_correction) * DT_MDL / time_constant
 
-  return float(e2e_curvature + _lane_lock_weight * curvature_delta)
+  return float(e2e_curvature + _lane_lock_correction)
 
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
