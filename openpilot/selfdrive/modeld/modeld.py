@@ -45,11 +45,11 @@ MIN_LAT_CONTROL_SPEED = 0.3
 BIG_MODEL_TIMEOUT = 60
 
 
-# Optional raw-LKA-button lane-policy toggle.
+# Optional raw-LKA-button lane-policy selector.
 # The policy stays completely inactive unless EnableLkasLanePolicyToggle is set.
-# When armed, a rising edge from the raw LKA button toggles a session-local
-# full-lane mode. This intentionally does not claim that the raw signal is a
-# persistent OEM LKAS setting.
+# When armed, the raw LKA button state directly selects full-lane mode. This
+# intentionally does not claim that the raw signal is a persistent OEM LKAS
+# setting; a missing or released signal always returns to stock E2E.
 LANE_POLICY_ENABLE_PARAM = "EnableLkasLanePolicyToggle"
 LANE_LOCK_ENTER_LINE_PROB = 0.92                # both inner lines to engage
 LANE_LOCK_HOLD_LINE_PROB = 0.85                 # both inner lines to remain active
@@ -113,8 +113,8 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
                     blinkers_active: bool = False, lane_policy_enabled: bool = False) -> float:
   """Apply full lane-center authority only after all lane-quality gates pass.
 
-  The disabled state is exact upstream E2E. With the opt-in session mode on,
-  lane midpoint curvature is used only for high-confidence, stable geometry.
+  The disabled state is exact upstream E2E. With the opt-in raw-button state
+  on, lane midpoint curvature is used only for high-confidence, stable geometry.
   Weak lines, blinkers, lane-change intent, invalid geometry, unavailable
   path data, and extreme path disagreement all return control to E2E.
   """
@@ -524,7 +524,7 @@ def main(demo=False):
   DH = DesireHelper()
   lane_policy_opt_in = params.get_bool(LANE_POLICY_ENABLE_PARAM)
   lane_policy_enabled = False
-  previous_lka_button_pressed = False
+  previous_lane_policy_enabled = False
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -633,16 +633,12 @@ def main(demo=False):
         lane_policy_opt_in = params.get_bool(LANE_POLICY_ENABLE_PARAM)
 
       # Raw button source only: no inferred OEM LKAS/HUD state is used here.
-      lka_button_pressed = bool(sm['carState'].lkaButtonPressed)
-      if not lane_policy_opt_in:
-        if lane_policy_enabled:
-          cloudlog.info("lkas-lp-toggle: custom lane policy disarmed by parameter")
-        lane_policy_enabled = False
-      elif lka_button_pressed and not previous_lka_button_pressed:
-        lane_policy_enabled = not lane_policy_enabled
-        cloudlog.info("lkas-lp-toggle: raw LKA button toggle -> custom lane policy %s",
+      raw_lka_button_state = bool(sm['carState'].lkaButtonPressed)
+      lane_policy_enabled = lane_policy_opt_in and raw_lka_button_state
+      if lane_policy_enabled != previous_lane_policy_enabled:
+        cloudlog.info("lkas-lp-toggle: raw LKA button state -> custom lane policy %s",
                       "on" if lane_policy_enabled else "off")
-      previous_lka_button_pressed = lka_button_pressed
+      previous_lane_policy_enabled = lane_policy_enabled
 
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
                                      blinkers_active, lane_policy_enabled)
