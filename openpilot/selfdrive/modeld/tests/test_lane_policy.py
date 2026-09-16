@@ -57,3 +57,35 @@ class TestLanePolicy(unittest.TestCase):
     invalid = make_model_output(lane_width=2.0)
     modeld.apply_lane_lock(invalid, 0.0, 20.0, lane_policy_enabled=True)
     self.assertFalse(modeld._lane_lock_full_active)
+
+  def test_blinker_releases_lane_lock(self):
+    output = make_model_output()
+    modeld.apply_lane_lock(output, 0.0, 20.0, lane_policy_enabled=True)
+    self.assertTrue(modeld._lane_lock_full_active)
+    self.assertEqual(modeld.apply_lane_lock(output, 0.0123, 20.0, blinkers_active=True, lane_policy_enabled=True), 0.0123)
+    self.assertFalse(modeld._lane_lock_full_active)
+
+  def test_confidence_hysteresis(self):
+    modeld.apply_lane_lock(make_model_output(), 0.0, 20.0, lane_policy_enabled=True)
+    self.assertTrue(modeld._lane_lock_full_active)
+    modeld.apply_lane_lock(make_model_output(0.86, 0.86), 0.0, 20.0, lane_policy_enabled=True)
+    self.assertTrue(modeld._lane_lock_full_active)
+    modeld.apply_lane_lock(make_model_output(0.84, 0.84), 0.0, 20.0, lane_policy_enabled=True)
+    self.assertFalse(modeld._lane_lock_full_active)
+
+  def test_lane_target_ramps_in(self):
+    modeld.apply_lane_lock(make_model_output(), 0.0, 20.0, lane_policy_enabled=True)
+    self.assertGreater(modeld._lane_lock_weight, 0.0)
+    self.assertLess(modeld._lane_lock_weight, 1.0)
+
+  def test_selector_requires_new_latch_after_opt_in(self):
+    enabled, previous = modeld.update_lane_policy_selector(False, None, True, True)
+    self.assertEqual((enabled, previous), (False, True))
+    enabled, previous = modeld.update_lane_policy_selector(enabled, previous, True, True)
+    self.assertFalse(enabled)
+    enabled, previous = modeld.update_lane_policy_selector(enabled, previous, True, False)
+    self.assertTrue(enabled)
+    enabled, previous = modeld.update_lane_policy_selector(enabled, previous, False, False)
+    self.assertEqual((enabled, previous), (False, False))
+    enabled, previous = modeld.update_lane_policy_selector(enabled, previous, True, False)
+    self.assertFalse(enabled)
