@@ -119,9 +119,10 @@ class HudRenderer(Widget):
 
     self._draw_current_speed(rect)
 
-    lane_button_width, lane_button_height = 280, 76
+    lane_button_width, lane_button_height = 320, 86
     lane_button_x = rect.x + rect.width / 2 - lane_button_width / 2
-    self._lane_policy_button.render(rl.Rectangle(lane_button_x, rect.y + 22, lane_button_width, lane_button_height))
+    lane_button_y = min(rect.y + rect.height * 0.68, rect.y + rect.height - 330)
+    self._lane_policy_button.render(rl.Rectangle(lane_button_x, lane_button_y, lane_button_width, lane_button_height))
 
     button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
     button_y = rect.y + UI_CONFIG.border_size

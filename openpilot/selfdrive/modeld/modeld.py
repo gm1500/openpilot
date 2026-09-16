@@ -56,6 +56,7 @@ LANE_LOCK_MAX_LANE_WIDTH = 4.7                  # m
 LANE_LOCK_MIN_WIDTH_EDGE = 0.15                 # m inside accepted range
 LANE_LOCK_MAX_WIDTH_CHANGE = 0.18               # m across fitted horizon
 LANE_LOCK_MAX_PATH_DISAGREEMENT = 0.75          # m, extreme safety release
+LANE_LOCK_MAX_CURVATURE_DELTA = 0.0015            # 1/m, safety release
 LANE_LOCK_ENGAGE_TIME = 0.50                    # seconds
 LANE_LOCK_RELEASE_TIME = 0.15                   # seconds
 LANE_LOCK_CURVATURE_TIME = 0.25                 # seconds
@@ -211,6 +212,10 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
           if path_disagreement > LANE_LOCK_MAX_PATH_DISAGREEMENT:
             reset_lane_lock()
             log_lane_lock_mode("stock-e2e fallback: extreme path disagreement")
+            return float(e2e_curvature)
+          if abs(lane_curvature - e2e_curvature) > LANE_LOCK_MAX_CURVATURE_DELTA:
+            reset_lane_lock()
+            log_lane_lock_mode("stock-e2e fallback: curvature disagreement")
             return float(e2e_curvature)
 
           _lane_lock_full_active = True
@@ -519,6 +524,8 @@ def main(demo=False):
 
   DH = DesireHelper()
   lane_policy_enabled = params.get_bool(LANE_POLICY_ENABLED_PARAM)
+  last_published_lane_policy_active: bool | None = None
+  params.put_bool("LanePolicyActive", False)
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -627,6 +634,10 @@ def main(demo=False):
         lane_policy_enabled = params.get_bool(LANE_POLICY_ENABLED_PARAM)
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
                                      blinkers_active, lane_policy_enabled)
+      lane_policy_active = lane_policy_enabled and _lane_lock_full_active
+      if lane_policy_active != last_published_lane_policy_active:
+        params.put_bool("LanePolicyActive", lane_policy_active)
+        last_published_lane_policy_active = lane_policy_active
       prev_action = action
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,

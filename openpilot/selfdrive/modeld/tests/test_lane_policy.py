@@ -6,16 +6,18 @@ from openpilot.selfdrive.modeld import modeld
 from openpilot.selfdrive.modeld.constants import ModelConstants
 
 
-def make_model_output(left_prob: float = 0.99, right_prob: float = 0.99, lane_width: float = 3.6) -> dict[str, np.ndarray]:
+def make_model_output(left_prob: float = 0.99, right_prob: float = 0.99, lane_width: float = 3.6,
+                      lane_center: float = 0.0, plan_y: float = 0.0) -> dict[str, np.ndarray]:
   x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
   lane_lines = np.zeros((1, 4, len(x), 2), dtype=np.float64)
-  lane_lines[0, 1, :, 0] = lane_width / 2.0
-  lane_lines[0, 2, :, 0] = -lane_width / 2.0
+  lane_lines[0, 1, :, 0] = lane_center + lane_width / 2.0
+  lane_lines[0, 2, :, 0] = lane_center - lane_width / 2.0
   lane_line_probs = np.zeros((1, 8), dtype=np.float64)
   lane_line_probs[0, 3] = left_prob
   lane_line_probs[0, 5] = right_prob
   plan = np.zeros((1, len(x), ModelConstants.PLAN_WIDTH), dtype=np.float64)
   plan[0, :, 0] = x
+  plan[0, :, 1] = plan_y
   return {'lane_lines': lane_lines, 'lane_lines_prob': lane_line_probs,
           'desire_state': np.zeros((1, ModelConstants.DESIRE_LEN), dtype=np.float64), 'plan': plan}
 
@@ -47,4 +49,19 @@ class TestLanePolicy(unittest.TestCase):
     modeld.apply_lane_lock(make_model_output(0.86, 0.86), 0.0, 20.0, lane_policy_enabled=True)
     self.assertTrue(modeld._lane_lock_full_active)
     modeld.apply_lane_lock(make_model_output(0.84, 0.84), 0.0, 20.0, lane_policy_enabled=True)
+    self.assertFalse(modeld._lane_lock_full_active)
+
+  def test_lane_midpoint_changes_curvature(self):
+    curvature = modeld.apply_lane_lock(make_model_output(lane_center=0.5), 0.0, 20.0, lane_policy_enabled=True)
+    self.assertTrue(modeld._lane_lock_full_active)
+    self.assertGreater(curvature, 0.0)
+
+  def test_extreme_path_disagreement_releases_lane_lock(self):
+    curvature = modeld.apply_lane_lock(make_model_output(plan_y=1.0), 0.0123, 20.0, lane_policy_enabled=True)
+    self.assertEqual(curvature, 0.0123)
+    self.assertFalse(modeld._lane_lock_full_active)
+
+  def test_curvature_disagreement_releases_lane_lock(self):
+    curvature = modeld.apply_lane_lock(make_model_output(lane_center=0.5), -0.01, 20.0, lane_policy_enabled=True)
+    self.assertEqual(curvature, -0.01)
     self.assertFalse(modeld._lane_lock_full_active)
