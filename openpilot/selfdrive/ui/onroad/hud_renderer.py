@@ -93,7 +93,7 @@ class HudRenderer(Widget):
     self.is_cruise_set = 0 < self.set_speed < SET_SPEED_NA
     self.is_cruise_available = self.set_speed != -1
     self.lane_policy_opt_in = ui_state.lane_policy_opt_in
-    self.lane_policy_armed = self.lane_policy_opt_in and bool(car_state.lkaButtonLatched)
+    self.lane_policy_selected = self.lane_policy_opt_in and ui_state.lane_policy_selected
 
     if self.is_cruise_set and not ui_state.is_metric:
       self.set_speed *= KM_TO_MILE
@@ -173,12 +173,12 @@ class HudRenderer(Widget):
     )
 
   def _draw_lane_policy_indicator(self, rect: rl.Rectangle) -> None:
-    """Show the custom selector state independently of the OEM LKAS icon."""
+    """Show the selected custom mode, never an instantaneous midpoint-lock claim."""
     if not self.lane_policy_opt_in:
       return
 
-    text = "LANE: ARMED" if self.lane_policy_armed else "LANE: E2E"
-    color = COLORS.ENGAGED if self.lane_policy_armed else COLORS.GREY
+    text = "LANE: SELECTED" if self.lane_policy_selected else "LANE: E2E"
+    color = COLORS.ENGAGED if self.lane_policy_selected else COLORS.GREY
     text_size = measure_text_cached(self._font_semi_bold, text, 30)
     tag_rect = rl.Rectangle(rect.x + rect.width / 2 - text_size.x / 2 - 18, rect.y + 16,
                             text_size.x + 36, text_size.y + 14)
