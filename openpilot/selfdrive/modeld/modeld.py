@@ -45,14 +45,14 @@ MIN_LAT_CONTROL_SPEED = 0.3
 BIG_MODEL_TIMEOUT = 60
 
 
-# LKAS lane-policy toggle.
-# LKAS off leaves upstream E2E untouched. LKAS on gives a clean, stable pair
-# of lane lines full midpoint authority; fading confidence returns to E2E.
-# This is deliberately an A/B switch, not a blend, so its effect is testable.
-# No speed gate: LKAS-on lane mode remains eligible through stop-and-go traffic.
-# At crawl speeds the lookahead below is still bounded to a stable 12 m.
-LANE_LOCK_ENTER_LINE_PROB = 0.92                # both lines to engage
-LANE_LOCK_HOLD_LINE_PROB = 0.85                 # both lines to remain active
+# Optional raw-LKA-button lane-policy toggle.
+# The policy stays completely inactive unless EnableLkasLanePolicyToggle is set.
+# When armed, a rising edge from the raw LKA button toggles a session-local
+# full-lane mode. This intentionally does not claim that the raw signal is a
+# persistent OEM LKAS setting.
+LANE_POLICY_ENABLE_PARAM = "EnableLkasLanePolicyToggle"
+LANE_LOCK_ENTER_LINE_PROB = 0.92                # both inner lines to engage
+LANE_LOCK_HOLD_LINE_PROB = 0.85                 # both inner lines to remain active
 LANE_LOCK_MIN_LANE_WIDTH = 2.8                  # m
 LANE_LOCK_MAX_LANE_WIDTH = 4.7                  # m
 LANE_LOCK_MIN_WIDTH_EDGE = 0.15                 # m inside accepted range
@@ -69,7 +69,8 @@ _lane_lock_lane_curvature = 0.0
 _lane_lock_has_lane_curvature = False
 _lane_lock_full_active = False
 _lane_lock_error_logged = False
-_lane_lock_mode = None
+_lane_lock_current_mode = None
+_lane_lock_last_logged_mode = None
 _lane_lock_last_log_time = 0.0
 
 
@@ -84,25 +85,38 @@ def reset_lane_lock() -> None:
 
 
 def log_lane_lock_mode(mode: str) -> None:
-  """Log mode transitions at a bounded rate for later rlog validation."""
-  global _lane_lock_mode, _lane_lock_last_log_time
+  """Log a stable mode transition at a bounded rate for rlog validation."""
+  global _lane_lock_current_mode, _lane_lock_last_logged_mode, _lane_lock_last_log_time
   now = time.monotonic()
-  if mode != _lane_lock_mode and now - _lane_lock_last_log_time >= LANE_LOCK_LOG_INTERVAL:
+  if mode != _lane_lock_current_mode:
+    _lane_lock_current_mode = mode
+  if mode != _lane_lock_last_logged_mode and now - _lane_lock_last_log_time >= LANE_LOCK_LOG_INTERVAL:
     cloudlog.info(f"lkas-lp-toggle: {mode}")
-    _lane_lock_mode = mode
+    _lane_lock_last_logged_mode = mode
     _lane_lock_last_log_time = now
+
+
+def get_inner_lane_line_probs(model_output: dict[str, np.ndarray]) -> tuple[float, float]:
+  """Return raw-model probabilities for the two inner lane lines.
+
+  The raw model layout has eight entries. The four lane-line probabilities are
+  at odd indices, so the inner left/right lines are [3] and [5]. Rejecting
+  another shape prevents silently using a stale or incompatible model layout.
+  """
+  lane_line_probs = np.asarray(model_output['lane_lines_prob'])
+  if lane_line_probs.shape != (1, 8):
+    raise ValueError(f"expected lane_lines_prob shape (1, 8), got {lane_line_probs.shape}")
+  return float(lane_line_probs[0, 3]), float(lane_line_probs[0, 5])
 
 
 def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
                     blinkers_active: bool = False, lane_policy_enabled: bool = False) -> float:
-  """
-  With LKAS off, return the exact upstream E2E curvature and clear all state.
+  """Apply full lane-center authority only after all lane-quality gates pass.
 
-  With LKAS on, use the fitted midpoint of the two inner lane lines only after
-  a high-confidence, stable-geometry gate passes. That full-lane target is
-  filtered into place, rather than permanently clamped toward E2E. Weak lines
-  release smoothly; blinkers, lane-change intent, and extreme disagreement
-  release immediately to upstream E2E.
+  The disabled state is exact upstream E2E. With the opt-in session mode on,
+  lane midpoint curvature is used only for high-confidence, stable geometry.
+  Weak lines, blinkers, lane-change intent, invalid geometry, unavailable
+  path data, and extreme path disagreement all return control to E2E.
   """
   global _lane_lock_weight, _lane_lock_lane_curvature
   global _lane_lock_has_lane_curvature, _lane_lock_full_active
@@ -110,7 +124,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
 
   if not lane_policy_enabled:
     reset_lane_lock()
-    log_lane_lock_mode("stock-e2e (LKAS off)")
+    log_lane_lock_mode("stock-e2e (lane toggle off)")
     return float(e2e_curvature)
 
   if blinkers_active:
@@ -123,10 +137,11 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
   fallback_reason = "stock-e2e fallback: lane data unavailable"
 
   try:
+    # Lane-line axes are [batch, lane, distance, coordinate]. Inner lanes are
+    # lane 1 (left) and lane 2 (right); their raw confidences are [3] and [5].
     left_y = model_output['lane_lines'][0, 1, :, 0].astype(np.float64)
     right_y = model_output['lane_lines'][0, 2, :, 0].astype(np.float64)
-    left_prob = float(model_output['lane_lines_prob'][0, 1])
-    right_prob = float(model_output['lane_lines_prob'][0, 2])
+    left_prob, right_prob = get_inner_lane_line_probs(model_output)
     desire_state = model_output['desire_state'][0]
     lane_change_prob = float(desire_state[log.Desire.laneChangeLeft] +
                              desire_state[log.Desire.laneChangeRight])
@@ -150,6 +165,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     )
 
     if not valid_lane_geometry:
+      _lane_lock_full_active = False
       fallback_reason = "stock-e2e fallback: lane geometry"
     else:
       mean_width = float(np.mean(lane_width[fit]))
@@ -171,8 +187,8 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
         else:
           fallback_reason = "stock-e2e fallback: lane-width stability"
       else:
-        # y = ax^2 + bx + c. The curvature includes center offset and
-        # heading, so it actively converges the vehicle to lane midpoint.
+        # y = ax^2 + bx + c. Curvature includes midpoint offset and heading,
+        # so it actively converges the vehicle to the lane midpoint.
         a, b, c = np.polyfit(x[fit], 0.5 * (left_y[fit] + right_y[fit]), 2)
         slope = 2.0 * a * lookahead + b
         lane_geometry_curvature = 2.0 * a / ((1.0 + slope * slope) ** 1.5)
@@ -221,7 +237,6 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
   if candidate_lane_curvature is not None:
     if not _lane_lock_has_lane_curvature:
       # Start from the current E2E command, then filter toward lane center.
-      # This is a transition limiter, not a permanent cap on lane authority.
       _lane_lock_lane_curvature = float(e2e_curvature)
       _lane_lock_has_lane_curvature = True
     alpha = min(DT_MDL / LANE_LOCK_CURVATURE_TIME, 1.0)
@@ -235,11 +250,10 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     return float(e2e_curvature)
 
   if candidate_lane_curvature is not None:
-    log_lane_lock_mode("full-lane midpoint (LKAS on)")
+    log_lane_lock_mode("full-lane midpoint (lane toggle on)")
   else:
     log_lane_lock_mode(fallback_reason)
   return float(e2e_curvature + _lane_lock_weight * (_lane_lock_lane_curvature - e2e_curvature))
-
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                           lat_action_t: float, long_action_t: float, v_ego: float,
@@ -508,6 +522,9 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
+  lane_policy_opt_in = params.get_bool(LANE_POLICY_ENABLE_PARAM)
+  lane_policy_enabled = False
+  previous_lka_button_pressed = False
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -612,7 +629,21 @@ def main(demo=False):
       posenet_send = messaging.new_message('cameraOdometry')
 
       blinkers_active = sm['carState'].leftBlinker or sm['carState'].rightBlinker
-      lane_policy_enabled = bool(sm['carState'].lkasEnabled)
+      if run_count % ModelConstants.MODEL_RUN_FREQ == 0:
+        lane_policy_opt_in = params.get_bool(LANE_POLICY_ENABLE_PARAM)
+
+      # Raw button source only: no inferred OEM LKAS/HUD state is used here.
+      lka_button_pressed = bool(sm['carState'].lkaButtonPressed)
+      if not lane_policy_opt_in:
+        if lane_policy_enabled:
+          cloudlog.info("lkas-lp-toggle: custom lane policy disarmed by parameter")
+        lane_policy_enabled = False
+      elif lka_button_pressed and not previous_lka_button_pressed:
+        lane_policy_enabled = not lane_policy_enabled
+        cloudlog.info("lkas-lp-toggle: raw LKA button toggle -> custom lane policy %s",
+                      "on" if lane_policy_enabled else "off")
+      previous_lka_button_pressed = lka_button_pressed
+
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
                                      blinkers_active, lane_policy_enabled)
       prev_action = action
