@@ -45,19 +45,33 @@ MIN_LAT_CONTROL_SPEED = 0.3
 BIG_MODEL_TIMEOUT = 60
 
 
-# Conservative lane-lock policy. On clean, stable markings it corrects ordinary
-# E2E in-lane hugging, while releasing for questionable geometry or a substantial
-# E2E/lane disagreement. It remains a one-file change: no extra daemon or param.
-LANE_LOCK_MIN_SPEED = 8.0              # m/s (about 29 km/h)
-LANE_LOCK_MIN_LINE_PROB = 0.92
-LANE_LOCK_MAX_WEIGHT = 0.75
-LANE_LOCK_MAX_PATH_DISAGREEMENT = 0.40 # m
-LANE_LOCK_MAX_WIDTH_CHANGE = 0.45      # m across fitted horizon
-LANE_LOCK_MAX_CURVATURE_DELTA = 0.0015 # 1/m
+# Confidence-weighted lane-lock policy. When both lane lines are clean, a
+# plausible width apart, and stable, it strongly biases the target to lane
+# center. Each quality metric fades the bias rather than abruptly toggling it.
+# When the vehicle's LKAS state is on, strict mode uses lane center directly
+# under high-quality conditions. Blinker, lane-change, invalid-geometry,
+# large-plan-disagreement, and curvature-delta gates still return control to E2E.
+LANE_LOCK_MIN_SPEED = 8.0                       # m/s (about 29 km/h)
+LANE_LOCK_MIN_LINE_PROB = 0.85                  # begin blending
+LANE_LOCK_FULL_LINE_PROB = 0.98                 # full line-confidence credit
+LANE_LOCK_MAX_WEIGHT = 0.95                     # normal V4 lane-center bias
+LANE_LOCK_STRICT_WEIGHT = 1.00                  # LKAS-on, direct lane-center target
+LANE_LOCK_STRICT_MIN_LINE_PROB = 0.95           # both lines must be genuinely clear
+LANE_LOCK_STRICT_MIN_WIDTH_EDGE = 0.15          # m inside the accepted width range
+LANE_LOCK_STRICT_MAX_WIDTH_CHANGE = 0.18        # m over the fitted horizon
+LANE_LOCK_STRICT_MAX_PATH_DISAGREEMENT = 0.30   # m, protect merges/obstacles
+LANE_LOCK_MIN_LANE_WIDTH = 2.8                  # m
+LANE_LOCK_MAX_LANE_WIDTH = 4.7                  # m
+LANE_LOCK_WIDTH_MARGIN = 0.30                   # m from an edge for full credit
+LANE_LOCK_STABLE_WIDTH_CHANGE = 0.10            # m across fitted horizon
+LANE_LOCK_MAX_WIDTH_CHANGE = 0.45               # m across fitted horizon
+LANE_LOCK_FULL_PATH_DISAGREEMENT = 0.18         # m, no E2E-disagreement penalty
+LANE_LOCK_MAX_PATH_DISAGREEMENT = 0.55          # m, fully return to E2E
+LANE_LOCK_MAX_CURVATURE_DELTA = 0.0015          # 1/m
 LANE_LOCK_MAX_LANE_CHANGE_PROB = 0.10
-LANE_LOCK_ENGAGE_TIME = 1.5            # seconds
-LANE_LOCK_RELEASE_TIME = 0.30          # seconds
-LANE_LOCK_CURVATURE_TIME = 0.25        # seconds
+LANE_LOCK_ENGAGE_TIME = 0.75                    # seconds
+LANE_LOCK_RELEASE_TIME = 0.25                   # seconds
+LANE_LOCK_CURVATURE_TIME = 0.25                 # seconds
 
 _lane_lock_weight = 0.0
 _lane_lock_lane_curvature = 0.0
@@ -65,24 +79,39 @@ _lane_lock_has_lane_curvature = False
 _lane_lock_error_logged = False
 
 
+def lane_lock_ramp(value: float, start: float, full: float) -> float:
+  """Return 0 at/below start, 1 at/above full, and a linear blend between."""
+  return float(np.clip((value - start) / (full - start), 0.0, 1.0))
+
+
 def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
-                    blinkers_active: bool = False) -> float:
+                    blinkers_active: bool = False, strict_lane_centering: bool = False) -> float:
   """
-  Build a lane-center curvature target using the old lane-policy idea:
-  require both inner lane lines, plausible/stable lane width, and agreement
-  with the E2E path. When active, blend the current E2E target directly with
-  a short-filtered lane target, so high-frequency E2E volatility is attenuated
-  instead of passing through an old filtered correction unchanged.
+  Blend current E2E curvature toward a lane-center curvature using continuous
+  line-confidence, width, width-stability, and path-agreement scores. Strong,
+  stable lines produce a 95% lane-center bias; fading quality smoothly releases
+  the policy back to E2E instead of causing a binary lane-line switch. With
+  LKAS on, a high-confidence, stable, E2E-agreeing lane gets a 100% lane-center
+  target. The curvature-delta safety limit remains active.
   """
   global _lane_lock_weight, _lane_lock_lane_curvature
   global _lane_lock_has_lane_curvature, _lane_lock_error_logged
   target_weight = 0.0
   candidate_lane_curvature = None
 
+  # A physical turn signal represents an explicit maneuver request. Do not
+  # retain even the short normal release tail in that case; go back to the
+  # current E2E target immediately. Fading line quality still uses the normal
+  # filtered release below, which avoids a twitchy binary lane-line switch.
+  if blinkers_active:
+    _lane_lock_weight = 0.0
+    _lane_lock_has_lane_curvature = False
+    return float(e2e_curvature)
+
   try:
     # A real turn signal is a hard gate. Model lane-change intent is retained
     # as a second gate because a planned change may precede a physical signal.
-    if v_ego >= LANE_LOCK_MIN_SPEED and not blinkers_active:
+    if v_ego >= LANE_LOCK_MIN_SPEED:
       # Inner lines: index 1 is left, index 2 is right.
       left_y = model_output['lane_lines'][0, 1, :, 0].astype(np.float64)
       right_y = model_output['lane_lines'][0, 2, :, 0].astype(np.float64)
@@ -90,6 +119,10 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
       right_prob = float(model_output['lane_lines_prob'][0, 2])
       desire_state = model_output['desire_state'][0]
       lane_change_prob = float(desire_state[log.Desire.laneChangeLeft] + desire_state[log.Desire.laneChangeRight])
+      if lane_change_prob > LANE_LOCK_MAX_LANE_CHANGE_PROB:
+        _lane_lock_weight = 0.0
+        _lane_lock_has_lane_curvature = False
+        return float(e2e_curvature)
       x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
       lookahead = float(np.clip(1.5 * v_ego, 12.0, 30.0))
 
@@ -97,18 +130,26 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
       fit = (x >= 5.0) & (x <= 35.0)
       lane_width = left_y - right_y
       center_y = 0.5 * (left_y + right_y)
-      good_lines = (
+      valid_lane_geometry = (
         np.count_nonzero(fit) >= 3 and
-        left_prob >= LANE_LOCK_MIN_LINE_PROB and
-        right_prob >= LANE_LOCK_MIN_LINE_PROB and
-        lane_change_prob <= LANE_LOCK_MAX_LANE_CHANGE_PROB and
+        np.isfinite(left_prob) and
+        np.isfinite(right_prob) and
         np.all(np.isfinite(left_y[fit])) and
         np.all(np.isfinite(right_y[fit])) and
-        np.all((lane_width[fit] >= 2.9) & (lane_width[fit] <= 4.5)) and
-        np.ptp(lane_width[fit]) <= LANE_LOCK_MAX_WIDTH_CHANGE
+        np.all((lane_width[fit] >= LANE_LOCK_MIN_LANE_WIDTH) &
+               (lane_width[fit] <= LANE_LOCK_MAX_LANE_WIDTH))
       )
 
-      if good_lines:
+      if valid_lane_geometry:
+        mean_width = float(np.mean(lane_width[fit]))
+        width_change = float(np.ptp(lane_width[fit]))
+        line_score = lane_lock_ramp(min(left_prob, right_prob), LANE_LOCK_MIN_LINE_PROB, LANE_LOCK_FULL_LINE_PROB)
+        width_edge_distance = min(mean_width - LANE_LOCK_MIN_LANE_WIDTH, LANE_LOCK_MAX_LANE_WIDTH - mean_width)
+        width_score = lane_lock_ramp(width_edge_distance, 0.0, LANE_LOCK_WIDTH_MARGIN)
+        width_stability_score = 1.0 - lane_lock_ramp(
+          width_change, LANE_LOCK_STABLE_WIDTH_CHANGE, LANE_LOCK_MAX_WIDTH_CHANGE,
+        )
+
         # Quadratic lane-center fit: y = ax^2 + bx + c.
         # c is lateral offset, b is heading error, and 2a is road curvature.
         a, b, c = np.polyfit(x[fit], center_y[fit], 2)
@@ -140,21 +181,33 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
         if valid_plan and np.isfinite(lane_curvature):
           e2e_y_at_lookahead = float(np.interp(lookahead, horizon_x, horizon_y))
           lane_y_at_lookahead = float(np.polyval((a, b, c), lookahead))
-          if abs(e2e_y_at_lookahead - lane_y_at_lookahead) <= LANE_LOCK_MAX_PATH_DISAGREEMENT:
+          path_disagreement = abs(e2e_y_at_lookahead - lane_y_at_lookahead)
+          path_agreement_score = 1.0 - lane_lock_ramp(
+            path_disagreement, LANE_LOCK_FULL_PATH_DISAGREEMENT, LANE_LOCK_MAX_PATH_DISAGREEMENT,
+          )
+          target_weight = LANE_LOCK_MAX_WEIGHT * line_score * width_score * width_stability_score * path_agreement_score
+          strict_lane_ready = (
+            min(left_prob, right_prob) >= LANE_LOCK_STRICT_MIN_LINE_PROB and
+            width_edge_distance >= LANE_LOCK_STRICT_MIN_WIDTH_EDGE and
+            width_change <= LANE_LOCK_STRICT_MAX_WIDTH_CHANGE and
+            path_disagreement <= LANE_LOCK_STRICT_MAX_PATH_DISAGREEMENT
+          )
+          if strict_lane_centering and strict_lane_ready:
+            target_weight = LANE_LOCK_STRICT_WEIGHT
+          if target_weight > 0.0:
             candidate_lane_curvature = float(lane_curvature)
-            target_weight = LANE_LOCK_MAX_WEIGHT
             _lane_lock_error_logged = False
   except (KeyError, IndexError, TypeError, ValueError, FloatingPointError, np.linalg.LinAlgError) as err:
     if not _lane_lock_error_logged:
       cloudlog.warning(f"lane-lock policy input error: {type(err).__name__}: {err}")
       _lane_lock_error_logged = True
 
-  # Slow entry rejects one-frame detections; fast release gives E2E control
-  # back promptly when a line, geometry, plan-agreement, or lane-change gate
-  # stops meeting the strict conditions.
+  # The filtered weight follows the continuous confidence score. It enters more
+  # deliberately than it releases, avoiding a one-frame lane-line reaction but
+  # promptly returning to E2E as a line fades or a safety gate is active.
   time_constant = LANE_LOCK_ENGAGE_TIME if target_weight > _lane_lock_weight else LANE_LOCK_RELEASE_TIME
   _lane_lock_weight += (target_weight - _lane_lock_weight) * DT_MDL / time_constant
-  _lane_lock_weight = float(np.clip(_lane_lock_weight, 0.0, LANE_LOCK_MAX_WEIGHT))
+  _lane_lock_weight = float(np.clip(_lane_lock_weight, 0.0, LANE_LOCK_STRICT_WEIGHT))
 
   # Filter the lane target itself, then blend it with *current* E2E curvature.
   # This is intentionally different from filtering a correction: current E2E
@@ -182,7 +235,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                           lat_action_t: float, long_action_t: float, v_ego: float,
-                          blinkers_active: bool = False) -> log.ModelDataV2.Action:
+                          blinkers_active: bool = False, strict_lane_centering: bool = False) -> log.ModelDataV2.Action:
   if 'action' not in model_output:
     plan = model_output['plan'][0]
     desired_accel = get_accel_from_plan(plan[:,Plan.VELOCITY][:,0],
@@ -197,7 +250,7 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
   else:
     desired_accel = model_output['action'][0,1]
     desired_curvature = model_output['action'][0,0] / (max(1.0, v_ego))**2
-  desired_curvature = apply_lane_lock(model_output, desired_curvature, v_ego, blinkers_active)
+  desired_curvature = apply_lane_lock(model_output, desired_curvature, v_ego, blinkers_active, strict_lane_centering)
   stop = should_stop(v_ego, desired_accel)
   desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, LONG_SMOOTH_SECONDS)
   if v_ego > MIN_LAT_CONTROL_SPEED:
@@ -551,7 +604,9 @@ def main(demo=False):
       posenet_send = messaging.new_message('cameraOdometry')
 
       blinkers_active = sm['carState'].leftBlinker or sm['carState'].rightBlinker
-      action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego, blinkers_active)
+      strict_lane_centering = bool(sm['carState'].lkasEnabled)
+      action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
+                                     blinkers_active, strict_lane_centering)
       prev_action = action
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
