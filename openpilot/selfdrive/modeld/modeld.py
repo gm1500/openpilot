@@ -49,7 +49,7 @@ BIG_MODEL_TIMEOUT = 60
 # The policy stays completely inactive unless EnableLkasLanePolicyToggle is set.
 # lkaButtonPressed is a one-bit momentary input, not a claimed persistent OEM
 # LKAS state. When armed, its rising edge toggles a session-local full-lane
-# mode; disabling the parameter immediately returns the target to stock E2E.
+# mode; disabling the parameter returns the target to stock E2E on its next poll.
 LANE_POLICY_ENABLE_PARAM = "EnableLkasLanePolicyToggle"
 LANE_LOCK_ENTER_LINE_PROB = 0.92                # both inner lines to engage
 LANE_LOCK_HOLD_LINE_PROB = 0.85                 # both inner lines to remain active
