@@ -14,8 +14,9 @@ def make_model_output(left_prob: float = 0.99, right_prob: float = 0.99, lane_wi
   target_width = lane_width if lane_width_end is None else lane_width_end
   width_progress = np.clip((x - 5.0) / 30.0, 0.0, 1.0)
   widths = lane_width + (target_width - lane_width) * width_progress
-  lane_lines[0, 1, :, 0] = lane_center + widths / 2.0
-  lane_lines[0, 2, :, 0] = lane_center - widths / 2.0
+  # openpilot lateral coordinates are left-negative and right-positive.
+  lane_lines[0, 1, :, 0] = lane_center - widths / 2.0
+  lane_lines[0, 2, :, 0] = lane_center + widths / 2.0
   lane_line_probs = np.zeros((1, 8), dtype=np.float64)
   lane_line_probs[0, 3] = left_prob
   lane_line_probs[0, 5] = right_prob
@@ -37,6 +38,12 @@ class TestLanePolicy(unittest.TestCase):
     output = make_model_output(0.97, 0.96)
     output['lane_lines_prob'][0, 1] = 0.01
     self.assertEqual(modeld.get_inner_lane_line_probs(output), (0.97, 0.96))
+
+  def test_actual_lane_order_has_positive_width_and_engages(self):
+    output = make_model_output()
+    self.assertLess(output['lane_lines'][0, 1, 0, 0], output['lane_lines'][0, 2, 0, 0])
+    modeld.apply_lane_lock(output, 0.0, 20.0, lane_policy_enabled=True)
+    self.assertTrue(modeld._lane_lock_full_active)
 
   def test_blinker_releases_lane_lock(self):
     output = make_model_output()

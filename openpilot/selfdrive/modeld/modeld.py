@@ -149,7 +149,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
     lookahead = float(np.clip(1.5 * v_ego, 12.0, 30.0))
     fit = (x >= 5.0) & (x <= 35.0)
-    lane_width = left_y - right_y
+    lane_width = right_y - left_y
     valid_lane_samples = (
       np.count_nonzero(fit) >= 3 and
       np.isfinite(left_prob) and
