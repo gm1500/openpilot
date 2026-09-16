@@ -65,6 +65,8 @@ class HudRenderer(Widget):
     self.set_speed: float = SET_SPEED_NA
     self.speed: float = 0.0
     self.v_ego_cluster_seen: bool = False
+    self.lane_policy_opt_in: bool = False
+    self.lane_policy_armed: bool = False
 
     self._font_semi_bold: rl.Font = gui_app.font(FontWeight.SEMI_BOLD)
     self._font_bold: rl.Font = gui_app.font(FontWeight.BOLD)
@@ -90,6 +92,8 @@ class HudRenderer(Widget):
     )
     self.is_cruise_set = 0 < self.set_speed < SET_SPEED_NA
     self.is_cruise_available = self.set_speed != -1
+    self.lane_policy_opt_in = ui_state.lane_policy_opt_in
+    self.lane_policy_armed = self.lane_policy_opt_in and bool(car_state.lkaButtonLatched)
 
     if self.is_cruise_set and not ui_state.is_metric:
       self.set_speed *= KM_TO_MILE
@@ -116,6 +120,7 @@ class HudRenderer(Widget):
       self._draw_set_speed(rect)
 
     self._draw_current_speed(rect)
+    self._draw_lane_policy_indicator(rect)
 
     button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
     button_y = rect.y + UI_CONFIG.border_size
@@ -166,6 +171,21 @@ class HudRenderer(Widget):
       0,
       set_speed_color,
     )
+
+  def _draw_lane_policy_indicator(self, rect: rl.Rectangle) -> None:
+    """Show the custom selector state independently of the OEM LKAS icon."""
+    if not self.lane_policy_opt_in:
+      return
+
+    text = "LANE: ARMED" if self.lane_policy_armed else "LANE: E2E"
+    color = COLORS.ENGAGED if self.lane_policy_armed else COLORS.GREY
+    text_size = measure_text_cached(self._font_semi_bold, text, 30)
+    tag_rect = rl.Rectangle(rect.x + rect.width / 2 - text_size.x / 2 - 18, rect.y + 16,
+                            text_size.x + 36, text_size.y + 14)
+    rl.draw_rectangle_rounded(tag_rect, 0.35, 8, COLORS.BLACK_TRANSLUCENT)
+    rl.draw_rectangle_rounded_lines_ex(tag_rect, 0.35, 8, 3, color)
+    rl.draw_text_ex(self._font_semi_bold, text,
+                    rl.Vector2(tag_rect.x + 18, tag_rect.y + 7), 30, 0, color)
 
   def _draw_current_speed(self, rect: rl.Rectangle) -> None:
     """Draw the current vehicle speed and unit."""
