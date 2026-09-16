@@ -105,6 +105,21 @@ def get_inner_lane_line_probs(model_output: dict[str, np.ndarray]) -> tuple[floa
   return float(lane_line_probs[0, 3]), float(lane_line_probs[0, 5])
 
 
+def update_lane_policy_selector(lane_policy_enabled: bool, previous_lka_button_latched: bool | None,
+                                lane_policy_opt_in: bool, lka_button_latched: bool) -> tuple[bool, bool]:
+  """Gate the custom selector and require a fresh latch edge after opt-in.
+
+  Initializing or disabling the opt-in always leaves the policy off and records
+  the current carstate latch. Re-enabling therefore cannot arm from an old
+  button state; the driver must make a new press that changes the latch.
+  """
+  if previous_lka_button_latched is None or not lane_policy_opt_in:
+    return False, lka_button_latched
+  if lka_button_latched != previous_lka_button_latched:
+    lane_policy_enabled = not lane_policy_enabled
+  return lane_policy_enabled, lka_button_latched
+
+
 def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
                     blinkers_active: bool = False, lane_policy_enabled: bool = False) -> float:
   """Apply full lane-center authority only after all lane-quality gates pass.
@@ -519,6 +534,10 @@ def main(demo=False):
 
   DH = DesireHelper()
   lane_policy_opt_in = params.get_bool(LANE_POLICY_ENABLE_PARAM)
+  lane_policy_enabled = False
+  previous_lka_button_latched: bool | None = None
+  last_published_lane_policy_enabled: bool | None = None
+  params.put_bool("LkasLanePolicySelected", False)
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -626,9 +645,15 @@ def main(demo=False):
       if run_count % ModelConstants.MODEL_RUN_FREQ == 0:
         lane_policy_opt_in = params.get_bool(LANE_POLICY_ENABLE_PARAM)
 
-      # carstate latches the raw momentary button at its higher update rate,
-      # so modeld cannot miss a short press between model frames.
-      lane_policy_enabled = lane_policy_opt_in and bool(sm['carState'].lkaButtonLatched)
+      # carstate supplies a persistent latch at its higher update rate. Baseline it
+      # while the opt-in is off so a stale latch cannot select the policy later.
+      lane_policy_enabled, previous_lka_button_latched = update_lane_policy_selector(
+        lane_policy_enabled, previous_lka_button_latched, lane_policy_opt_in,
+        bool(sm['carState'].lkaButtonLatched))
+      if lane_policy_enabled != last_published_lane_policy_enabled:
+        params.put_bool("LkasLanePolicySelected", lane_policy_enabled)
+        last_published_lane_policy_enabled = lane_policy_enabled
+        cloudlog.info("lkas-lp-toggle: selected lane mode %s", "on" if lane_policy_enabled else "off")
 
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
                                      blinkers_active, lane_policy_enabled)
