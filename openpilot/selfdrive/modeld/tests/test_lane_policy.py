@@ -7,11 +7,15 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 
 
 def make_model_output(left_prob: float = 0.99, right_prob: float = 0.99, lane_width: float = 3.6,
-                      lane_center: float = 0.0, plan_y: float = 0.0) -> dict[str, np.ndarray]:
+                      lane_width_end: float | None = None, lane_center: float = 0.0,
+                      plan_y: float = 0.0) -> dict[str, np.ndarray]:
   x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
   lane_lines = np.zeros((1, 4, len(x), 2), dtype=np.float64)
-  lane_lines[0, 1, :, 0] = lane_center + lane_width / 2.0
-  lane_lines[0, 2, :, 0] = lane_center - lane_width / 2.0
+  target_width = lane_width if lane_width_end is None else lane_width_end
+  width_progress = np.clip((x - 5.0) / 30.0, 0.0, 1.0)
+  widths = lane_width + (target_width - lane_width) * width_progress
+  lane_lines[0, 1, :, 0] = lane_center + widths / 2.0
+  lane_lines[0, 2, :, 0] = lane_center - widths / 2.0
   lane_line_probs = np.zeros((1, 8), dtype=np.float64)
   lane_line_probs[0, 3] = left_prob
   lane_line_probs[0, 5] = right_prob
@@ -64,4 +68,12 @@ class TestLanePolicy(unittest.TestCase):
   def test_curvature_disagreement_releases_lane_lock(self):
     curvature = modeld.apply_lane_lock(make_model_output(lane_center=0.5), -0.01, 20.0, lane_policy_enabled=True)
     self.assertEqual(curvature, -0.01)
+    self.assertFalse(modeld._lane_lock_full_active)
+
+  def test_robust_geometry_accepts_normal_width_taper(self):
+    modeld.apply_lane_lock(make_model_output(lane_width=3.6, lane_width_end=3.9), 0.0, 20.0, lane_policy_enabled=True)
+    self.assertTrue(modeld._lane_lock_full_active)
+
+  def test_robust_geometry_rejects_excessive_width_taper(self):
+    modeld.apply_lane_lock(make_model_output(lane_width=3.6, lane_width_end=4.4), 0.0, 20.0, lane_policy_enabled=True)
     self.assertFalse(modeld._lane_lock_full_active)
