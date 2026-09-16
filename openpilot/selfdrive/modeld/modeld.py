@@ -45,11 +45,10 @@ MIN_LAT_CONTROL_SPEED = 0.3
 BIG_MODEL_TIMEOUT = 60
 
 
-# Optional raw-LKA-button lane-policy toggle.
-# The policy stays completely inactive unless EnableLkasLanePolicyToggle is set.
-# lkaButtonPressed is a one-bit momentary input, not a claimed persistent OEM
-# LKAS state. When armed, its rising edge toggles a session-local full-lane
-# mode; disabling the parameter returns the target to stock E2E on its next poll.
+# Optional LKA-button lane-policy toggle.
+# The policy stays inactive unless EnableLkasLanePolicyToggle is set. GM
+# carstate converts the raw momentary button to lkaButtonLatched at its higher
+# update rate. This is a custom session selector, not a claimed OEM LKAS state.
 LANE_POLICY_ENABLE_PARAM = "EnableLkasLanePolicyToggle"
 LANE_LOCK_ENTER_LINE_PROB = 0.92                # both inner lines to engage
 LANE_LOCK_HOLD_LINE_PROB = 0.85                 # both inner lines to remain active
@@ -69,7 +68,6 @@ _lane_lock_lane_curvature = 0.0
 _lane_lock_has_lane_curvature = False
 _lane_lock_full_active = False
 _lane_lock_error_logged = False
-_lane_lock_current_mode = None
 _lane_lock_last_logged_mode = None
 _lane_lock_last_log_time = 0.0
 
@@ -85,11 +83,9 @@ def reset_lane_lock() -> None:
 
 
 def log_lane_lock_mode(mode: str) -> None:
-  """Log a stable mode transition at a bounded rate for rlog validation."""
-  global _lane_lock_current_mode, _lane_lock_last_logged_mode, _lane_lock_last_log_time
+  """Log stable mode changes at a bounded rate for rlog validation."""
+  global _lane_lock_last_logged_mode, _lane_lock_last_log_time
   now = time.monotonic()
-  if mode != _lane_lock_current_mode:
-    _lane_lock_current_mode = mode
   if mode != _lane_lock_last_logged_mode and now - _lane_lock_last_log_time >= LANE_LOCK_LOG_INTERVAL:
     cloudlog.info(f"lkas-lp-toggle: {mode}")
     _lane_lock_last_logged_mode = mode
@@ -523,8 +519,6 @@ def main(demo=False):
 
   DH = DesireHelper()
   lane_policy_opt_in = params.get_bool(LANE_POLICY_ENABLE_PARAM)
-  lane_policy_enabled = False
-  previous_lka_button_pressed = False
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -632,19 +626,9 @@ def main(demo=False):
       if run_count % ModelConstants.MODEL_RUN_FREQ == 0:
         lane_policy_opt_in = params.get_bool(LANE_POLICY_ENABLE_PARAM)
 
-      # Raw button source only: no inferred OEM LKAS/HUD state is used here.
-      # It is momentary, so toggle only on a rising edge and keep the selected
-      # mode until the next press or until the explicit parameter is disabled.
-      lka_button_pressed = bool(sm['carState'].lkaButtonPressed)
-      if not lane_policy_opt_in:
-        if lane_policy_enabled:
-          cloudlog.info("lkas-lp-toggle: custom lane policy disarmed by parameter")
-        lane_policy_enabled = False
-      elif lka_button_pressed and not previous_lka_button_pressed:
-        lane_policy_enabled = not lane_policy_enabled
-        cloudlog.info("lkas-lp-toggle: raw LKA button edge -> custom lane policy %s",
-                      "on" if lane_policy_enabled else "off")
-      previous_lka_button_pressed = lka_button_pressed
+      # carstate latches the raw momentary button at its higher update rate,
+      # so modeld cannot miss a short press between model frames.
+      lane_policy_enabled = lane_policy_opt_in and bool(sm['carState'].lkaButtonLatched)
 
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
                                      blinkers_active, lane_policy_enabled)
