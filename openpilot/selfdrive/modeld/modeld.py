@@ -109,7 +109,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
                     blinkers_active: bool = False, lane_policy_enabled: bool = False) -> float:
   """Apply full lane-center authority only after all lane-quality gates pass.
 
-  The disabled state is exact upstream E2E. With the opt-in raw-button state
+  The disabled state is exact upstream E2E. With the opt-in selected lane mode
   on, lane midpoint curvature is used only for high-confidence, stable geometry.
   Weak lines, blinkers, lane-change intent, invalid geometry, unavailable
   path data, and extreme path disagreement all return control to E2E.
