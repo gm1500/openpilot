@@ -99,6 +99,28 @@ class TestLanePolicy(unittest.TestCase):
     self.assertLessEqual(abs(modeld._lane_lock_center_correction - previous),
                          modeld.LANE_LOCK_CORRECTION_RELEASE_STEP + 1e-12)
 
+  def test_turn_direction_change_releases_opposed_correction(self):
+    centered = make_model_output()
+    negative_turn = -2.0 * modeld.LANE_LOCK_TURN_CURVATURE
+    self.apply_for(centered, modeld.LANE_LOCK_ARM_TIME + modeld.DT_MDL, negative_turn)
+
+    # A steady curve may legitimately need a lane correction opposite E2E;
+    # full centering must remain available until E2E changes turn direction.
+    output = make_model_output(lane_center=-0.45)
+    for _ in range(6):
+      modeld.apply_lane_lock(output, negative_turn, 20.0, lane_policy_enabled=True)
+    before = modeld._lane_lock_center_correction
+    self.assertLess(before, 0.0)
+
+    # When the meaningful E2E turn direction flips, release the stale,
+    # opposing correction at the faster release rate rather than carrying it
+    # into the new curve.
+    positive_turn = 2.0 * modeld.LANE_LOCK_TURN_CURVATURE
+    modeld.apply_lane_lock(output, positive_turn, 20.0, lane_policy_enabled=True)
+    after = modeld._lane_lock_center_correction
+    self.assertGreater(after, before)
+    self.assertLessEqual(abs(after - before), modeld.LANE_LOCK_CORRECTION_RELEASE_STEP + 1e-12)
+
   def test_no_plan_gate_for_clean_lanes(self):
     output = make_model_output(lane_center=0.35)
     output['plan'][:] = np.nan

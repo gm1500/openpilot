@@ -46,7 +46,7 @@ BIG_MODEL_TIMEOUT = 60
 
 
 # On-road UI lane-policy toggle. The lane policy is selected by default each
-# drive; the button selects exact upstream E2E. Once both inner lines have been
+# drive; the HUD selector selects exact upstream E2E. Once both inner lines have been
 # clean long enough, it applies a full lane-center correction while retaining
 # E2E curvature as the road-shape feed-forward target.
 LANE_POLICY_ENABLED_PARAM = "LanePolicyEnabled"
@@ -68,6 +68,8 @@ LANE_LOCK_MIN_LOOKAHEAD = 25.0                 # m
 LANE_LOCK_MAX_LOOKAHEAD = 45.0                 # m
 LANE_LOCK_HEADING_GAIN = 0.55
 LANE_LOCK_MAX_CENTER_CORRECTION = 0.00045      # 1/m
+LANE_LOCK_TURN_CURVATURE = 0.00015             # 1/m
+LANE_LOCK_TURN_RELEASE_TIME = 0.35             # s
 # Build lane authority deliberately, but release it faster when the lane
 # midpoint says the previous correction is no longer needed. This prevents a
 # curve-exit or lane-change correction from lingering past the centerline.
@@ -92,6 +94,8 @@ _lane_lock_center_correction = 0.0
 _lane_lock_has_center_correction = False
 _lane_lock_one_line_hold = False
 _lane_lock_error_logged = False
+_lane_lock_last_turn_sign = 0
+_lane_lock_turn_release_time = 0.0
 _lane_lock_last_logged_mode = None
 _lane_lock_last_log_time = 0.0
 
@@ -103,7 +107,7 @@ def reset_lane_lock() -> None:
   global _lane_lock_ready, _lane_lock_arm_time
   global _lane_lock_width, _lane_lock_width_valid, _lane_lock_line_loss_time
   global _lane_lock_center_correction, _lane_lock_has_center_correction
-  global _lane_lock_one_line_hold
+  global _lane_lock_one_line_hold, _lane_lock_last_turn_sign, _lane_lock_turn_release_time
   _lane_lock_weight = 0.0
   _lane_lock_lane_curvature = 0.0
   _lane_lock_has_lane_curvature = False
@@ -116,6 +120,8 @@ def reset_lane_lock() -> None:
   _lane_lock_center_correction = 0.0
   _lane_lock_has_center_correction = False
   _lane_lock_one_line_hold = False
+  _lane_lock_last_turn_sign = 0
+  _lane_lock_turn_release_time = 0.0
 
 
 def log_lane_lock_mode(mode: str) -> None:
@@ -177,6 +183,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
   global _lane_lock_width, _lane_lock_width_valid, _lane_lock_line_loss_time
   global _lane_lock_center_correction, _lane_lock_has_center_correction
   global _lane_lock_one_line_hold, _lane_lock_error_logged
+  global _lane_lock_last_turn_sign, _lane_lock_turn_release_time
 
   if not lane_policy_enabled:
     reset_lane_lock()
@@ -280,6 +287,19 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
                                       LANE_LOCK_MAX_CENTER_CORRECTION))
     if abs(center_correction) < LANE_LOCK_CORRECTION_DEADBAND:
       center_correction = 0.0
+
+    # On a meaningful E2E turn-direction change, drop only a correction
+    # that still asks for the previous turn. This preserves full lane
+    # centering during steady curves while avoiding a direction-change tug.
+    if abs(e2e_curvature) >= LANE_LOCK_TURN_CURVATURE:
+      e2e_turn_sign = 1 if e2e_curvature > 0.0 else -1
+      if _lane_lock_last_turn_sign and e2e_turn_sign != _lane_lock_last_turn_sign:
+        _lane_lock_turn_release_time = LANE_LOCK_TURN_RELEASE_TIME
+      _lane_lock_last_turn_sign = e2e_turn_sign
+    if _lane_lock_turn_release_time > 0.0:
+      _lane_lock_turn_release_time = max(0.0, _lane_lock_turn_release_time - DT_MDL)
+      if center_correction * e2e_curvature < 0.0:
+        center_correction = 0.0
 
     # Enter smoothly after arming. Build correction deliberately, but release
     # it faster when the target shrinks or reverses after a curve/lane change.
