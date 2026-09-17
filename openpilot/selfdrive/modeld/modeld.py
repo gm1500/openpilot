@@ -45,9 +45,10 @@ MIN_LAT_CONTROL_SPEED = 0.3
 BIG_MODEL_TIMEOUT = 60
 
 
-# On-road UI lane-policy toggle. The default is exact upstream E2E. Once a
-# clean lane has been observed long enough, confidence controls a gradual
-# lane-midpoint/E2E blend instead of a binary handoff.
+# On-road UI lane-policy toggle. Lane mode is selected by default each drive;
+# the button can still select exact upstream E2E. Once a clean lane has been
+# observed long enough, confidence controls a gradual lane-midpoint/E2E blend
+# instead of a binary handoff.
 LANE_POLICY_ENABLED_PARAM = "LanePolicyEnabled"
 LANE_LOCK_ARM_LINE_PROB = 0.92                  # both inner lines before first engagement
 LANE_LOCK_FULL_LINE_PROB = 0.85                 # full midpoint authority
@@ -116,6 +117,12 @@ def get_lane_confidence_weight(line_confidence: float) -> float:
   """Map the weaker inner-lane confidence to midpoint authority."""
   return float(np.clip((line_confidence - LANE_LOCK_BLEND_LINE_PROB) /
                        (LANE_LOCK_FULL_LINE_PROB - LANE_LOCK_BLEND_LINE_PROB), 0.0, 1.0))
+
+
+def get_lane_policy_enabled(params: Params) -> bool:
+  """Use lane mode for an unset per-drive selector; preserve an explicit off."""
+  value = params.get(LANE_POLICY_ENABLED_PARAM)
+  return True if value is None else bool(value)
 
 
 def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
@@ -549,7 +556,7 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
-  lane_policy_enabled = params.get_bool(LANE_POLICY_ENABLED_PARAM)
+  lane_policy_enabled = get_lane_policy_enabled(params)
   last_published_lane_policy_active: bool | None = None
   last_published_lane_policy_blending: bool | None = None
   params.put_bool("LanePolicyActive", False)
@@ -659,7 +666,7 @@ def main(demo=False):
 
       blinkers_active = sm['carState'].leftBlinker or sm['carState'].rightBlinker
       if run_count % ModelConstants.MODEL_RUN_FREQ == 0:
-        lane_policy_enabled = params.get_bool(LANE_POLICY_ENABLED_PARAM)
+        lane_policy_enabled = get_lane_policy_enabled(params)
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
                                      blinkers_active, lane_policy_enabled)
       lane_policy_active = (lane_policy_enabled and _lane_lock_full_active and

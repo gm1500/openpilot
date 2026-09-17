@@ -49,6 +49,19 @@ class TestLanePolicy(unittest.TestCase):
   def test_disabled_mode_returns_exact_e2e_target(self):
     self.assertEqual(modeld.apply_lane_lock(make_model_output(), 0.0123, 20.0, lane_policy_enabled=False), 0.0123)
 
+  def test_unset_lane_policy_selector_defaults_on_but_explicit_off_wins(self):
+    class FakeParams:
+      def __init__(self, value):
+        self.value = value
+
+      def get(self, key):
+        assert key == modeld.LANE_POLICY_ENABLED_PARAM
+        return self.value
+
+    self.assertTrue(modeld.get_lane_policy_enabled(FakeParams(None)))
+    self.assertTrue(modeld.get_lane_policy_enabled(FakeParams(True)))
+    self.assertFalse(modeld.get_lane_policy_enabled(FakeParams(False)))
+
   def test_raw_probability_indices(self):
     output = make_model_output(0.97, 0.96)
     output['lane_lines_prob'][0, 1] = 0.01
