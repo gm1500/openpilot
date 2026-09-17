@@ -88,7 +88,7 @@ class UIState:
     self.experimental_mode: bool = self.params.get_bool("ExperimentalMode")
     self.experimental_mode_confirmed: bool = self.params.get_bool("ExperimentalModeConfirmed")
     lane_policy_enabled = self.params.get("LanePolicyEnabled")
-    self.lane_policy_enabled: bool = True if lane_policy_enabled is None else bool(lane_policy_enabled)
+    self.lane_policy_enabled: bool = True if lane_policy_enabled is None else lane_policy_enabled == b"1"
     self.lane_policy_active: bool = self.params.get_bool("LanePolicyActive")
     self.lane_policy_blending: bool = self.params.get_bool("LanePolicyBlending")
     self.chestnut_present: bool = False
@@ -252,7 +252,7 @@ class UIState:
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
     self.experimental_mode_confirmed = self.params.get_bool("ExperimentalModeConfirmed")
     lane_policy_enabled = self.params.get("LanePolicyEnabled")
-    self.lane_policy_enabled = True if lane_policy_enabled is None else bool(lane_policy_enabled)
+    self.lane_policy_enabled = True if lane_policy_enabled is None else lane_policy_enabled == b"1"
     self.lane_policy_active = self.params.get_bool("LanePolicyActive")
     self.lane_policy_blending = self.params.get_bool("LanePolicyBlending")
     if not self.chestnut_compiled:

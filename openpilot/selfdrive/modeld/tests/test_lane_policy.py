@@ -8,12 +8,12 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 
 
 def make_model_output(left_prob: float = 0.99, right_prob: float = 0.99, lane_width: float = 3.6,
-                      lane_width_end: float | None = None, lane_center: float = 0.0,
-                      plan_y: float = 0.0) -> dict[str, np.ndarray]:
+                      lane_width_end: float | None = None, lane_center: float = 0.0) -> dict[str, np.ndarray]:
   x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
   lane_lines = np.zeros((1, 4, len(x), 2), dtype=np.float64)
   target_width = lane_width if lane_width_end is None else lane_width_end
-  width_progress = np.clip((x - 5.0) / 30.0, 0.0, 1.0)
+  width_progress = np.clip((x - modeld.LANE_LOCK_FIT_START) /
+                            (modeld.LANE_LOCK_FIT_END - modeld.LANE_LOCK_FIT_START), 0.0, 1.0)
   widths = lane_width + (target_width - lane_width) * width_progress
   # openpilot lateral coordinates are left-negative and right-positive.
   lane_lines[0, 1, :, 0] = lane_center - widths / 2.0
@@ -23,7 +23,6 @@ def make_model_output(left_prob: float = 0.99, right_prob: float = 0.99, lane_wi
   lane_line_probs[0, 5] = right_prob
   plan = np.zeros((1, len(x), ModelConstants.PLAN_WIDTH), dtype=np.float64)
   plan[0, :, 0] = x
-  plan[0, :, 1] = plan_y
   return {'lane_lines': lane_lines, 'lane_lines_prob': lane_line_probs,
           'desire_state': np.zeros((1, ModelConstants.DESIRE_LEN), dtype=np.float64), 'plan': plan}
 
@@ -44,12 +43,14 @@ class TestLanePolicy(unittest.TestCase):
     output = make_model_output() if output is None else output
     self.apply_for(output, modeld.LANE_LOCK_ARM_TIME + modeld.DT_MDL)
     self.assertTrue(modeld._lane_lock_ready)
+    self.assertTrue(modeld._lane_lock_full_active)
+    self.assertTrue(modeld._lane_lock_width_valid)
     return output
 
   def test_disabled_mode_returns_exact_e2e_target(self):
     self.assertEqual(modeld.apply_lane_lock(make_model_output(), 0.0123, 20.0, lane_policy_enabled=False), 0.0123)
 
-  def test_unset_lane_policy_selector_defaults_on_but_explicit_off_wins(self):
+  def test_selector_decodes_params_bytes_and_defaults_on_when_unset(self):
     class FakeParams:
       def __init__(self, value):
         self.value = value
@@ -59,7 +60,8 @@ class TestLanePolicy(unittest.TestCase):
         return self.value
 
     self.assertTrue(modeld.get_lane_policy_enabled(FakeParams(None)))
-    self.assertTrue(modeld.get_lane_policy_enabled(FakeParams(True)))
+    self.assertTrue(modeld.get_lane_policy_enabled(FakeParams(b"1")))
+    self.assertFalse(modeld.get_lane_policy_enabled(FakeParams(b"0")))
     self.assertFalse(modeld.get_lane_policy_enabled(FakeParams(False)))
 
   def test_raw_probability_indices(self):
@@ -67,87 +69,91 @@ class TestLanePolicy(unittest.TestCase):
     output['lane_lines_prob'][0, 1] = 0.01
     self.assertEqual(modeld.get_inner_lane_line_probs(output), (0.97, 0.96))
 
-  def test_actual_lane_order_has_positive_width_and_arms_before_engaging(self):
+  def test_arms_only_after_clean_two_line_timer(self):
     output = make_model_output()
-    self.assertLess(output['lane_lines'][0, 1, 0, 0], output['lane_lines'][0, 2, 0, 0])
     self.apply_for(output, modeld.LANE_LOCK_ARM_TIME - modeld.DT_MDL)
     self.assertFalse(modeld._lane_lock_ready)
     self.assertEqual(modeld._lane_lock_weight, 0.0)
     self.apply_for(output, 2.0 * modeld.DT_MDL)
-    self.assertTrue(modeld._lane_lock_ready)
     self.assertTrue(modeld._lane_lock_full_active)
-    self.assertGreater(modeld._lane_lock_weight, 0.0)
+    self.assertEqual(modeld._lane_lock_weight, 1.0)
+
+  def test_full_center_correction_keeps_e2e_curve_feedforward(self):
+    output = make_model_output(lane_center=0.45)
+    self.arm_lane_policy(output)
+    e2e = 0.0010
+    curvature = modeld.apply_lane_lock(output, e2e, 20.0, lane_policy_enabled=True)
+    self.assertTrue(modeld._lane_lock_full_active)
+    self.assertGreater(curvature, e2e)
+    self.assertLessEqual(curvature - e2e, modeld.LANE_LOCK_MAX_CENTER_CORRECTION)
+
+    centered = make_model_output(lane_center=0.0)
+    # The correction changes by a bounded single-frame step, rather than a
+    # delayed 0.4 s lane-curvature filter.
+    previous = modeld._lane_lock_center_correction
+    modeld.apply_lane_lock(centered, e2e, 20.0, lane_policy_enabled=True)
+    self.assertLessEqual(abs(modeld._lane_lock_center_correction - previous),
+                         modeld.LANE_LOCK_CORRECTION_STEP + 1e-12)
+
+  def test_no_plan_gate_for_clean_lanes(self):
+    output = make_model_output(lane_center=0.35)
+    output['plan'][:] = np.nan
+    self.arm_lane_policy(output)
+    curvature = modeld.apply_lane_lock(output, 0.0, 20.0, lane_policy_enabled=True)
+    self.assertGreater(curvature, 0.0)
+
+  def test_hysteresis_retains_full_center_above_exit_threshold(self):
+    self.arm_lane_policy()
+    reduced_confidence = make_model_output(left_prob=0.80, right_prob=0.80, lane_center=0.25)
+    curvature = modeld.apply_lane_lock(reduced_confidence, 0.001, 20.0, lane_policy_enabled=True)
+    self.assertTrue(modeld._lane_lock_full_active)
+    self.assertFalse(modeld._lane_lock_one_line_hold)
+    self.assertGreater(curvature, 0.001)
+
+  def test_below_exit_confidence_releases_to_exact_e2e(self):
+    self.arm_lane_policy()
+    low_confidence = make_model_output(left_prob=0.65, right_prob=0.65)
+    self.assertEqual(modeld.apply_lane_lock(low_confidence, -0.0012, 20.0, lane_policy_enabled=True), -0.0012)
+    self.assertFalse(modeld._lane_lock_full_active)
+
+  def test_one_line_hold_uses_learned_width(self):
+    self.arm_lane_policy()
+    one_line = make_model_output(left_prob=0.99, right_prob=0.10, lane_center=0.35)
+    curvature = self.apply_for(one_line, 0.50)
+    self.assertTrue(modeld._lane_lock_full_active)
+    self.assertTrue(modeld._lane_lock_one_line_hold)
+    self.assertGreater(curvature, 0.0)
+
+  def test_one_line_hold_expires_to_exact_e2e(self):
+    self.arm_lane_policy()
+    one_line = make_model_output(left_prob=0.99, right_prob=0.10, lane_center=0.35)
+    e2e = -0.0012
+    result = self.apply_for(one_line, modeld.LANE_LOCK_ONE_LINE_HOLD_TIME + 2.0 * modeld.DT_MDL, e2e)
+    self.assertEqual(result, e2e)
+    self.assertFalse(modeld._lane_lock_full_active)
+    self.assertFalse(modeld._lane_lock_ready)
 
   def test_blinker_releases_lane_lock(self):
     output = self.arm_lane_policy()
     self.assertEqual(modeld.apply_lane_lock(output, 0.0123, 20.0, blinkers_active=True, lane_policy_enabled=True), 0.0123)
     self.assertFalse(modeld._lane_lock_full_active)
-    self.assertFalse(modeld._lane_lock_ready)
 
-  def test_lane_change_intent_releases_and_requires_rearm(self):
+  def test_lane_change_intent_releases_lane_lock(self):
     self.arm_lane_policy()
     output = make_model_output()
     output['desire_state'][0, log.Desire.laneChangeLeft] = 0.2
     self.assertEqual(modeld.apply_lane_lock(output, 0.0123, 20.0, lane_policy_enabled=True), 0.0123)
     self.assertFalse(modeld._lane_lock_full_active)
-    self.assertFalse(modeld._lane_lock_ready)
 
-  def test_confidence_weight_blends_instead_of_binary_release(self):
-    self.arm_lane_policy()
-    self.apply_for(make_model_output(), 4.0)
-    full_weight = modeld._lane_lock_weight
-    self.assertGreater(full_weight, 1.0 - 1e-3)
-
-    self.apply_for(make_model_output(0.80, 0.80), 0.5)
-    self.assertTrue(modeld._lane_lock_ready)
-    self.assertFalse(modeld._lane_lock_full_active)
-    self.assertGreater(modeld._lane_lock_weight, 0.70)
-    self.assertLess(modeld._lane_lock_weight, full_weight)
-
-  def test_low_confidence_fades_to_e2e_without_rearming(self):
-    self.arm_lane_policy()
-    self.apply_for(make_model_output(0.65, 0.65), 4.0, e2e_curvature=0.001)
-    self.assertTrue(modeld._lane_lock_ready)
-    self.assertFalse(modeld._lane_lock_has_lane_curvature)
-    self.assertEqual(modeld.apply_lane_lock(make_model_output(0.65, 0.65), 0.001, 20.0, lane_policy_enabled=True), 0.001)
-
-    modeld.apply_lane_lock(make_model_output(0.80, 0.80), 0.0, 20.0, lane_policy_enabled=True)
-    self.assertTrue(modeld._lane_lock_has_lane_curvature)
-    self.assertGreater(modeld._lane_lock_weight, 0.0)
-
-  def test_confidence_weight_boundaries(self):
-    self.assertEqual(modeld.get_lane_confidence_weight(0.70), 0.0)
-    self.assertAlmostEqual(modeld.get_lane_confidence_weight(0.80), 2.0 / 3.0)
-    self.assertEqual(modeld.get_lane_confidence_weight(0.85), 1.0)
-
-  def test_lane_midpoint_changes_curvature(self):
-    output = make_model_output(lane_center=0.5)
-    self.arm_lane_policy(output)
-    curvature = self.apply_for(output, 0.5)
-    self.assertTrue(modeld._lane_lock_full_active)
-    self.assertGreater(curvature, 0.0)
-
-  def test_extreme_path_disagreement_releases_lane_lock(self):
-    curvature = modeld.apply_lane_lock(make_model_output(plan_y=1.0), 0.0123, 20.0, lane_policy_enabled=True)
-    self.assertEqual(curvature, 0.0123)
-    self.assertFalse(modeld._lane_lock_full_active)
-    self.assertFalse(modeld._lane_lock_ready)
-
-  def test_curvature_disagreement_releases_lane_lock(self):
-    curvature = modeld.apply_lane_lock(make_model_output(lane_center=0.5), -0.01, 20.0, lane_policy_enabled=True)
-    self.assertEqual(curvature, -0.01)
-    self.assertFalse(modeld._lane_lock_full_active)
-    self.assertFalse(modeld._lane_lock_ready)
-
-  def test_robust_geometry_accepts_normal_width_taper(self):
-    output = make_model_output(lane_width=3.6, lane_width_end=3.9)
-    self.arm_lane_policy(output)
+  def test_robust_geometry_accepts_normal_taper_and_rejects_extreme_taper(self):
+    self.arm_lane_policy(make_model_output(lane_width=3.6, lane_width_end=4.1))
     self.assertTrue(modeld._lane_lock_full_active)
 
-  def test_robust_geometry_rejects_excessive_width_taper_immediately(self):
-    self.arm_lane_policy()
-    curvature = modeld.apply_lane_lock(make_model_output(lane_width=3.6, lane_width_end=4.4), 0.0123, 20.0,
-                                       lane_policy_enabled=True)
-    self.assertEqual(curvature, 0.0123)
+    modeld.reset_lane_lock()
+    output = make_model_output(lane_width=3.6, lane_width_end=5.0)
+    self.apply_for(output, modeld.LANE_LOCK_ARM_TIME + modeld.DT_MDL)
     self.assertFalse(modeld._lane_lock_full_active)
-    self.assertFalse(modeld._lane_lock_ready)
+
+
+if __name__ == "__main__":
+  unittest.main()

@@ -7,7 +7,7 @@ from openpilot.system.ui.widgets import Widget
 
 
 class LanePolicyButton(Widget):
-  """On-road, per-drive selector for the strict lane-centering policy."""
+  """On-road, per-drive selector for the full lane-centering policy."""
   def __init__(self):
     super().__init__()
     self._params = Params()
@@ -35,9 +35,9 @@ class LanePolicyButton(Widget):
     if not self._lane_policy_enabled:
       color, label = self._off, "LANE: E2E"
     elif self._lane_policy_active:
-      color, label = self._on, "LANE: CENTER"
+      color, label = (self._blend, "LANE: HOLD") if self._lane_policy_blending else (self._on, "LANE: CENTER")
     elif self._lane_policy_blending:
-      color, label = self._blend, "LANE: BLEND"
+      color, label = self._blend, "LANE: READY"
     else:
       color, label = self._fallback, "LANE: FALLBACK"
     rl.draw_rectangle_rounded(rect, 0.35, 8, self._background)
