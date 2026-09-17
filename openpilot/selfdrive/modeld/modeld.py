@@ -44,9 +44,262 @@ LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
 BIG_MODEL_TIMEOUT = 60
 
+# Anchored E2E lane offset. The E2E target always retains curve authority;
+# lane lines contribute only a bounded correction toward the learned lane center.
+# This deliberately avoids generating a second lane curvature every frame.
+ANCHOR_LANE_POLICY_ENABLED_PARAM = "AnchorLanePolicyEnabled"
+ANCHOR_LANE_TWO_LINE_PROB = 0.80
+ANCHOR_LANE_ONE_LINE_PROB = 0.70
+ANCHOR_LANE_MIN_WIDTH = 2.5
+ANCHOR_LANE_MAX_WIDTH = 4.9
+ANCHOR_LANE_MAX_WIDTH_SPREAD = 0.65
+ANCHOR_LANE_WIDTH_TIME = 9.95             # matches the deprecated lane planner
+ANCHOR_LANE_ARM_TIME = 0.40
+ANCHOR_LANE_FULL_HOLD_TIME = 0.75
+ANCHOR_LANE_ONE_LINE_FADE_TIME = 0.75
+ANCHOR_LANE_ENGAGE_TIME = 0.40
+ANCHOR_LANE_RELEASE_TIME = 0.40
+ANCHOR_LANE_MAX_CORRECTION = 0.00035      # 1/m; preserve E2E curvature authority
+ANCHOR_LANE_MAX_CORRECTION_STEP = 0.000025
+ANCHOR_LANE_MAX_LANE_CHANGE_PROB = 0.10
+
+_anchor_lane_width = 3.7
+_anchor_lane_width_initialized = False
+_anchor_lane_correction = 0.0
+_anchor_lane_authority = 0.0
+_anchor_lane_arm_time = 0.0
+_anchor_lane_since_two_lines = 0.0
+_anchor_lane_active = False
+_anchor_lane_holding = False
+_anchor_lane_last_mode = ""
+
+
+def reset_anchored_lane_offset() -> None:
+  global _anchor_lane_width, _anchor_lane_width_initialized
+  global _anchor_lane_correction, _anchor_lane_authority
+  global _anchor_lane_arm_time, _anchor_lane_since_two_lines
+  global _anchor_lane_active, _anchor_lane_holding
+  _anchor_lane_width = 3.7
+  _anchor_lane_width_initialized = False
+  _anchor_lane_correction = 0.0
+  _anchor_lane_authority = 0.0
+  _anchor_lane_arm_time = 0.0
+  _anchor_lane_since_two_lines = 0.0
+  _anchor_lane_active = False
+  _anchor_lane_holding = False
+
+
+def _anchor_lowpass(value: float, target: float, time_constant: float) -> float:
+  alpha = DT_MDL / (time_constant + DT_MDL)
+  return float(value + alpha * (target - value))
+
+
+def _anchor_rate_limit(value: float, target: float, max_step: float) -> float:
+  return float(value + np.clip(target - value, -max_step, max_step))
+
+
+def _log_anchor_lane_mode(mode: str) -> None:
+  global _anchor_lane_last_mode
+  if mode != _anchor_lane_last_mode:
+    cloudlog.info("anchor-lp: %s", mode)
+    _anchor_lane_last_mode = mode
+
+
+def get_anchor_lane_policy_enabled(params: Params) -> bool:
+  # The per-drive HUD selector defaults to center anchoring unless the driver
+  # explicitly selected E2E for this drive.
+  value = params.get(ANCHOR_LANE_POLICY_ENABLED_PARAM)
+  return True if value is None else bool(value)
+
+
+def get_anchor_lane_line_confidences(model_output: dict[str, np.ndarray], fit: np.ndarray) -> tuple[float, float]:
+  # The current model's 8-wide raw probability layout maps the inner lines to
+  # indices 3 and 5. Reject other layouts rather than silently using a wrong line.
+  probs = np.asarray(model_output['lane_lines_prob'])
+  if probs.ndim != 2 or probs.shape[0] < 1 or probs.shape[1] != 8:
+    raise ValueError("unexpected lane_lines_prob layout")
+
+  left_prob = float(probs[0, 3])
+  right_prob = float(probs[0, 5])
+
+  # Preserve the old planner's uncertainty discount, but make it less abrupt:
+  # an otherwise stable, visible line is not discarded for a modest std increase.
+  stds = model_output.get('lane_lines_stds')
+  if stds is not None:
+    stds = np.asarray(stds)
+    if stds.ndim == 4 and stds.shape[0] >= 1 and stds.shape[1] >= 3 and stds.shape[3] >= 1:
+      left_std = float(np.median(np.abs(stds[0, 1, fit, 0])))
+      right_std = float(np.median(np.abs(stds[0, 2, fit, 0])))
+      left_prob *= float(np.interp(left_std, (0.20, 0.45), (1.0, 0.0)))
+      right_prob *= float(np.interp(right_std, (0.20, 0.45), (1.0, 0.0)))
+
+  return max(0.0, min(1.0, left_prob)), max(0.0, min(1.0, right_prob))
+
+
+def _fit_anchor_line(x: np.ndarray, y: np.ndarray, fit: np.ndarray) -> tuple[float, float]:
+  if np.count_nonzero(fit) < 3 or not np.all(np.isfinite(y[fit])):
+    raise ValueError("invalid lane samples")
+  slope, intercept = np.polyfit(x[fit], y[fit], 1)
+  if not np.isfinite(slope) or not np.isfinite(intercept):
+    raise ValueError("invalid lane fit")
+  return float(slope), float(intercept)
+
+
+def apply_anchored_lane_offset(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
+                               blinkers_active: bool = False, lane_policy_enabled: bool = False) -> float:
+  """Progressively anchor E2E to the observed lane midpoint.
+
+  This is intentionally an offset-only policy: E2E remains responsible for
+  road curvature, objects, merges, and path shape. When both lines are sound,
+  their midpoint produces a bounded lateral/heading correction. When exactly
+  one line fades, that line is paired with the slowly learned lane width for a
+  short hold, then the correction fades back to exact E2E.
+  """
+  global _anchor_lane_width, _anchor_lane_width_initialized
+  global _anchor_lane_correction, _anchor_lane_authority
+  global _anchor_lane_arm_time, _anchor_lane_since_two_lines
+  global _anchor_lane_active, _anchor_lane_holding
+
+  e2e_curvature = float(e2e_curvature)
+  if not lane_policy_enabled:
+    reset_anchored_lane_offset()
+    _log_anchor_lane_mode("e2e (toggle off)")
+    return e2e_curvature
+
+  if blinkers_active:
+    reset_anchored_lane_offset()
+    _log_anchor_lane_mode("e2e (blinker)")
+    return e2e_curvature
+
+  target_correction: float | None = None
+  target_authority = 0.0
+  mode = "e2e (no lane anchor)"
+  holding = False
+
+  try:
+    desire_state = np.asarray(model_output['desire_state'])[0]
+    lane_change_prob = float(desire_state[log.Desire.laneChangeLeft] +
+                             desire_state[log.Desire.laneChangeRight])
+    if lane_change_prob > ANCHOR_LANE_MAX_LANE_CHANGE_PROB:
+      reset_anchored_lane_offset()
+      _log_anchor_lane_mode("e2e (lane-change intent)")
+      return e2e_curvature
+
+    x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
+    fit = (x >= 5.0) & (x <= 35.0)
+    left_y = np.asarray(model_output['lane_lines'][0, 1, :, 0], dtype=np.float64)
+    right_y = np.asarray(model_output['lane_lines'][0, 2, :, 0], dtype=np.float64)
+    if left_y.shape != x.shape or right_y.shape != x.shape:
+      raise ValueError("unexpected lane line shape")
+
+    left_prob, right_prob = get_anchor_lane_line_confidences(model_output, fit)
+    left_usable = left_prob >= ANCHOR_LANE_ONE_LINE_PROB and np.all(np.isfinite(left_y[fit]))
+    right_usable = right_prob >= ANCHOR_LANE_ONE_LINE_PROB and np.all(np.isfinite(right_y[fit]))
+
+    width = right_y - left_y
+    two_line_geometry = False
+    if left_prob >= ANCHOR_LANE_TWO_LINE_PROB and right_prob >= ANCHOR_LANE_TWO_LINE_PROB:
+      width_p10, current_width, width_p90 = np.percentile(width[fit], (10.0, 50.0, 90.0))
+      two_line_geometry = (
+        np.isfinite(current_width) and
+        ANCHOR_LANE_MIN_WIDTH <= current_width <= ANCHOR_LANE_MAX_WIDTH and
+        width_p10 >= ANCHOR_LANE_MIN_WIDTH and
+        width_p90 <= ANCHOR_LANE_MAX_WIDTH and
+        width_p90 - width_p10 <= ANCHOR_LANE_MAX_WIDTH_SPREAD
+      )
+
+    if two_line_geometry:
+      # Width is updated only from two healthy inner lines. This long time
+      # constant is the old lane planner's temporal lane-width assumption.
+      current_width = float(np.median(width[fit]))
+      if _anchor_lane_width_initialized:
+        _anchor_lane_width = _anchor_lowpass(_anchor_lane_width, current_width, ANCHOR_LANE_WIDTH_TIME)
+      else:
+        _anchor_lane_width = current_width
+        _anchor_lane_width_initialized = True
+      _anchor_lane_width = float(np.clip(_anchor_lane_width, ANCHOR_LANE_MIN_WIDTH, 4.2))
+
+      slope, intercept = _fit_anchor_line(x, 0.5 * (left_y + right_y), fit)
+      _anchor_lane_arm_time = min(ANCHOR_LANE_ARM_TIME, _anchor_lane_arm_time + DT_MDL)
+      _anchor_lane_since_two_lines = 0.0
+      if _anchor_lane_arm_time >= ANCHOR_LANE_ARM_TIME:
+        target_authority = 1.0
+        mode = "center"
+      else:
+        mode = "arming"
+
+    elif (_anchor_lane_width_initialized and _anchor_lane_arm_time >= ANCHOR_LANE_ARM_TIME and
+          left_usable != right_usable):
+      # A clipped/intersecting line can disappear for a few frames. Use only
+      # the visible line plus the learned width; never learn width from one line.
+      _anchor_lane_since_two_lines += DT_MDL
+      if _anchor_lane_since_two_lines <= ANCHOR_LANE_FULL_HOLD_TIME + ANCHOR_LANE_ONE_LINE_FADE_TIME:
+        if left_usable:
+          slope, intercept = _fit_anchor_line(x, left_y, fit)
+          intercept += _anchor_lane_width / 2.0
+        else:
+          slope, intercept = _fit_anchor_line(x, right_y, fit)
+          intercept -= _anchor_lane_width / 2.0
+        if _anchor_lane_since_two_lines <= ANCHOR_LANE_FULL_HOLD_TIME:
+          target_authority = 1.0
+        else:
+          target_authority = 1.0 - (
+            (_anchor_lane_since_two_lines - ANCHOR_LANE_FULL_HOLD_TIME) / ANCHOR_LANE_ONE_LINE_FADE_TIME
+          )
+        target_authority = float(np.clip(target_authority, 0.0, 1.0))
+        holding = target_authority > 0.0
+        mode = "hold"
+      else:
+        _anchor_lane_arm_time = 0.0
+        mode = "e2e (one-line timeout)"
+
+    else:
+      _anchor_lane_since_two_lines += DT_MDL
+      if _anchor_lane_since_two_lines > ANCHOR_LANE_FULL_HOLD_TIME + ANCHOR_LANE_ONE_LINE_FADE_TIME:
+        _anchor_lane_arm_time = 0.0
+      if left_usable and right_usable:
+        mode = "e2e (lane geometry)"
+      else:
+        mode = "e2e (lane confidence)"
+
+    if target_authority > 0.0:
+      # No lane-derived curvature term is used here. The correction only moves
+      # the E2E path toward the lane midpoint at a speed-scaled lookahead.
+      lookahead = float(np.clip(1.5 * v_ego, 12.0, 30.0))
+      target_correction = 2.0 * (intercept + slope * lookahead) / (lookahead * lookahead)
+      target_correction = float(np.clip(target_correction,
+                                        -ANCHOR_LANE_MAX_CORRECTION,
+                                        ANCHOR_LANE_MAX_CORRECTION))
+
+  except (KeyError, IndexError, TypeError, ValueError, FloatingPointError, np.linalg.LinAlgError):
+    _anchor_lane_since_two_lines += DT_MDL
+    _anchor_lane_arm_time = 0.0
+    target_authority = 0.0
+    target_correction = None
+    holding = False
+    mode = "e2e (lane data)"
+
+  if target_correction is not None:
+    _anchor_lane_correction = _anchor_rate_limit(_anchor_lane_correction, target_correction,
+                                                  ANCHOR_LANE_MAX_CORRECTION_STEP)
+  else:
+    _anchor_lane_correction = _anchor_rate_limit(_anchor_lane_correction, 0.0,
+                                                  ANCHOR_LANE_MAX_CORRECTION_STEP)
+
+  time_constant = ANCHOR_LANE_ENGAGE_TIME if target_authority >= _anchor_lane_authority else ANCHOR_LANE_RELEASE_TIME
+  _anchor_lane_authority = _anchor_lowpass(_anchor_lane_authority, target_authority, time_constant)
+  _anchor_lane_active = mode == "center" and _anchor_lane_authority > 1e-3
+  _anchor_lane_holding = holding and _anchor_lane_authority > 1e-3
+  _log_anchor_lane_mode(mode)
+
+  if not np.isfinite(e2e_curvature):
+    return e2e_curvature
+  return float(e2e_curvature + _anchor_lane_authority * _anchor_lane_correction)
+
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
-                          lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
+                          lat_action_t: float, long_action_t: float, v_ego: float,
+                          blinkers_active: bool = False, lane_policy_enabled: bool = False) -> log.ModelDataV2.Action:
   if 'action' not in model_output:
     plan = model_output['plan'][0]
     desired_accel = get_accel_from_plan(plan[:,Plan.VELOCITY][:,0],
@@ -68,6 +321,9 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
   else:
     desired_curvature = prev_action.desiredCurvature
 
+  desired_curvature = apply_anchored_lane_offset(model_output, desired_curvature, v_ego,
+                                                  blinkers_active=blinkers_active,
+                                                  lane_policy_enabled=lane_policy_enabled)
   return log.ModelDataV2.Action(desiredCurvature=float(desired_curvature),
                                 desiredAcceleration=float(desired_accel),
                                 shouldStop=bool(stop))
@@ -310,6 +566,11 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
+  lane_policy_enabled = get_anchor_lane_policy_enabled(params)
+  last_published_anchor_active: bool | None = None
+  last_published_anchor_holding: bool | None = None
+  params.put_bool("AnchorLanePolicyActive", False)
+  params.put_bool("AnchorLanePolicyHolding", False)
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -413,7 +674,19 @@ def main(demo=False):
       drivingdata_send = messaging.new_message('drivingModelData')
       posenet_send = messaging.new_message('cameraOdometry')
 
-      action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
+      blinkers_active = sm['carState'].leftBlinker or sm['carState'].rightBlinker
+      if run_count % ModelConstants.MODEL_RUN_FREQ == 0:
+        lane_policy_enabled = get_anchor_lane_policy_enabled(params)
+      action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
+                                     blinkers_active=blinkers_active, lane_policy_enabled=lane_policy_enabled)
+      anchor_active = lane_policy_enabled and _anchor_lane_active
+      anchor_holding = lane_policy_enabled and _anchor_lane_holding
+      if (anchor_active != last_published_anchor_active or
+          anchor_holding != last_published_anchor_holding):
+        params.put_bool("AnchorLanePolicyActive", anchor_active)
+        params.put_bool("AnchorLanePolicyHolding", anchor_holding)
+        last_published_anchor_active = anchor_active
+        last_published_anchor_holding = anchor_holding
       prev_action = action
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
