@@ -93,8 +93,14 @@ class AugmentedRoadView(CameraView):
     # Draw colored border based on driving state
     self._draw_border(rect)
 
-  def _handle_mouse_press(self, _):
-    if not self._hud_renderer.user_interacting() and self._click_callback is not None:
+  def _handle_mouse_press(self, mouse_pos):
+    if self._hud_renderer.user_interacting():
+      return
+    # The rendered path is the lane-policy selector. Consume a hit so a path
+    # tap never also opens the normal on-road click action.
+    if self.model_renderer.handle_path_tap(mouse_pos):
+      return
+    if self._click_callback is not None:
       self._click_callback()
 
   def _handle_mouse_release(self, _):

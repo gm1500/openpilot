@@ -8,6 +8,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.ui.onroad.lane_policy_visuals import lane_policy_visual_active, point_in_polygon
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
 from openpilot.system.ui.widgets import Widget
@@ -256,14 +257,26 @@ class ModelRenderer(Widget):
 
     return LeadVehicle(glow=glow, chevron=chevron, fill_alpha=int(fill_alpha))
 
+  def handle_path_tap(self, mouse_pos) -> bool:
+    """Toggle the lane-policy selector only when the visible path is tapped."""
+    if self._path.projected_points.size == 0:
+      return False
+    point = (float(mouse_pos.x), float(mouse_pos.y))
+    if not point_in_polygon(point, self._path.projected_points):
+      return False
+    ui_state.set_lane_policy_enabled(not ui_state.lane_policy_enabled)
+    return True
+
   def _draw_lane_lines(self):
-    """Draw lane lines and road edges"""
+    """Draw lane lines and road edges using the selected policy's color language."""
+    lane_center_visual = lane_policy_visual_active(ui_state.lane_policy_enabled, ui_state.engaged)
     for i, lane_line in enumerate(self._lane_lines):
       if lane_line.projected_points.size == 0:
         continue
 
       alpha = np.clip(self._lane_line_probs[i], 0.0, 0.7)
-      color = rl.Color(255, 255, 255, int(alpha * 255))
+      color = (rl.Color(128, 216, 166, int(alpha * 255)) if lane_center_visual else
+               rl.Color(255, 255, 255, int(alpha * 255)))
       draw_polygon(self._rect, lane_line.projected_points, color)
 
     for i, road_edge in enumerate(self._road_edges):
@@ -275,8 +288,21 @@ class ModelRenderer(Widget):
       draw_polygon(self._rect, road_edge.projected_points, color)
 
   def _draw_path(self, sm):
-    """Draw path with dynamic coloring based on mode and throttle state."""
+    """Draw path with stock colors, or a stable white lane-center selection."""
     if not self._path.projected_points.size:
+      return
+
+    # A selected lane policy has one stable visual identity while steering is
+    # engaged, including short confidence fallbacks. E2E retains upstream
+    # colors and lane lines whenever the selector is off or openpilot is off.
+    if lane_policy_visual_active(ui_state.lane_policy_enabled, ui_state.engaged):
+      gradient = Gradient(
+        start=(0.0, 1.0),
+        end=(0.0, 0.0),
+        colors=NO_THROTTLE_COLORS,
+        stops=[0.0, 0.5, 1.0],
+      )
+      draw_polygon(self._rect, self._path.projected_points, gradient=gradient)
       return
 
     allow_throttle = sm['longitudinalPlan'].allowThrottle or not self._longitudinal_control
