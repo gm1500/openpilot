@@ -88,12 +88,16 @@ class TestLanePolicy(unittest.TestCase):
     self.assertLessEqual(curvature - e2e, modeld.LANE_LOCK_MAX_CENTER_CORRECTION)
 
     centered = make_model_output(lane_center=0.0)
-    # The correction changes by a bounded single-frame step, rather than a
-    # delayed 0.4 s lane-curvature filter.
+    # Entry ramps in rather than causing a one-frame steering step.
+    self.assertLessEqual(abs(modeld._lane_lock_center_correction),
+                         modeld.LANE_LOCK_CORRECTION_ENGAGE_STEP + 1e-12)
+
+    # A smaller target releases faster than it engages, so a curve/lane-change
+    # correction does not persist through the midpoint.
     previous = modeld._lane_lock_center_correction
     modeld.apply_lane_lock(centered, e2e, 20.0, lane_policy_enabled=True)
     self.assertLessEqual(abs(modeld._lane_lock_center_correction - previous),
-                         modeld.LANE_LOCK_CORRECTION_STEP + 1e-12)
+                         modeld.LANE_LOCK_CORRECTION_RELEASE_STEP + 1e-12)
 
   def test_no_plan_gate_for_clean_lanes(self):
     output = make_model_output(lane_center=0.35)

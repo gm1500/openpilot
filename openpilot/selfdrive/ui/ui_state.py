@@ -235,6 +235,11 @@ class UIState:
     else:
       self.chestnut_state = ChestnutState.ACTIVE
 
+  def set_lane_policy_enabled(self, enabled: bool) -> None:
+    """Persist the HUD selector and update its in-memory state immediately."""
+    self.params.put_bool("LanePolicyEnabled", enabled)
+    self.lane_policy_enabled = enabled
+
   def update_params(self) -> None:
     # For slower operations
     # Update longitudinal control state

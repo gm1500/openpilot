@@ -1,5 +1,4 @@
 import pyray as rl
-from openpilot.common.params import Params
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -10,7 +9,6 @@ class LanePolicyButton(Widget):
   """On-road, per-drive selector for the full lane-centering policy."""
   def __init__(self):
     super().__init__()
-    self._params = Params()
     self._lane_policy_enabled = False
     self._lane_policy_active = False
     self._lane_policy_blending = False
@@ -28,8 +26,10 @@ class LanePolicyButton(Widget):
 
   def _handle_mouse_release(self, mouse_pos) -> None:
     super()._handle_mouse_release(mouse_pos)
-    self._lane_policy_enabled = not self._lane_policy_enabled
-    self._params.put_bool("LanePolicyEnabled", self._lane_policy_enabled)
+    # UIState updates the shared in-memory value before the normal parameter
+    # refresh, so a second tap is never overwritten by a stale UI poll.
+    self._lane_policy_enabled = not ui_state.lane_policy_enabled
+    ui_state.set_lane_policy_enabled(self._lane_policy_enabled)
 
   def _render(self, rect: rl.Rectangle) -> None:
     if not self._lane_policy_enabled:

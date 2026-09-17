@@ -66,9 +66,14 @@ LANE_LOCK_FIT_START = 8.0                      # m
 LANE_LOCK_FIT_END = 55.0                       # m
 LANE_LOCK_MIN_LOOKAHEAD = 25.0                 # m
 LANE_LOCK_MAX_LOOKAHEAD = 45.0                 # m
-LANE_LOCK_HEADING_GAIN = 0.75
+LANE_LOCK_HEADING_GAIN = 0.55
 LANE_LOCK_MAX_CENTER_CORRECTION = 0.00045      # 1/m
-LANE_LOCK_CORRECTION_STEP = 0.00012            # 1/m per model frame
+# Build lane authority deliberately, but release it faster when the lane
+# midpoint says the previous correction is no longer needed. This prevents a
+# curve-exit or lane-change correction from lingering past the centerline.
+LANE_LOCK_CORRECTION_ENGAGE_STEP = 0.00008      # 1/m per model frame
+LANE_LOCK_CORRECTION_RELEASE_STEP = 0.00020     # 1/m per model frame
+LANE_LOCK_CORRECTION_DEADBAND = 0.000012        # 1/m
 LANE_LOCK_MAX_LANE_CHANGE_PROB = 0.10
 LANE_LOCK_LOG_INTERVAL = 1.0                   # seconds
 
@@ -273,16 +278,22 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     center_correction = float(np.clip(center_correction,
                                       -LANE_LOCK_MAX_CENTER_CORRECTION,
                                       LANE_LOCK_MAX_CENTER_CORRECTION))
+    if abs(center_correction) < LANE_LOCK_CORRECTION_DEADBAND:
+      center_correction = 0.0
 
-    # A hard per-frame bound rejects a line-model jump without the 0.4 s
-    # low-pass lag that previously kept steering after the center target moved.
+    # Enter smoothly after arming. Build correction deliberately, but release
+    # it faster when the target shrinks or reverses after a curve/lane change.
     if not _lane_lock_has_center_correction:
-      _lane_lock_center_correction = center_correction
+      _lane_lock_center_correction = 0.0
       _lane_lock_has_center_correction = True
-    else:
-      delta = float(np.clip(center_correction - _lane_lock_center_correction,
-                            -LANE_LOCK_CORRECTION_STEP, LANE_LOCK_CORRECTION_STEP))
-      _lane_lock_center_correction += delta
+
+    correction_step = (LANE_LOCK_CORRECTION_RELEASE_STEP
+                       if (abs(center_correction) < abs(_lane_lock_center_correction) or
+                           center_correction * _lane_lock_center_correction < 0.0)
+                       else LANE_LOCK_CORRECTION_ENGAGE_STEP)
+    delta = float(np.clip(center_correction - _lane_lock_center_correction,
+                          -correction_step, correction_step))
+    _lane_lock_center_correction += delta
 
     _lane_lock_lane_curvature = float(e2e_curvature + _lane_lock_center_correction)
     _lane_lock_has_lane_curvature = True
@@ -679,8 +690,9 @@ def main(demo=False):
       posenet_send = messaging.new_message('cameraOdometry')
 
       blinkers_active = sm['carState'].leftBlinker or sm['carState'].rightBlinker
-      if run_count % ModelConstants.MODEL_RUN_FREQ == 0:
-        lane_policy_enabled = get_lane_policy_enabled(params)
+      # Read the on-road HUD selector for every model frame so OFF -> ON and
+      # ON -> OFF take effect immediately, not on the next one-second poll.
+      lane_policy_enabled = get_lane_policy_enabled(params)
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
                                      blinkers_active, lane_policy_enabled)
       lane_policy_active = lane_policy_enabled and _lane_lock_full_active
