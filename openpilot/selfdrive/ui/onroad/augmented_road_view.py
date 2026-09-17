@@ -2,6 +2,7 @@ import numpy as np
 import pyray as rl
 from openpilot.cereal import log
 from openpilot.cereal.visionipc import VisionStreamType
+from openpilot.common.params import Params
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.onroad.alert_renderer import AlertRenderer
@@ -47,6 +48,8 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer = HudRenderer()
     self.alert_renderer = AlertRenderer()
     self.driver_state_renderer = DriverStateRenderer()
+    self._params = Params()
+    self._path_tap_started = False
 
   def _render(self, rect):
     # Only render when system is started to avoid invalid data access
@@ -93,13 +96,20 @@ class AugmentedRoadView(CameraView):
     # Draw colored border based on driving state
     self._draw_border(rect)
 
-  def _handle_mouse_press(self, _):
-    if not self._hud_renderer.user_interacting() and self._click_callback is not None:
+  def _handle_mouse_press(self, mouse_pos):
+    # Only a press and release on the projected driving path selects the lane policy.
+    # Taps elsewhere retain the normal camera-view behavior.
+    self._path_tap_started = self.model_renderer.contains_path_point(mouse_pos)
+    if not self._path_tap_started and not self._hud_renderer.user_interacting() and self._click_callback is not None:
       self._click_callback()
 
-  def _handle_mouse_release(self, _):
-    # We only call click callback on press if not interacting with HUD
-    pass
+  def _handle_mouse_release(self, mouse_pos):
+    if self._path_tap_started and self.model_renderer.contains_path_point(mouse_pos):
+      selected = not (True if self._params.get("LanePolicyEnabled") is None else self._params.get_bool("LanePolicyEnabled"))
+      self._params.put_bool("LanePolicyEnabled", selected)
+      # Reflect the choice immediately; modeld picks it up on its next refresh.
+      ui_state.lane_policy_enabled = selected
+    self._path_tap_started = False
 
   def _draw_border(self, rect: rl.Rectangle):
     rl.draw_rectangle_lines_ex(rect, UI_BORDER_SIZE, rl.BLACK)

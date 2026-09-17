@@ -28,6 +28,22 @@ NO_THROTTLE_COLORS = [
   rl.Color(242, 242, 242, 0),   # HSLF(112/360, 0.0, 0.95, 0.0)
 ]
 
+LANE_CENTER_COLORS = [
+  rl.Color(128, 216, 166, 102),
+  rl.Color(128, 216, 166, 89),
+  rl.Color(128, 216, 166, 0),
+]
+LANE_BLEND_COLORS = [
+  rl.Color(97, 183, 230, 102),
+  rl.Color(97, 183, 230, 89),
+  rl.Color(97, 183, 230, 0),
+]
+LANE_FALLBACK_COLORS = [
+  rl.Color(218, 111, 37, 102),
+  rl.Color(218, 111, 37, 89),
+  rl.Color(218, 111, 37, 0),
+]
+
 
 @dataclass
 class ModelPoints:
@@ -258,12 +274,14 @@ class ModelRenderer(Widget):
 
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""
+    policy_color = self._lane_policy_color()
     for i, lane_line in enumerate(self._lane_lines):
       if lane_line.projected_points.size == 0:
         continue
 
       alpha = np.clip(self._lane_line_probs[i], 0.0, 0.7)
-      color = rl.Color(255, 255, 255, int(alpha * 255))
+      base_color = policy_color if policy_color is not None and i in (1, 2) else rl.WHITE
+      color = rl.Color(base_color.r, base_color.g, base_color.b, int(alpha * 255))
       draw_polygon(self._rect, lane_line.projected_points, color)
 
     for i, road_edge in enumerate(self._road_edges):
@@ -277,6 +295,17 @@ class ModelRenderer(Widget):
   def _draw_path(self, sm):
     """Draw path with dynamic coloring based on mode and throttle state."""
     if not self._path.projected_points.size:
+      return
+
+    policy_colors = self._lane_policy_colors()
+    if policy_colors is not None:
+      gradient = Gradient(
+        start=(0.0, 1.0),
+        end=(0.0, 0.0),
+        colors=policy_colors,
+        stops=[0.0, 0.5, 1.0],
+      )
+      draw_polygon(self._rect, self._path.projected_points, gradient=gradient)
       return
 
     allow_throttle = sm['longitudinalPlan'].allowThrottle or not self._longitudinal_control
@@ -299,6 +328,33 @@ class ModelRenderer(Widget):
         stops=[0.0, 0.5, 1.0],
       )
       draw_polygon(self._rect, self._path.projected_points, gradient=gradient)
+
+  def _lane_policy_colors(self) -> list[rl.Color] | None:
+    if not ui_state.lane_policy_enabled:
+      return None
+    if ui_state.lane_policy_active:
+      return LANE_CENTER_COLORS
+    if ui_state.lane_policy_blending:
+      return LANE_BLEND_COLORS
+    return LANE_FALLBACK_COLORS
+
+  def _lane_policy_color(self) -> rl.Color | None:
+    colors = self._lane_policy_colors()
+    return colors[0] if colors is not None else None
+
+  def contains_path_point(self, point) -> bool:
+    """Return whether a screen point lies in the currently visible path polygon."""
+    polygon = self._path.projected_points
+    if polygon.shape[0] < 3:
+      return False
+
+    x, y = float(point.x), float(point.y)
+    xs, ys = polygon[:, 0], polygon[:, 1]
+    next_xs, next_ys = np.roll(xs, -1), np.roll(ys, -1)
+    crosses = (ys > y) != (next_ys > y)
+    with np.errstate(divide="ignore", invalid="ignore"):
+      x_intercepts = (next_xs - xs) * (y - ys) / (next_ys - ys) + xs
+    return bool(np.count_nonzero(crosses & (x < x_intercepts)) % 2)
 
   def _draw_lead_indicator(self):
     # Draw lead vehicles if available
