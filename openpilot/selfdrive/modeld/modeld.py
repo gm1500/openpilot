@@ -45,21 +45,23 @@ MIN_LAT_CONTROL_SPEED = 0.3
 BIG_MODEL_TIMEOUT = 60
 
 
-# On-road UI lane-policy toggle. The default is exact upstream E2E; selecting
-# lane mode applies full lane-midpoint authority only while every confidence,
-# geometry, intent, and path-disagreement guard remains valid.
+# On-road UI lane-policy toggle. The default is exact upstream E2E. Once a
+# clean lane has been observed long enough, confidence controls a gradual
+# lane-midpoint/E2E blend instead of a binary handoff.
 LANE_POLICY_ENABLED_PARAM = "LanePolicyEnabled"
-LANE_LOCK_ENTER_LINE_PROB = 0.92                # both inner lines to engage
-LANE_LOCK_HOLD_LINE_PROB = 0.85                 # both inner lines to remain active
+LANE_LOCK_ARM_LINE_PROB = 0.92                  # both inner lines before first engagement
+LANE_LOCK_FULL_LINE_PROB = 0.85                 # full midpoint authority
+LANE_LOCK_BLEND_LINE_PROB = 0.70                # below this, return to E2E
 LANE_LOCK_MIN_LANE_WIDTH = 2.8                  # m
 LANE_LOCK_MAX_LANE_WIDTH = 4.7                  # m
 LANE_LOCK_MIN_WIDTH_EDGE = 0.15                 # m inside accepted range
 LANE_LOCK_MAX_WIDTH_CHANGE = 0.45               # m across fitted horizon
 LANE_LOCK_MAX_PATH_DISAGREEMENT = 0.75          # m, extreme safety release
-LANE_LOCK_MAX_CURVATURE_DELTA = 0.0015            # 1/m, safety release
+LANE_LOCK_MAX_CURVATURE_DELTA = 0.0015          # 1/m, safety release
+LANE_LOCK_ARM_TIME = 0.75                       # seconds of clean confidence
 LANE_LOCK_ENGAGE_TIME = 0.50                    # seconds
-LANE_LOCK_RELEASE_TIME = 0.15                   # seconds
-LANE_LOCK_CURVATURE_TIME = 0.25                 # seconds
+LANE_LOCK_RELEASE_TIME = 0.50                   # seconds, confidence-only fade
+LANE_LOCK_CURVATURE_TIME = 0.40                 # seconds
 LANE_LOCK_MAX_LANE_CHANGE_PROB = 0.10
 LANE_LOCK_LOG_INTERVAL = 1.0                    # seconds
 
@@ -67,6 +69,8 @@ _lane_lock_weight = 0.0
 _lane_lock_lane_curvature = 0.0
 _lane_lock_has_lane_curvature = False
 _lane_lock_full_active = False
+_lane_lock_ready = False
+_lane_lock_arm_time = 0.0
 _lane_lock_error_logged = False
 _lane_lock_last_logged_mode = None
 _lane_lock_last_log_time = 0.0
@@ -76,10 +80,13 @@ def reset_lane_lock() -> None:
   """Discard any lane target so the caller immediately receives raw E2E."""
   global _lane_lock_weight, _lane_lock_lane_curvature
   global _lane_lock_has_lane_curvature, _lane_lock_full_active
+  global _lane_lock_ready, _lane_lock_arm_time
   _lane_lock_weight = 0.0
   _lane_lock_lane_curvature = 0.0
   _lane_lock_has_lane_curvature = False
   _lane_lock_full_active = False
+  _lane_lock_ready = False
+  _lane_lock_arm_time = 0.0
 
 
 def log_lane_lock_mode(mode: str) -> None:
@@ -105,17 +112,24 @@ def get_inner_lane_line_probs(model_output: dict[str, np.ndarray]) -> tuple[floa
   return float(lane_line_probs[0, 3]), float(lane_line_probs[0, 5])
 
 
+def get_lane_confidence_weight(line_confidence: float) -> float:
+  """Map the weaker inner-lane confidence to midpoint authority."""
+  return float(np.clip((line_confidence - LANE_LOCK_BLEND_LINE_PROB) /
+                       (LANE_LOCK_FULL_LINE_PROB - LANE_LOCK_BLEND_LINE_PROB), 0.0, 1.0))
+
+
 def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
                     blinkers_active: bool = False, lane_policy_enabled: bool = False) -> float:
-  """Apply full lane-center authority only after all lane-quality gates pass.
+  """Blend stable lane-midpoint curvature into E2E after a clean arming period.
 
-  The disabled state is exact upstream E2E. With lane mode selected
-  on, lane midpoint curvature is used only for high-confidence, stable geometry.
-  Weak lines, blinkers, lane-change intent, invalid geometry, unavailable
-  path data, and extreme path disagreement all return control to E2E.
+  Blinkers, lane-change intent, invalid geometry, unavailable path data, and
+  large E2E/lane disagreement are hard releases to exact E2E. Confidence is
+  the only soft gate: 0.85 and above gives full lane authority, 0.70--0.85
+  blends toward E2E, and lower confidence smoothly fades to E2E.
   """
   global _lane_lock_weight, _lane_lock_lane_curvature
   global _lane_lock_has_lane_curvature, _lane_lock_full_active
+  global _lane_lock_ready, _lane_lock_arm_time
   global _lane_lock_error_logged
 
   if not lane_policy_enabled:
@@ -127,10 +141,6 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     reset_lane_lock()
     log_lane_lock_mode("stock-e2e fallback: blinker")
     return float(e2e_curvature)
-
-  target_weight = 0.0
-  candidate_lane_curvature = None
-  fallback_reason = "stock-e2e fallback: lane data unavailable"
 
   try:
     # Lane-line axes are [batch, lane, distance, coordinate]. Inner lanes are
@@ -159,82 +169,90 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     )
 
     if not valid_lane_samples:
-      _lane_lock_full_active = False
-      fallback_reason = "stock-e2e fallback: lane geometry"
-    else:
-      # Real line predictions can have an isolated endpoint wobble. Judge lane
-      # width from the robust 10th/50th/90th percentiles over the near horizon,
-      # rather than rejecting an otherwise clean lane because of one sample.
-      width_p10, mean_width, width_p90 = np.percentile(lane_width[fit], (10.0, 50.0, 90.0))
-      valid_lane_geometry = LANE_LOCK_MIN_LANE_WIDTH <= mean_width <= LANE_LOCK_MAX_LANE_WIDTH
-      width_change = float(width_p90 - width_p10)
-      width_edge_distance = min(width_p10 - LANE_LOCK_MIN_LANE_WIDTH,
-                                LANE_LOCK_MAX_LANE_WIDTH - width_p90)
-      if not valid_lane_geometry:
-        _lane_lock_full_active = False
-        fallback_reason = "stock-e2e fallback: lane geometry"
-      else:
-        required_line_prob = (LANE_LOCK_HOLD_LINE_PROB if _lane_lock_full_active
-                              else LANE_LOCK_ENTER_LINE_PROB)
-        full_lane_ready = (
-          min(left_prob, right_prob) >= required_line_prob and
-          width_edge_distance >= LANE_LOCK_MIN_WIDTH_EDGE and
-          width_change <= LANE_LOCK_MAX_WIDTH_CHANGE
-        )
+      reset_lane_lock()
+      log_lane_lock_mode("stock-e2e fallback: lane geometry")
+      return float(e2e_curvature)
 
-        if not full_lane_ready:
-          _lane_lock_full_active = False
-          if min(left_prob, right_prob) < required_line_prob:
-            fallback_reason = "stock-e2e fallback: lane confidence"
-          else:
-            fallback_reason = "stock-e2e fallback: lane-width stability"
-        else:
-          # y = ax^2 + bx + c. Curvature includes midpoint offset and heading,
-          # so it actively converges the vehicle to the lane midpoint.
-          a, b, c = np.polyfit(x[fit], 0.5 * (left_y[fit] + right_y[fit]), 2)
-          slope = 2.0 * a * lookahead + b
-          lane_geometry_curvature = 2.0 * a / ((1.0 + slope * slope) ** 1.5)
-          lane_curvature = lane_geometry_curvature + 2.0 * b / lookahead + 2.0 * c / (lookahead * lookahead)
+    # Real line predictions can have an isolated endpoint wobble. Judge lane
+    # width from the robust 10th/50th/90th percentiles over the near horizon,
+    # rather than rejecting an otherwise clean lane because of one sample.
+    width_p10, mean_width, width_p90 = np.percentile(lane_width[fit], (10.0, 50.0, 90.0))
+    width_change = float(width_p90 - width_p10)
+    width_edge_distance = min(width_p10 - LANE_LOCK_MIN_LANE_WIDTH,
+                              LANE_LOCK_MAX_LANE_WIDTH - width_p90)
+    valid_lane_geometry = (
+      LANE_LOCK_MIN_LANE_WIDTH <= mean_width <= LANE_LOCK_MAX_LANE_WIDTH and
+      width_edge_distance >= LANE_LOCK_MIN_WIDTH_EDGE and
+      width_change <= LANE_LOCK_MAX_WIDTH_CHANGE
+    )
+    if not valid_lane_geometry:
+      reset_lane_lock()
+      log_lane_lock_mode("stock-e2e fallback: lane geometry")
+      return float(e2e_curvature)
 
-          plan = model_output['plan'][0, :, Plan.POSITION]
-          plan_x, plan_y = plan[:, 0], plan[:, 1]
-          plan_horizon = (plan_x >= 0.0) & (plan_x <= max(lookahead + 5.0, 20.0))
-          horizon_x, horizon_y = plan_x[plan_horizon], plan_y[plan_horizon]
-          valid_plan = (
-            horizon_x.size >= 2 and
-            np.all(np.isfinite(horizon_x)) and
-            np.all(np.isfinite(horizon_y)) and
-            horizon_x[0] <= lookahead <= horizon_x[-1] and
-            np.all(np.diff(horizon_x) > 0.0)
-          )
+    # y = ax^2 + bx + c. Curvature includes midpoint offset and heading, so it
+    # actively converges the vehicle to the lane midpoint.
+    a, b, c = np.polyfit(x[fit], 0.5 * (left_y[fit] + right_y[fit]), 2)
+    slope = 2.0 * a * lookahead + b
+    lane_geometry_curvature = 2.0 * a / ((1.0 + slope * slope) ** 1.5)
+    lane_curvature = lane_geometry_curvature + 2.0 * b / lookahead + 2.0 * c / (lookahead * lookahead)
 
-          if not valid_plan or not np.isfinite(lane_curvature):
-            _lane_lock_full_active = False
-            fallback_reason = "stock-e2e fallback: path unavailable"
-          else:
-            e2e_y_at_lookahead = float(np.interp(lookahead, horizon_x, horizon_y))
-            lane_y_at_lookahead = float(np.polyval((a, b, c), lookahead))
-            path_disagreement = abs(e2e_y_at_lookahead - lane_y_at_lookahead)
-            if path_disagreement > LANE_LOCK_MAX_PATH_DISAGREEMENT:
-              reset_lane_lock()
-              log_lane_lock_mode("stock-e2e fallback: extreme path disagreement")
-              return float(e2e_curvature)
-            if abs(lane_curvature - e2e_curvature) > LANE_LOCK_MAX_CURVATURE_DELTA:
-              reset_lane_lock()
-              log_lane_lock_mode("stock-e2e fallback: curvature disagreement")
-              return float(e2e_curvature)
+    plan = model_output['plan'][0, :, Plan.POSITION]
+    plan_x, plan_y = plan[:, 0], plan[:, 1]
+    plan_horizon = (plan_x >= 0.0) & (plan_x <= max(lookahead + 5.0, 20.0))
+    horizon_x, horizon_y = plan_x[plan_horizon], plan_y[plan_horizon]
+    valid_plan = (
+      horizon_x.size >= 2 and
+      np.all(np.isfinite(horizon_x)) and
+      np.all(np.isfinite(horizon_y)) and
+      horizon_x[0] <= lookahead <= horizon_x[-1] and
+      np.all(np.diff(horizon_x) > 0.0)
+    )
+    if not valid_plan or not np.isfinite(lane_curvature):
+      reset_lane_lock()
+      log_lane_lock_mode("stock-e2e fallback: path unavailable")
+      return float(e2e_curvature)
 
-            _lane_lock_full_active = True
-            target_weight = 1.0
-            candidate_lane_curvature = float(lane_curvature)
-            fallback_reason = ""
+    e2e_y_at_lookahead = float(np.interp(lookahead, horizon_x, horizon_y))
+    lane_y_at_lookahead = float(np.polyval((a, b, c), lookahead))
+    path_disagreement = abs(e2e_y_at_lookahead - lane_y_at_lookahead)
+    if path_disagreement > LANE_LOCK_MAX_PATH_DISAGREEMENT:
+      reset_lane_lock()
+      log_lane_lock_mode("stock-e2e fallback: extreme path disagreement")
+      return float(e2e_curvature)
+    if abs(lane_curvature - e2e_curvature) > LANE_LOCK_MAX_CURVATURE_DELTA:
+      reset_lane_lock()
+      log_lane_lock_mode("stock-e2e fallback: curvature disagreement")
+      return float(e2e_curvature)
 
   except (KeyError, IndexError, TypeError, ValueError, FloatingPointError, np.linalg.LinAlgError) as err:
-    _lane_lock_full_active = False
-    fallback_reason = "stock-e2e fallback: lane-policy input error"
+    reset_lane_lock()
     if not _lane_lock_error_logged:
       cloudlog.warning(f"ui-lp-toggle input error: {type(err).__name__}: {err}")
       _lane_lock_error_logged = True
+    log_lane_lock_mode("stock-e2e fallback: lane-policy input error")
+    return float(e2e_curvature)
+
+  line_confidence = min(left_prob, right_prob)
+  if not _lane_lock_ready:
+    if line_confidence >= LANE_LOCK_ARM_LINE_PROB:
+      _lane_lock_arm_time = min(_lane_lock_arm_time + DT_MDL, LANE_LOCK_ARM_TIME)
+      _lane_lock_ready = _lane_lock_arm_time >= LANE_LOCK_ARM_TIME
+    else:
+      _lane_lock_arm_time = 0.0
+
+  target_weight = 0.0
+  candidate_lane_curvature = None
+  fallback_reason = "stock-e2e fallback: arming lane confidence"
+  _lane_lock_full_active = False
+  if _lane_lock_ready:
+    target_weight = get_lane_confidence_weight(line_confidence)
+    _lane_lock_full_active = target_weight >= 1.0
+    if target_weight > 0.0:
+      candidate_lane_curvature = float(lane_curvature)
+      fallback_reason = ""
+    else:
+      fallback_reason = "stock-e2e fallback: lane confidence"
 
   time_constant = LANE_LOCK_ENGAGE_TIME if target_weight > _lane_lock_weight else LANE_LOCK_RELEASE_TIME
   _lane_lock_weight += (target_weight - _lane_lock_weight) * DT_MDL / time_constant
@@ -255,8 +273,10 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     log_lane_lock_mode(fallback_reason)
     return float(e2e_curvature)
 
-  if candidate_lane_curvature is not None:
-    log_lane_lock_mode("full-lane midpoint (UI lane mode selected)")
+  if _lane_lock_full_active and _lane_lock_weight >= 1.0 - 1e-3:
+    log_lane_lock_mode("strict lane midpoint")
+  elif _lane_lock_weight > 1e-3:
+    log_lane_lock_mode("lane midpoint blend")
   else:
     log_lane_lock_mode(fallback_reason)
   return float(e2e_curvature + _lane_lock_weight * (_lane_lock_lane_curvature - e2e_curvature))
@@ -531,7 +551,9 @@ def main(demo=False):
   DH = DesireHelper()
   lane_policy_enabled = params.get_bool(LANE_POLICY_ENABLED_PARAM)
   last_published_lane_policy_active: bool | None = None
+  last_published_lane_policy_blending: bool | None = None
   params.put_bool("LanePolicyActive", False)
+  params.put_bool("LanePolicyBlending", False)
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -640,10 +662,16 @@ def main(demo=False):
         lane_policy_enabled = params.get_bool(LANE_POLICY_ENABLED_PARAM)
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
                                      blinkers_active, lane_policy_enabled)
-      lane_policy_active = lane_policy_enabled and _lane_lock_full_active
-      if lane_policy_active != last_published_lane_policy_active:
+      lane_policy_active = (lane_policy_enabled and _lane_lock_full_active and
+                            _lane_lock_weight >= 1.0 - 1e-3)
+      lane_policy_blending = (lane_policy_enabled and _lane_lock_has_lane_curvature and
+                              _lane_lock_weight > 1e-3 and not lane_policy_active)
+      if (lane_policy_active != last_published_lane_policy_active or
+          lane_policy_blending != last_published_lane_policy_blending):
         params.put_bool("LanePolicyActive", lane_policy_active)
+        params.put_bool("LanePolicyBlending", lane_policy_blending)
         last_published_lane_policy_active = lane_policy_active
+        last_published_lane_policy_blending = lane_policy_blending
       prev_action = action
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,

@@ -13,8 +13,10 @@ class LanePolicyButton(Widget):
     self._params = Params()
     self._lane_policy_enabled = False
     self._lane_policy_active = False
+    self._lane_policy_blending = False
     self._font = gui_app.font(FontWeight.SEMI_BOLD)
     self._on = rl.Color(128, 216, 166, 255)
+    self._blend = rl.Color(97, 183, 230, 255)
     self._off = rl.Color(166, 166, 166, 255)
     self._fallback = rl.Color(218, 111, 37, 255)
     self._background = rl.Color(0, 0, 0, 166)
@@ -22,6 +24,7 @@ class LanePolicyButton(Widget):
   def _update_state(self) -> None:
     self._lane_policy_enabled = ui_state.lane_policy_enabled
     self._lane_policy_active = ui_state.lane_policy_active
+    self._lane_policy_blending = ui_state.lane_policy_blending
 
   def _handle_mouse_release(self, mouse_pos) -> None:
     super()._handle_mouse_release(mouse_pos)
@@ -33,6 +36,8 @@ class LanePolicyButton(Widget):
       color, label = self._off, "LANE: E2E"
     elif self._lane_policy_active:
       color, label = self._on, "LANE: CENTER"
+    elif self._lane_policy_blending:
+      color, label = self._blend, "LANE: BLEND"
     else:
       color, label = self._fallback, "LANE: FALLBACK"
     rl.draw_rectangle_rounded(rect, 0.35, 8, self._background)
