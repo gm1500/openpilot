@@ -46,7 +46,7 @@ class TestLanePolicy(unittest.TestCase):
     self.assertTrue(modeld._lane_lock_full_active)
 
     output['lane_lines_prob'] = np.zeros((1, 4), dtype=np.float64)
-    self.assertEqual(modeld.apply_lane_lock(output, 0.0, 20.0, lane_policy_enabled=True), 0.0)
+    modeld.apply_lane_lock(output, 0.0, 20.0, lane_policy_enabled=True)
     self.assertFalse(modeld._lane_lock_full_active)
 
   def test_invalid_lane_geometry_releases_lane_lock(self):
@@ -62,8 +62,15 @@ class TestLanePolicy(unittest.TestCase):
     output = make_model_output()
     modeld.apply_lane_lock(output, 0.0, 20.0, lane_policy_enabled=True)
     self.assertTrue(modeld._lane_lock_full_active)
-    self.assertEqual(modeld.apply_lane_lock(output, 0.0123, 20.0, blinkers_active=True, lane_policy_enabled=True), 0.0123)
+    first = modeld.apply_lane_lock(output, 0.0123, 20.0, blinkers_active=True, lane_policy_enabled=True)
     self.assertFalse(modeld._lane_lock_full_active)
+    self.assertGreater(modeld._lane_lock_weight, 0.0)
+    self.assertNotEqual(first, 0.0123)
+    last = first
+    for _ in range(40):
+      last = modeld.apply_lane_lock(output, 0.0123, 20.0, blinkers_active=True, lane_policy_enabled=True)
+    self.assertAlmostEqual(last, 0.0123, places=5)
+    self.assertLess(modeld._lane_lock_weight, 1e-3)
 
   def test_confidence_hysteresis(self):
     modeld.apply_lane_lock(make_model_output(), 0.0, 20.0, lane_policy_enabled=True)
