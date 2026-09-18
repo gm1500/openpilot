@@ -45,8 +45,297 @@ MIN_LAT_CONTROL_SPEED = 0.3
 BIG_MODEL_TIMEOUT = 60
 
 
+# On-road UI lane-policy toggle. The lane policy is selected by default each
+# drive; the HUD selector selects exact upstream E2E. Once both inner lines have been
+# clean long enough, it applies a full lane-center correction while retaining
+# E2E curvature as the road-shape feed-forward target.
+LANE_POLICY_ENABLED_PARAM = "LanePolicyEnabled"
+
+# Two-line confidence uses entry/exit hysteresis. It prevents a clean lane from
+# dropping to E2E merely because one model frame is slightly less certain.
+LANE_LOCK_ARM_LINE_PROB = 0.92
+LANE_LOCK_RETAIN_LINE_PROB = 0.70
+LANE_LOCK_MIN_LANE_WIDTH = 2.6                 # m
+LANE_LOCK_MAX_LANE_WIDTH = 5.2                 # m
+LANE_LOCK_MIN_WIDTH_EDGE = 0.10                # m inside accepted range
+LANE_LOCK_MAX_WIDTH_CHANGE = 0.75              # m across the fitted horizon
+LANE_LOCK_ARM_TIME = 0.75                      # s of clean two-line confidence
+LANE_LOCK_WIDTH_TIME = 9.95                    # s, matches the old lane planner
+LANE_LOCK_ONE_LINE_HOLD_TIME = 1.00            # s using the learned lane width
+LANE_LOCK_FIT_START = 8.0                      # m
+LANE_LOCK_FIT_END = 55.0                       # m
+LANE_LOCK_MIN_LOOKAHEAD = 25.0                 # m
+LANE_LOCK_MAX_LOOKAHEAD = 45.0                 # m
+LANE_LOCK_HEADING_GAIN = 0.55
+LANE_LOCK_MAX_CENTER_CORRECTION = 0.00045      # 1/m
+LANE_LOCK_TURN_CURVATURE = 0.00015             # 1/m
+LANE_LOCK_TURN_RELEASE_TIME = 0.35             # s
+# Build lane authority deliberately, but release it faster when the lane
+# midpoint says the previous correction is no longer needed. This prevents a
+# curve-exit or lane-change correction from lingering past the centerline.
+LANE_LOCK_CORRECTION_ENGAGE_STEP = 0.00008      # 1/m per model frame
+LANE_LOCK_CORRECTION_RELEASE_STEP = 0.00020     # 1/m per model frame
+LANE_LOCK_CORRECTION_DEADBAND = 0.000012        # 1/m
+LANE_LOCK_MAX_LANE_CHANGE_PROB = 0.10
+LANE_LOCK_LOG_INTERVAL = 1.0                   # seconds
+
+# The legacy names are retained because the HUD publisher already reads them.
+# _lane_lock_weight is binary (0/1), not an E2E/lane output blend.
+_lane_lock_weight = 0.0
+_lane_lock_lane_curvature = 0.0
+_lane_lock_has_lane_curvature = False
+_lane_lock_full_active = False
+_lane_lock_ready = False
+_lane_lock_arm_time = 0.0
+_lane_lock_width = 3.7
+_lane_lock_width_valid = False
+_lane_lock_line_loss_time = 0.0
+_lane_lock_center_correction = 0.0
+_lane_lock_has_center_correction = False
+_lane_lock_one_line_hold = False
+_lane_lock_error_logged = False
+_lane_lock_last_turn_sign = 0
+_lane_lock_turn_release_time = 0.0
+_lane_lock_last_logged_mode = None
+_lane_lock_last_log_time = 0.0
+
+
+def reset_lane_lock() -> None:
+  """Discard all lane-policy state so the caller immediately receives raw E2E."""
+  global _lane_lock_weight, _lane_lock_lane_curvature
+  global _lane_lock_has_lane_curvature, _lane_lock_full_active
+  global _lane_lock_ready, _lane_lock_arm_time
+  global _lane_lock_width, _lane_lock_width_valid, _lane_lock_line_loss_time
+  global _lane_lock_center_correction, _lane_lock_has_center_correction
+  global _lane_lock_one_line_hold, _lane_lock_last_turn_sign, _lane_lock_turn_release_time
+  _lane_lock_weight = 0.0
+  _lane_lock_lane_curvature = 0.0
+  _lane_lock_has_lane_curvature = False
+  _lane_lock_full_active = False
+  _lane_lock_ready = False
+  _lane_lock_arm_time = 0.0
+  _lane_lock_width = 3.7
+  _lane_lock_width_valid = False
+  _lane_lock_line_loss_time = 0.0
+  _lane_lock_center_correction = 0.0
+  _lane_lock_has_center_correction = False
+  _lane_lock_one_line_hold = False
+  _lane_lock_last_turn_sign = 0
+  _lane_lock_turn_release_time = 0.0
+
+
+def log_lane_lock_mode(mode: str) -> None:
+  """Log state transitions at a bounded rate for rlog validation."""
+  global _lane_lock_last_logged_mode, _lane_lock_last_log_time
+  now = time.monotonic()
+  if mode != _lane_lock_last_logged_mode and now - _lane_lock_last_log_time >= LANE_LOCK_LOG_INTERVAL:
+    cloudlog.info(f"ui-lp-full-center: {mode}")
+    _lane_lock_last_logged_mode = mode
+    _lane_lock_last_log_time = now
+
+
+def get_inner_lane_line_probs(model_output: dict[str, np.ndarray]) -> tuple[float, float]:
+  """Return inner left/right raw-model probabilities from the 8-wide layout."""
+  lane_line_probs = np.asarray(model_output['lane_lines_prob'])
+  if lane_line_probs.shape != (1, 8):
+    raise ValueError(f"expected lane_lines_prob shape (1, 8), got {lane_line_probs.shape}")
+  return float(lane_line_probs[0, 3]), float(lane_line_probs[0, 5])
+
+
+def get_lane_policy_enabled(params: Params) -> bool:
+  """Read the per-drive selector, correctly decoding Params' b"0"/b"1" value."""
+  value = params.get(LANE_POLICY_ENABLED_PARAM)
+  if value is None:
+    return True
+  if isinstance(value, (bytes, bytearray)):
+    return value == b"1"
+  return bool(value)
+
+
+def get_lane_width_measurement(left_y: np.ndarray, right_y: np.ndarray,
+                               fit: np.ndarray) -> tuple[float, bool]:
+  """Return a robust width measurement and whether the pair is geometrically usable."""
+  lane_width = right_y - left_y
+  width_p10, width_median, width_p90 = np.percentile(lane_width[fit], (10.0, 50.0, 90.0))
+  width_change = float(width_p90 - width_p10)
+  width_edge_distance = min(width_p10 - LANE_LOCK_MIN_LANE_WIDTH,
+                            LANE_LOCK_MAX_LANE_WIDTH - width_p90)
+  valid = (LANE_LOCK_MIN_LANE_WIDTH <= width_median <= LANE_LOCK_MAX_LANE_WIDTH and
+           width_edge_distance >= LANE_LOCK_MIN_WIDTH_EDGE and
+           width_change <= LANE_LOCK_MAX_WIDTH_CHANGE)
+  return float(width_median), bool(valid)
+
+
+def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
+                    blinkers_active: bool = False, lane_policy_enabled: bool = False) -> float:
+  """Anchor E2E progressively to a stable lane midpoint without output blending.
+
+  E2E remains the road-shape feed-forward command. Once a clean two-line lane
+  has armed, the policy adds a bounded correction from the lane-center offset
+  and heading at a longer spatial anchor. That avoids the lagging filtered lane
+  curvature target that caused the previous policy to overshoot on a straight
+  road. A temporarily missing side uses the learned, slowly filtered lane width
+  for one second; blinkers and lane-change intent always return exact E2E.
+  """
+  global _lane_lock_weight, _lane_lock_lane_curvature
+  global _lane_lock_has_lane_curvature, _lane_lock_full_active
+  global _lane_lock_ready, _lane_lock_arm_time
+  global _lane_lock_width, _lane_lock_width_valid, _lane_lock_line_loss_time
+  global _lane_lock_center_correction, _lane_lock_has_center_correction
+  global _lane_lock_one_line_hold, _lane_lock_error_logged
+  global _lane_lock_last_turn_sign, _lane_lock_turn_release_time
+
+  if not lane_policy_enabled:
+    reset_lane_lock()
+    log_lane_lock_mode("stock-e2e (lane toggle off)")
+    return float(e2e_curvature)
+
+  if blinkers_active:
+    reset_lane_lock()
+    log_lane_lock_mode("stock-e2e fallback: blinker")
+    return float(e2e_curvature)
+
+  try:
+    # Lane axes are [batch, lane, distance, coordinate]. The inner lines are
+    # lane 1 (left) and 2 (right); their raw confidences are entries 3 and 5.
+    left_y = model_output['lane_lines'][0, 1, :, 0].astype(np.float64)
+    right_y = model_output['lane_lines'][0, 2, :, 0].astype(np.float64)
+    left_prob, right_prob = get_inner_lane_line_probs(model_output)
+    desire_state = model_output['desire_state'][0]
+    lane_change_prob = float(desire_state[log.Desire.laneChangeLeft] +
+                             desire_state[log.Desire.laneChangeRight])
+    if lane_change_prob > LANE_LOCK_MAX_LANE_CHANGE_PROB:
+      reset_lane_lock()
+      log_lane_lock_mode("stock-e2e fallback: lane-change intent")
+      return float(e2e_curvature)
+
+    x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
+    fit = (x >= LANE_LOCK_FIT_START) & (x <= LANE_LOCK_FIT_END)
+    if x.shape != left_y.shape or np.count_nonzero(fit) < 3:
+      raise ValueError("lane-line horizon does not match ModelConstants.X_IDXS")
+
+    valid_left = (np.isfinite(left_prob) and left_prob >= LANE_LOCK_RETAIN_LINE_PROB and
+                  np.all(np.isfinite(left_y[fit])))
+    valid_right = (np.isfinite(right_prob) and right_prob >= LANE_LOCK_RETAIN_LINE_PROB and
+                   np.all(np.isfinite(right_y[fit])))
+    two_line_geometry = False
+    two_line_confidence = min(left_prob, right_prob)
+    center_y: np.ndarray | None = None
+
+    if valid_left and valid_right:
+      measured_width, two_line_geometry = get_lane_width_measurement(left_y, right_y, fit)
+      if two_line_geometry:
+        center_y = 0.5 * (left_y + right_y)
+        _lane_lock_line_loss_time = 0.0
+        _lane_lock_one_line_hold = False
+
+        # Preserve the old lane planner's long (~10 s) width memory. It is
+        # only updated from strong, two-line geometry, never from a single line.
+        if two_line_confidence >= LANE_LOCK_ARM_LINE_PROB:
+          if not _lane_lock_width_valid:
+            _lane_lock_width = measured_width
+            _lane_lock_width_valid = True
+          else:
+            alpha = min(DT_MDL / LANE_LOCK_WIDTH_TIME, 1.0)
+            _lane_lock_width += alpha * (measured_width - _lane_lock_width)
+
+    if center_y is None and _lane_lock_full_active and _lane_lock_width_valid:
+      # If a side is briefly clipped (intersections, dashed paint, shadows),
+      # reconstruct its midpoint from the remaining reliable line and learned
+      # width. If both visible lines disagree about width, choose the more
+      # confident side rather than injecting their bad midpoint.
+      selected_left = valid_left and (not valid_right or not two_line_geometry or left_prob >= right_prob)
+      selected_right = valid_right and not selected_left
+      if selected_left or selected_right:
+        _lane_lock_line_loss_time += DT_MDL
+        if _lane_lock_line_loss_time <= LANE_LOCK_ONE_LINE_HOLD_TIME:
+          center_y = (left_y + _lane_lock_width / 2.0 if selected_left else
+                      right_y - _lane_lock_width / 2.0)
+          _lane_lock_one_line_hold = True
+
+    if center_y is None:
+      reset_lane_lock()
+      log_lane_lock_mode("stock-e2e fallback: lane geometry or confidence")
+      return float(e2e_curvature)
+
+    if not _lane_lock_full_active:
+      if two_line_geometry and two_line_confidence >= LANE_LOCK_ARM_LINE_PROB:
+        _lane_lock_arm_time = min(_lane_lock_arm_time + DT_MDL, LANE_LOCK_ARM_TIME)
+        _lane_lock_ready = _lane_lock_arm_time >= LANE_LOCK_ARM_TIME
+      else:
+        _lane_lock_arm_time = 0.0
+
+      if not _lane_lock_ready:
+        _lane_lock_has_lane_curvature = False
+        _lane_lock_one_line_hold = False
+        log_lane_lock_mode("stock-e2e fallback: arming lane confidence")
+        return float(e2e_curvature)
+
+      _lane_lock_full_active = True
+      _lane_lock_weight = 1.0
+      _lane_lock_line_loss_time = 0.0
+
+    # The center fit uses a farther, measured horizon. The E2E command keeps
+    # the curve feed-forward; only lane-center offset and heading become the
+    # correction. This is deliberately not an E2E/lane-curvature blend.
+    _, heading, offset = np.polyfit(x[fit], center_y[fit], 2)
+    lookahead = float(np.clip(2.0 * v_ego, LANE_LOCK_MIN_LOOKAHEAD, LANE_LOCK_MAX_LOOKAHEAD))
+    center_correction = (2.0 * (LANE_LOCK_HEADING_GAIN * heading * lookahead + offset) /
+                         (lookahead * lookahead))
+    center_correction = float(np.clip(center_correction,
+                                      -LANE_LOCK_MAX_CENTER_CORRECTION,
+                                      LANE_LOCK_MAX_CENTER_CORRECTION))
+    if abs(center_correction) < LANE_LOCK_CORRECTION_DEADBAND:
+      center_correction = 0.0
+
+    # On a meaningful E2E turn-direction change, drop only a correction
+    # that still asks for the previous turn. This preserves full lane
+    # centering during steady curves while avoiding a direction-change tug.
+    if abs(e2e_curvature) >= LANE_LOCK_TURN_CURVATURE:
+      e2e_turn_sign = 1 if e2e_curvature > 0.0 else -1
+      if _lane_lock_last_turn_sign and e2e_turn_sign != _lane_lock_last_turn_sign:
+        _lane_lock_turn_release_time = LANE_LOCK_TURN_RELEASE_TIME
+      _lane_lock_last_turn_sign = e2e_turn_sign
+    if _lane_lock_turn_release_time > 0.0:
+      _lane_lock_turn_release_time = max(0.0, _lane_lock_turn_release_time - DT_MDL)
+      if center_correction * e2e_curvature < 0.0:
+        center_correction = 0.0
+
+    # Enter smoothly after arming. Build correction deliberately, but release
+    # it faster when the target shrinks or reverses after a curve/lane change.
+    if not _lane_lock_has_center_correction:
+      _lane_lock_center_correction = 0.0
+      _lane_lock_has_center_correction = True
+
+    correction_step = (LANE_LOCK_CORRECTION_RELEASE_STEP
+                       if (abs(center_correction) < abs(_lane_lock_center_correction) or
+                           center_correction * _lane_lock_center_correction < 0.0)
+                       else LANE_LOCK_CORRECTION_ENGAGE_STEP)
+    delta = float(np.clip(center_correction - _lane_lock_center_correction,
+                          -correction_step, correction_step))
+    _lane_lock_center_correction += delta
+
+    _lane_lock_lane_curvature = float(e2e_curvature + _lane_lock_center_correction)
+    _lane_lock_has_lane_curvature = True
+    _lane_lock_weight = 1.0
+    _lane_lock_full_active = True
+    _lane_lock_ready = True
+    _lane_lock_error_logged = False
+    log_lane_lock_mode("lane center hold" if _lane_lock_one_line_hold else "full lane center")
+    return _lane_lock_lane_curvature
+
+  except (KeyError, IndexError, TypeError, ValueError, FloatingPointError, np.linalg.LinAlgError) as err:
+    reset_lane_lock()
+    if not _lane_lock_error_logged:
+      cloudlog.warning(f"ui-lp-full-center input error: {type(err).__name__}: {err}")
+      _lane_lock_error_logged = True
+    log_lane_lock_mode("stock-e2e fallback: lane-policy input error")
+    return float(e2e_curvature)
+
+
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
-                          lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
+                          lat_action_t: float, long_action_t: float, v_ego: float,
+                          blinkers_active: bool = False, lane_policy_enabled: bool = False) -> log.ModelDataV2.Action:
   if 'action' not in model_output:
     plan = model_output['plan'][0]
     desired_accel = get_accel_from_plan(plan[:,Plan.VELOCITY][:,0],
@@ -61,6 +350,8 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
   else:
     desired_accel = model_output['action'][0,1]
     desired_curvature = model_output['action'][0,0] / (max(1.0, v_ego))**2
+  desired_curvature = apply_lane_lock(model_output, desired_curvature, v_ego,
+                                      blinkers_active, lane_policy_enabled)
   stop = should_stop(v_ego, desired_accel)
   desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, LONG_SMOOTH_SECONDS)
   if v_ego > MIN_LAT_CONTROL_SPEED:
@@ -310,6 +601,11 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
+  lane_policy_enabled = get_lane_policy_enabled(params)
+  last_published_lane_policy_active: bool | None = None
+  last_published_lane_policy_blending: bool | None = None
+  params.put_bool("LanePolicyActive", False)
+  params.put_bool("LanePolicyBlending", False)
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -413,7 +709,24 @@ def main(demo=False):
       drivingdata_send = messaging.new_message('drivingModelData')
       posenet_send = messaging.new_message('cameraOdometry')
 
-      action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
+      blinkers_active = sm['carState'].leftBlinker or sm['carState'].rightBlinker
+      # Read the on-road HUD selector for every model frame so OFF -> ON and
+      # ON -> OFF take effect immediately, not on the next one-second poll.
+      lane_policy_enabled = get_lane_policy_enabled(params)
+      action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
+                                     blinkers_active, lane_policy_enabled)
+      lane_policy_active = lane_policy_enabled and _lane_lock_full_active
+      # Retain the existing UI parameter as a status bit: READY while the
+      # two-line timer arms, HOLD while a single line is being reconstructed.
+      lane_policy_blending = (lane_policy_enabled and
+                              (_lane_lock_one_line_hold or
+                               (not lane_policy_active and _lane_lock_arm_time > 0.0)))
+      if (lane_policy_active != last_published_lane_policy_active or
+          lane_policy_blending != last_published_lane_policy_blending):
+        params.put_bool("LanePolicyActive", lane_policy_active)
+        params.put_bool("LanePolicyBlending", lane_policy_blending)
+        last_published_lane_policy_active = lane_policy_active
+        last_published_lane_policy_blending = lane_policy_blending
       prev_action = action
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
