@@ -16,6 +16,9 @@ CLIP_MARGIN = 500
 MIN_DRAW_DISTANCE = 10.0
 MAX_DRAW_DISTANCE = 100.0
 
+LANE_POLICY_READY_COLOR = (97, 183, 230)
+LANE_POLICY_ACTIVE_COLOR = (128, 216, 166)
+
 THROTTLE_COLORS = [
   rl.Color(13, 248, 122, 102),   # HSLF(148/360, 0.94, 0.51, 0.4)
   rl.Color(114, 255, 92, 89),    # HSLF(112/360, 1.0, 0.68, 0.35)
@@ -263,8 +266,13 @@ class ModelRenderer(Widget):
         continue
 
       alpha = np.clip(self._lane_line_probs[i], 0.0, 0.7)
-      color = rl.Color(255, 255, 255, int(alpha * 255))
-      draw_polygon(self._rect, lane_line.projected_points, color)
+      color = (255, 255, 255)
+      if i in (1, 2) and ui_state.lane_policy_enabled:
+        if ui_state.lane_policy_active and ui_state.engaged:
+          color = LANE_POLICY_ACTIVE_COLOR
+        elif ui_state.lane_policy_active or ui_state.lane_policy_blending:
+          color = LANE_POLICY_READY_COLOR
+      draw_polygon(self._rect, lane_line.projected_points, rl.Color(*color, int(alpha * 255)))
 
     for i, road_edge in enumerate(self._road_edges):
       if road_edge.projected_points.size == 0:
