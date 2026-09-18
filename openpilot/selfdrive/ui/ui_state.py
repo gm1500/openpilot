@@ -19,6 +19,18 @@ BACKLIGHT_OFFROAD = 65 if HARDWARE.get_device_type() == "mici" else 50
 PARAM_UPDATE_TIME = 1 / 5.0
 
 
+def get_lane_policy_enabled(params: Params) -> bool:
+  """Read the typed BOOL parameter while tolerating a legacy raw value."""
+  value = params.get("LanePolicyEnabled")
+  if value is None:
+    # The selector is deliberately default-on when the per-drive parameter is
+    # cleared at startup or an on-road transition.
+    return True
+  if isinstance(value, (bytes, bytearray)):
+    return value == b"1"
+  return bool(value)
+
+
 class UIStatus(Enum):
   DISENGAGED = "disengaged"
   ENGAGED = "engaged"
@@ -87,8 +99,7 @@ class UIState:
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
     self.experimental_mode: bool = self.params.get_bool("ExperimentalMode")
     self.experimental_mode_confirmed: bool = self.params.get_bool("ExperimentalModeConfirmed")
-    lane_policy_enabled = self.params.get("LanePolicyEnabled")
-    self.lane_policy_enabled: bool = True if lane_policy_enabled is None else lane_policy_enabled == b"1"
+    self.lane_policy_enabled: bool = get_lane_policy_enabled(self.params)
     self.lane_policy_active: bool = self.params.get_bool("LanePolicyActive")
     self.lane_policy_blending: bool = self.params.get_bool("LanePolicyBlending")
     self.chestnut_present: bool = False
@@ -256,8 +267,7 @@ class UIState:
     self.always_on_dm = self.params.get_bool("AlwaysOnDM")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
     self.experimental_mode_confirmed = self.params.get_bool("ExperimentalModeConfirmed")
-    lane_policy_enabled = self.params.get("LanePolicyEnabled")
-    self.lane_policy_enabled = True if lane_policy_enabled is None else lane_policy_enabled == b"1"
+    self.lane_policy_enabled = get_lane_policy_enabled(self.params)
     self.lane_policy_active = self.params.get_bool("LanePolicyActive")
     self.lane_policy_blending = self.params.get_bool("LanePolicyBlending")
     if not self.chestnut_compiled:

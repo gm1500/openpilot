@@ -8,7 +8,8 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 
 
 def make_model_output(left_prob: float = 0.99, right_prob: float = 0.99, lane_width: float = 3.6,
-                      lane_width_end: float | None = None, lane_center: float = 0.0) -> dict[str, np.ndarray]:
+                      lane_width_end: float | None = None, lane_center: float = 0.0,
+                      lane_heading: float = 0.0) -> dict[str, np.ndarray]:
   x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
   lane_lines = np.zeros((1, 4, len(x), 2), dtype=np.float64)
   target_width = lane_width if lane_width_end is None else lane_width_end
@@ -16,8 +17,9 @@ def make_model_output(left_prob: float = 0.99, right_prob: float = 0.99, lane_wi
                             (modeld.LANE_LOCK_FIT_END - modeld.LANE_LOCK_FIT_START), 0.0, 1.0)
   widths = lane_width + (target_width - lane_width) * width_progress
   # openpilot lateral coordinates are left-negative and right-positive.
-  lane_lines[0, 1, :, 0] = lane_center - widths / 2.0
-  lane_lines[0, 2, :, 0] = lane_center + widths / 2.0
+  centerline = lane_center + lane_heading * x
+  lane_lines[0, 1, :, 0] = centerline - widths / 2.0
+  lane_lines[0, 2, :, 0] = centerline + widths / 2.0
   lane_line_probs = np.zeros((1, 8), dtype=np.float64)
   lane_line_probs[0, 3] = left_prob
   lane_line_probs[0, 5] = right_prob
@@ -79,21 +81,20 @@ class TestLanePolicy(unittest.TestCase):
     self.assertEqual(modeld._lane_lock_weight, 1.0)
 
   def test_full_center_correction_keeps_e2e_curve_feedforward(self):
+    self.arm_lane_policy()
     output = make_model_output(lane_center=0.45)
-    self.arm_lane_policy(output)
     e2e = 0.0010
     curvature = modeld.apply_lane_lock(output, e2e, 20.0, lane_policy_enabled=True)
     self.assertTrue(modeld._lane_lock_full_active)
     self.assertGreater(curvature, e2e)
     self.assertLessEqual(curvature - e2e, modeld.LANE_LOCK_MAX_CENTER_CORRECTION)
-
-    centered = make_model_output(lane_center=0.0)
     # Entry ramps in rather than causing a one-frame steering step.
     self.assertLessEqual(abs(modeld._lane_lock_center_correction),
                          modeld.LANE_LOCK_CORRECTION_ENGAGE_STEP + 1e-12)
 
     # A smaller target releases faster than it engages, so a curve/lane-change
     # correction does not persist through the midpoint.
+    centered = make_model_output(lane_center=0.0)
     previous = modeld._lane_lock_center_correction
     modeld.apply_lane_lock(centered, e2e, 20.0, lane_policy_enabled=True)
     self.assertLessEqual(abs(modeld._lane_lock_center_correction - previous),
@@ -120,6 +121,34 @@ class TestLanePolicy(unittest.TestCase):
     after = modeld._lane_lock_center_correction
     self.assertGreater(after, before)
     self.assertLessEqual(abs(after - before), modeld.LANE_LOCK_CORRECTION_RELEASE_STEP + 1e-12)
+
+  def test_sharp_curve_lane_target_reversal_settles_before_crossing(self):
+    # E2E remains in the same sharp turn while the lane-fit heading flips.
+    # Releasing the old correction before accepting the new direction prevents
+    # the controller from commanding an immediate steering reversal.
+    e2e_curve = 1.5 * modeld.LANE_LOCK_HEADING_CURVATURE_FADE
+    self.arm_lane_policy()
+    negative_heading = make_model_output(lane_heading=-0.03)
+    for _ in range(6):
+      modeld.apply_lane_lock(negative_heading, e2e_curve, 20.0, lane_policy_enabled=True)
+    before = modeld._lane_lock_center_correction
+    self.assertLess(before, 0.0)
+
+    positive_heading = make_model_output(lane_heading=0.03)
+    modeld.apply_lane_lock(positive_heading, e2e_curve, 20.0, lane_policy_enabled=True)
+    self.assertGreater(modeld._lane_lock_curve_reversal_hold_time, 0.0)
+    self.assertLessEqual(modeld._lane_lock_center_correction, 0.0)
+
+    for _ in range(int(np.ceil(modeld.LANE_LOCK_CURVE_REVERSAL_HOLD_TIME / modeld.DT_MDL)) + 2):
+      if modeld._lane_lock_curve_reversal_hold_time <= 0.0:
+        break
+      modeld.apply_lane_lock(positive_heading, e2e_curve, 20.0, lane_policy_enabled=True)
+      self.assertLessEqual(modeld._lane_lock_center_correction, 0.0)
+    else:
+      self.fail("curve-target reversal hold did not expire")
+
+    modeld.apply_lane_lock(positive_heading, e2e_curve, 20.0, lane_policy_enabled=True)
+    self.assertGreater(modeld._lane_lock_center_correction, 0.0)
 
   def test_no_plan_gate_for_clean_lanes(self):
     output = make_model_output(lane_center=0.35)
