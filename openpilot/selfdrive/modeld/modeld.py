@@ -67,6 +67,11 @@ LANE_LOCK_FIT_END = 55.0                       # m
 LANE_LOCK_MIN_LOOKAHEAD = 25.0                 # m
 LANE_LOCK_MAX_LOOKAHEAD = 45.0                 # m
 LANE_LOCK_HEADING_GAIN = 0.55
+# E2E supplies the road-shape feed-forward. Fade only the added lane-heading
+# contribution in a substantial E2E curve; lane-center offset authority stays
+# intact so the policy can still center the car without fighting the turn.
+LANE_LOCK_HEADING_CURVATURE_FADE = 0.00060      # 1/m
+LANE_LOCK_CURVE_REVERSAL_HOLD_TIME = 0.30       # s
 LANE_LOCK_MAX_CENTER_CORRECTION = 0.00045      # 1/m
 LANE_LOCK_TURN_CURVATURE = 0.00015             # 1/m
 LANE_LOCK_TURN_RELEASE_TIME = 0.35             # s
@@ -96,6 +101,8 @@ _lane_lock_one_line_hold = False
 _lane_lock_error_logged = False
 _lane_lock_last_turn_sign = 0
 _lane_lock_turn_release_time = 0.0
+_lane_lock_last_curve_target_sign = 0
+_lane_lock_curve_reversal_hold_time = 0.0
 _lane_lock_last_logged_mode = None
 _lane_lock_last_log_time = 0.0
 
@@ -108,6 +115,7 @@ def reset_lane_lock() -> None:
   global _lane_lock_width, _lane_lock_width_valid, _lane_lock_line_loss_time
   global _lane_lock_center_correction, _lane_lock_has_center_correction
   global _lane_lock_one_line_hold, _lane_lock_last_turn_sign, _lane_lock_turn_release_time
+  global _lane_lock_last_curve_target_sign, _lane_lock_curve_reversal_hold_time
   _lane_lock_weight = 0.0
   _lane_lock_lane_curvature = 0.0
   _lane_lock_has_lane_curvature = False
@@ -122,6 +130,8 @@ def reset_lane_lock() -> None:
   _lane_lock_one_line_hold = False
   _lane_lock_last_turn_sign = 0
   _lane_lock_turn_release_time = 0.0
+  _lane_lock_last_curve_target_sign = 0
+  _lane_lock_curve_reversal_hold_time = 0.0
 
 
 def log_lane_lock_mode(mode: str) -> None:
@@ -184,6 +194,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
   global _lane_lock_center_correction, _lane_lock_has_center_correction
   global _lane_lock_one_line_hold, _lane_lock_error_logged
   global _lane_lock_last_turn_sign, _lane_lock_turn_release_time
+  global _lane_lock_last_curve_target_sign, _lane_lock_curve_reversal_hold_time
 
   if not lane_policy_enabled:
     reset_lane_lock()
@@ -275,18 +286,35 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
       _lane_lock_weight = 1.0
       _lane_lock_line_loss_time = 0.0
 
-    # The center fit uses a farther, measured horizon. The E2E command keeps
-    # the curve feed-forward; only lane-center offset and heading become the
-    # correction. This is deliberately not an E2E/lane-curvature blend.
+    # The center fit uses a farther, measured horizon. E2E keeps the curve
+    # feed-forward. As E2E curvature grows, only the added lane-heading term
+    # fades; lane-center offset remains available for full centering. This is
+    # deliberately not an E2E/lane-curvature blend.
     _, heading, offset = np.polyfit(x[fit], center_y[fit], 2)
     lookahead = float(np.clip(2.0 * v_ego, LANE_LOCK_MIN_LOOKAHEAD, LANE_LOCK_MAX_LOOKAHEAD))
-    center_correction = (2.0 * (LANE_LOCK_HEADING_GAIN * heading * lookahead + offset) /
+    heading_scale = min(1.0, LANE_LOCK_HEADING_CURVATURE_FADE / max(abs(e2e_curvature), 1e-6))
+    center_correction = (2.0 * (LANE_LOCK_HEADING_GAIN * heading_scale * heading * lookahead + offset) /
                          (lookahead * lookahead))
     center_correction = float(np.clip(center_correction,
                                       -LANE_LOCK_MAX_CENTER_CORRECTION,
                                       LANE_LOCK_MAX_CENTER_CORRECTION))
     if abs(center_correction) < LANE_LOCK_CORRECTION_DEADBAND:
       center_correction = 0.0
+
+    # A lane-line fit can move its heading through zero at a curve entry while
+    # E2E correctly remains in the same turn. Do not ask the controller to
+    # reverse a meaningful lane correction immediately: first release toward
+    # E2E, then require the new lane target to stay stable briefly. This avoids
+    # the torque-controller lag/wag seen in the curve-entry rlogs.
+    target_sign = 1 if center_correction > 0.0 else -1 if center_correction < 0.0 else 0
+    if abs(e2e_curvature) >= LANE_LOCK_HEADING_CURVATURE_FADE:
+      if (target_sign and _lane_lock_last_curve_target_sign and
+          target_sign != _lane_lock_last_curve_target_sign):
+        _lane_lock_curve_reversal_hold_time = LANE_LOCK_CURVE_REVERSAL_HOLD_TIME
+      if target_sign:
+        _lane_lock_last_curve_target_sign = target_sign
+    else:
+      _lane_lock_last_curve_target_sign = 0
 
     # On a meaningful E2E turn-direction change, drop only a correction
     # that still asks for the previous turn. This preserves full lane
@@ -300,6 +328,10 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
       _lane_lock_turn_release_time = max(0.0, _lane_lock_turn_release_time - DT_MDL)
       if center_correction * e2e_curvature < 0.0:
         center_correction = 0.0
+
+    if _lane_lock_curve_reversal_hold_time > 0.0:
+      _lane_lock_curve_reversal_hold_time = max(0.0, _lane_lock_curve_reversal_hold_time - DT_MDL)
+      center_correction = 0.0
 
     # Enter smoothly after arming. Build correction deliberately, but release
     # it faster when the target shrinks or reverses after a curve/lane change.

@@ -10,9 +10,11 @@ class LanePolicyIcon(Widget):
   def __init__(self, button_size: int, wheel_icon_size: int):
     super().__init__()
     self._lane_policy_enabled = True
+    self._button_size = button_size
     self._wheel = gui_app.texture('icons/chffr_wheel.png', wheel_icon_size, wheel_icon_size)
     self._background = rl.Color(0, 0, 0, 166)
-    self._enabled_color = rl.Color(128, 216, 166, 255)
+    # Match the opaque, saturated end of the stock green path gradient.
+    self._enabled_color = rl.Color(13, 248, 122, 255)
     self._disabled_color = rl.Color(255, 255, 255, 255)
 
   def _update_state(self) -> None:
