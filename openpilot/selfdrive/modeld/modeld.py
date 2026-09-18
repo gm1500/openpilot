@@ -67,6 +67,12 @@ LANE_LOCK_FIT_END = 55.0                       # m
 LANE_LOCK_MIN_LOOKAHEAD = 25.0                 # m
 LANE_LOCK_MAX_LOOKAHEAD = 45.0                 # m
 LANE_LOCK_HEADING_GAIN = 0.55
+# A short geometric prediction eases the offset term while approaching center.
+# It adds no filter state or delay and cannot remove more than 35% of that term.
+LANE_LOCK_APPROACH_TIME = 0.20                 # s
+LANE_LOCK_APPROACH_MAX_FRACTION = 0.35
+LANE_LOCK_APPROACH_FULL_OFFSET = 0.25          # m
+LANE_LOCK_APPROACH_END_OFFSET = 0.50           # m
 # E2E supplies the road-shape feed-forward. Fade only the added lane-heading
 # contribution in a substantial E2E curve; lane-center offset authority stays
 # intact so the policy can still center the car without fighting the turn.
@@ -139,7 +145,7 @@ def log_lane_lock_mode(mode: str) -> None:
   global _lane_lock_last_logged_mode, _lane_lock_last_log_time
   now = time.monotonic()
   if mode != _lane_lock_last_logged_mode and now - _lane_lock_last_log_time >= LANE_LOCK_LOG_INTERVAL:
-    cloudlog.info(f"ui-lp-full-center: {mode}")
+    cloudlog.info(f"lp-final-v2: {mode}")
     _lane_lock_last_logged_mode = mode
     _lane_lock_last_log_time = now
 
@@ -174,6 +180,29 @@ def get_lane_width_measurement(left_y: np.ndarray, right_y: np.ndarray,
            width_edge_distance >= LANE_LOCK_MIN_WIDTH_EDGE and
            width_change <= LANE_LOCK_MAX_WIDTH_CHANGE)
   return float(width_median), bool(valid)
+
+
+def get_lane_lock_approach_offset(offset: float, heading: float, v_ego: float,
+                                  heading_scale: float, confidence: float) -> float:
+  """Ease only the offset term when lane-relative heading indicates convergence.
+
+  For small lane-relative angles, offset rate is approximately speed * heading.
+  Keep the current measured geometry: no delayed offset/heading filters and no
+  frame-to-frame differentiation of noisy lane fits. A parallel offset or motion
+  away from center gets exactly the original centering authority. The prediction
+  is bounded, fades with confidence/curve heading authority, and cannot reverse
+  the offset term. The existing heading term still provides countersteering.
+  """
+  if offset * heading >= 0.0:
+    return offset
+  offset_weight = float(np.clip((LANE_LOCK_APPROACH_END_OFFSET - abs(offset)) /
+                               (LANE_LOCK_APPROACH_END_OFFSET - LANE_LOCK_APPROACH_FULL_OFFSET), 0.0, 1.0))
+  confidence_weight = float(np.clip((confidence - LANE_LOCK_RETAIN_LINE_PROB) /
+                                   (LANE_LOCK_ARM_LINE_PROB - LANE_LOCK_RETAIN_LINE_PROB), 0.0, 1.0))
+  speed_weight = float(np.clip((v_ego - 8.0) / 4.0, 0.0, 1.0))
+  approach = min(LANE_LOCK_APPROACH_TIME * max(v_ego, 0.0) * abs(heading) * heading_scale,
+                 LANE_LOCK_APPROACH_MAX_FRACTION * abs(offset))
+  return offset - math.copysign(approach * offset_weight * confidence_weight * speed_weight, offset)
 
 
 def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
@@ -293,7 +322,12 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     _, heading, offset = np.polyfit(x[fit], center_y[fit], 2)
     lookahead = float(np.clip(2.0 * v_ego, LANE_LOCK_MIN_LOOKAHEAD, LANE_LOCK_MAX_LOOKAHEAD))
     heading_scale = min(1.0, LANE_LOCK_HEADING_CURVATURE_FADE / max(abs(e2e_curvature), 1e-6))
-    center_correction = (2.0 * (LANE_LOCK_HEADING_GAIN * heading_scale * heading * lookahead + offset) /
+    # Only a valid two-line midpoint supplies approach damping. Preserve the
+    # original learned-width behavior during a one-line hold.
+    approach_offset = (get_lane_lock_approach_offset(float(offset), float(heading), v_ego,
+                                                    heading_scale, two_line_confidence)
+                       if two_line_geometry else float(offset))
+    center_correction = (2.0 * (LANE_LOCK_HEADING_GAIN * heading_scale * heading * lookahead + approach_offset) /
                          (lookahead * lookahead))
     center_correction = float(np.clip(center_correction,
                                       -LANE_LOCK_MAX_CENTER_CORRECTION,

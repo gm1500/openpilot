@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -208,6 +209,76 @@ class TestLanePolicy(unittest.TestCase):
     output = make_model_output(lane_width=3.6, lane_width_end=5.0)
     self.apply_for(output, modeld.LANE_LOCK_ARM_TIME + modeld.DT_MDL)
     self.assertFalse(modeld._lane_lock_full_active)
+
+  def test_approach_preserves_parallel_diverging_and_large_offsets(self):
+    for sign in (-1.0, 1.0):
+      for offset, heading in ((0.2, 0.0), (0.2, 0.01), (0.5, -0.01)):
+        self.assertEqual(modeld.get_lane_lock_approach_offset(sign * offset, sign * heading, 28.0, 1.0, 0.99),
+                         sign * offset)
+
+  def test_approach_is_symmetric_bounded_and_immediate(self):
+    for sign in (-1.0, 1.0):
+      damped = modeld.get_lane_lock_approach_offset(sign * 0.2, -sign * 0.01, 28.0, 1.0, 0.99)
+      self.assertLess(abs(damped), 0.2)
+      self.assertGreaterEqual(sign * damped, 0.1)
+      # No stored damping remains when convergence stops.
+      self.assertEqual(modeld.get_lane_lock_approach_offset(sign * 0.2, 0.0, 28.0, 1.0, 0.99), sign * 0.2)
+
+  def test_approach_fades_with_confidence_speed_and_curve_authority(self):
+    approach = modeld.get_lane_lock_approach_offset
+    full = approach(0.2, -0.005, 20.0, 1.0, 0.99)
+    self.assertEqual(approach(0.2, -0.005, 20.0, 1.0, 0.70), 0.2)
+    self.assertEqual(approach(0.2, -0.005, 8.0, 1.0, 0.99), 0.2)
+    self.assertGreater(approach(0.2, -0.005, 20.0, 0.5, 0.99), full)
+    self.assertGreater(approach(0.2, -0.005, 20.0, 1.0, 0.80), full)
+
+  def test_approach_eases_converging_correction_without_weakening_steady_centering(self):
+    self.arm_lane_policy()
+    output = make_model_output(lane_center=0.2, lane_heading=-0.004)
+    result = self.apply_for(output, 0.5)
+    original = 2.0 * (0.2 + modeld.LANE_LOCK_HEADING_GAIN * -0.004 * 40.0) / 40.0 ** 2
+    self.assertGreater(result, 0.0)
+    self.assertLess(result, original)
+    steady = self.apply_for(make_model_output(lane_center=0.2), 0.5)
+    self.assertAlmostEqual(steady, 2.0 * 0.2 / 40.0 ** 2)
+
+  def test_one_line_hold_keeps_original_offset_and_heading_target(self):
+    self.arm_lane_policy()
+    output = make_model_output(left_prob=0.99, right_prob=0.1, lane_center=0.2, lane_heading=-0.004)
+    result = self.apply_for(output, 0.5)
+    original = 2.0 * (0.2 + modeld.LANE_LOCK_HEADING_GAIN * -0.004 * 40.0) / 40.0 ** 2
+    self.assertTrue(modeld._lane_lock_one_line_hold)
+    self.assertAlmostEqual(result, original)
+
+  def test_delayed_straight_lane_response_reduces_overshoot(self):
+    # A deliberately simple closed-loop regression, not a vehicle validation:
+    # lane offset/heading kinematics plus steering delay and first-order lag.
+    # Disable only the new helper to recover the lp-final baseline behavior.
+    def simulate(speed, delay, lag):
+      modeld.reset_lane_lock()
+      self.arm_lane_policy()
+      offset, heading, actual = 0.25, 0.0, 0.0
+      pending = [0.0] * round(delay / modeld.DT_MDL)
+      offsets = []
+      for _ in range(600):
+        output = make_model_output(lane_center=offset, lane_heading=heading)
+        command = modeld.apply_lane_lock(output, 0.0, speed, lane_policy_enabled=True)
+        pending.append(command)
+        delayed = pending.pop(0)
+        actual += modeld.DT_MDL / (lag + modeld.DT_MDL) * (delayed - actual)
+        heading -= speed * actual * modeld.DT_MDL
+        offset += speed * heading * modeld.DT_MDL
+        offsets.append(offset)
+      return max(0.0, -min(offsets)), float(np.sqrt(np.mean(np.square(offsets[200:]))))
+
+    for speed in (20.0, 28.0):
+      for delay, lag in ((0.2, 0.25), (0.3, 0.35)):
+        with self.subTest(speed=speed, delay=delay, lag=lag):
+          with patch.object(modeld, 'get_lane_lock_approach_offset', side_effect=lambda offset, *args: offset):
+            baseline = simulate(speed, delay, lag)
+          candidate = simulate(speed, delay, lag)
+          self.assertLess(candidate[0], baseline[0])
+          self.assertLess(candidate[1], baseline[1])
 
 
 if __name__ == "__main__":
