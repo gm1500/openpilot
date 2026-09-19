@@ -66,10 +66,19 @@ LANE_LOCK_FIT_START = 8.0                      # m
 LANE_LOCK_FIT_END = 55.0                       # m
 LANE_LOCK_MIN_LOOKAHEAD = 25.0                 # m
 LANE_LOCK_MAX_LOOKAHEAD = 45.0                 # m
-LANE_LOCK_HEADING_GAIN = 0.55
-# E2E supplies the road-shape feed-forward. Fade only the added lane-heading
-# contribution in a substantial E2E curve; lane-center offset authority stays
-# intact so the policy can still center the car without fighting the turn.
+# lp-anchor-v2 keeps the near path as raw E2E, then smoothly translates that
+# E2E path toward the lane midpoint. At 100 km/h this is 0.36 s raw E2E, then
+# a 1.26 s spatial transition; the far end is a lane-centre best fit.
+LANE_ANCHOR_BLEND_START = 10.0                 # m, pure E2E through here
+LANE_ANCHOR_BLEND_END = 45.0                   # m, fully anchored by here
+LANE_ANCHOR_FIT_START = 8.0                    # m, local lane/E2E alignment
+LANE_ANCHOR_FIT_END = 30.0                     # m, before far-curve geometry dominates
+LANE_ANCHOR_MIN_LOOKAHEAD = 32.0               # m
+LANE_ANCHOR_MAX_LOOKAHEAD = 45.0               # m
+LANE_ANCHOR_HEADING_GAIN = 0.55                # retain E2E authority in transitions
+# The anchor retains E2E road curvature. This threshold only enables the
+# existing reversal guard when a lane/E2E alignment target changes sign in a
+# substantial curve.
 LANE_LOCK_HEADING_CURVATURE_FADE = 0.00060      # 1/m
 LANE_LOCK_CURVE_REVERSAL_HOLD_TIME = 0.30       # s
 LANE_LOCK_MAX_CENTER_CORRECTION = 0.00045      # 1/m
@@ -105,6 +114,7 @@ _lane_lock_last_curve_target_sign = 0
 _lane_lock_curve_reversal_hold_time = 0.0
 _lane_lock_last_logged_mode = None
 _lane_lock_last_log_time = 0.0
+_lane_lock_last_anchor_log_time = 0.0
 
 
 def reset_lane_lock() -> None:
@@ -144,6 +154,17 @@ def log_lane_lock_mode(mode: str) -> None:
     _lane_lock_last_log_time = now
 
 
+def log_lane_anchor(lookahead: float, target_error: float, correction: float,
+                    e2e_curvature: float) -> None:
+  """Emit enough detail to compare spatial anchoring against the next rlog."""
+  global _lane_lock_last_anchor_log_time
+  now = time.monotonic()
+  if now - _lane_lock_last_anchor_log_time >= LANE_LOCK_LOG_INTERVAL:
+    cloudlog.info(f"lp-anchor-v2: x={lookahead:.1f}m error={target_error:+.3f}m "
+                  f"corr={correction:+.6f} e2e={e2e_curvature:+.6f}")
+    _lane_lock_last_anchor_log_time = now
+
+
 def get_inner_lane_line_probs(model_output: dict[str, np.ndarray]) -> tuple[float, float]:
   """Return inner left/right raw-model probabilities from the 8-wide layout."""
   lane_line_probs = np.asarray(model_output['lane_lines_prob'])
@@ -176,16 +197,69 @@ def get_lane_width_measurement(left_y: np.ndarray, right_y: np.ndarray,
   return float(width_median), bool(valid)
 
 
+def get_lane_anchor_blend(x: np.ndarray | float) -> np.ndarray | float:
+  """Quintic spatial blend: zero slope at both E2E and lane-anchor ends."""
+  progress = np.clip((np.asarray(x) - LANE_ANCHOR_BLEND_START) /
+                     (LANE_ANCHOR_BLEND_END - LANE_ANCHOR_BLEND_START), 0.0, 1.0)
+  return progress ** 3 * (10.0 + progress * (-15.0 + 6.0 * progress))
+
+
+def get_lane_anchor_correction(model_output: dict[str, np.ndarray], center_y: np.ndarray,
+                               x: np.ndarray, v_ego: float) -> tuple[float, float, float]:
+  """Return an E2E-preserving correction from a spatially anchored path.
+
+  The lane midpoint and E2E plan are compared over the local 8--30 m horizon.
+  A best-fit offset and heading align E2E to lane centre, while E2E retains the
+  road-shape command. That affine alignment is zero through 10 m and reaches
+  full authority at 45 m, so near-vehicle movements retain raw E2E behavior.
+  """
+  position = np.asarray(model_output['plan'][0, :, Plan.POSITION], dtype=np.float64)
+  if position.ndim != 2 or position.shape[1] < 2:
+    raise ValueError("E2E position path has an invalid shape")
+
+  plan_x = position[:, 0]
+  plan_y = position[:, 1]
+  valid_plan = np.isfinite(plan_x) & np.isfinite(plan_y)
+  plan_x, plan_y = plan_x[valid_plan], plan_y[valid_plan]
+  if plan_x.shape[0] < 4 or np.any(np.diff(plan_x) <= 0.0):
+    raise ValueError("E2E position path is not a finite increasing path")
+
+  fit = (x >= LANE_ANCHOR_FIT_START) & (x <= LANE_ANCHOR_FIT_END)
+  if np.count_nonzero(fit) < 3:
+    raise ValueError("lane horizon has too few anchor samples")
+  fit_x = x[fit]
+  if plan_x[0] > fit_x[0] or plan_x[-1] < fit_x[-1]:
+    raise ValueError("E2E position path does not cover the anchor horizon")
+
+  e2e_y = np.interp(fit_x, plan_x, plan_y)
+  relative_path = center_y[fit] - e2e_y
+  if not np.all(np.isfinite(relative_path)):
+    raise ValueError("lane/E2E anchor path is not finite")
+
+  # Only align the nearby, affine lane/E2E disagreement. A far lane-line
+  # curvature fit would create a second road-shape command and make curves wag.
+  relative_heading, relative_offset = np.polyfit(fit_x, relative_path, 1)
+  lookahead = float(np.clip(2.0 * v_ego, LANE_ANCHOR_MIN_LOOKAHEAD,
+                            LANE_ANCHOR_MAX_LOOKAHEAD))
+  target_error = float(get_lane_anchor_blend(lookahead) *
+                       (LANE_ANCHOR_HEADING_GAIN * relative_heading * lookahead + relative_offset))
+  center_correction = 2.0 * target_error / (lookahead * lookahead)
+  center_correction = float(np.clip(center_correction,
+                                    -LANE_LOCK_MAX_CENTER_CORRECTION,
+                                    LANE_LOCK_MAX_CENTER_CORRECTION))
+  return center_correction, target_error, lookahead
+
+
 def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
                     blinkers_active: bool = False, lane_policy_enabled: bool = False) -> float:
-  """Anchor E2E progressively to a stable lane midpoint without output blending.
+  """Anchor E2E's path to lane centre while preserving its immediate response.
 
-  E2E remains the road-shape feed-forward command. Once a clean two-line lane
-  has armed, the policy adds a bounded correction from the lane-center offset
-  and heading at a longer spatial anchor. That avoids the lagging filtered lane
-  curvature target that caused the previous policy to overshoot on a straight
-  road. A temporarily missing side uses the learned, slowly filtered lane width
-  for one second; blinkers and lane-change intent always return exact E2E.
+  The first 10 m remain raw E2E. From there to 45 m, a smooth spatial blend
+  translates E2E toward the lane midpoint's best-fit offset and heading. The
+  lane/E2E curvature disagreement is explicitly excluded, so a clean curve
+  keeps E2E road shape instead of receiving a second lane-curvature command.
+  A temporarily missing side uses the learned lane width for one second;
+  blinkers and lane-change intent always return exact E2E.
   """
   global _lane_lock_weight, _lane_lock_lane_curvature
   global _lane_lock_has_lane_curvature, _lane_lock_full_active
@@ -286,18 +360,10 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
       _lane_lock_weight = 1.0
       _lane_lock_line_loss_time = 0.0
 
-    # The center fit uses a farther, measured horizon. E2E keeps the curve
-    # feed-forward. As E2E curvature grows, only the added lane-heading term
-    # fades; lane-center offset remains available for full centering. This is
-    # deliberately not an E2E/lane-curvature blend.
-    _, heading, offset = np.polyfit(x[fit], center_y[fit], 2)
-    lookahead = float(np.clip(2.0 * v_ego, LANE_LOCK_MIN_LOOKAHEAD, LANE_LOCK_MAX_LOOKAHEAD))
-    heading_scale = min(1.0, LANE_LOCK_HEADING_CURVATURE_FADE / max(abs(e2e_curvature), 1e-6))
-    center_correction = (2.0 * (LANE_LOCK_HEADING_GAIN * heading_scale * heading * lookahead + offset) /
-                         (lookahead * lookahead))
-    center_correction = float(np.clip(center_correction,
-                                      -LANE_LOCK_MAX_CENTER_CORRECTION,
-                                      LANE_LOCK_MAX_CENTER_CORRECTION))
+    # Construct the spatially anchored path from the E2E plan and the lane
+    # midpoint. This is an E2E-to-lane fit, not a lane-curvature target.
+    center_correction, anchor_error, anchor_lookahead = get_lane_anchor_correction(
+      model_output, center_y, x, v_ego)
     if abs(center_correction) < LANE_LOCK_CORRECTION_DEADBAND:
       center_correction = 0.0
 
@@ -346,6 +412,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     delta = float(np.clip(center_correction - _lane_lock_center_correction,
                           -correction_step, correction_step))
     _lane_lock_center_correction += delta
+    log_lane_anchor(anchor_lookahead, anchor_error, _lane_lock_center_correction, e2e_curvature)
 
     _lane_lock_lane_curvature = float(e2e_curvature + _lane_lock_center_correction)
     _lane_lock_has_lane_curvature = True
@@ -353,7 +420,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     _lane_lock_full_active = True
     _lane_lock_ready = True
     _lane_lock_error_logged = False
-    log_lane_lock_mode("lane center hold" if _lane_lock_one_line_hold else "full lane center")
+    log_lane_lock_mode("anchor lane center hold" if _lane_lock_one_line_hold else "E2E lane anchor")
     return _lane_lock_lane_curvature
 
   except (KeyError, IndexError, TypeError, ValueError, FloatingPointError, np.linalg.LinAlgError) as err:
