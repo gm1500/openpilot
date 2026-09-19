@@ -280,6 +280,73 @@ class TestLanePolicy(unittest.TestCase):
           self.assertLess(candidate[0], baseline[0])
           self.assertLess(candidate[1], baseline[1])
 
+  def test_action_passes_adaptive_time_to_policy(self):
+    output = make_model_output(lane_center=0.2, lane_heading=-0.004)
+    output['action'] = np.zeros((1, 2))
+    with patch.object(modeld, 'apply_lane_lock', wraps=modeld.apply_lane_lock) as apply:
+      modeld.get_action_from_model(output, log.ModelDataV2.Action(), 0.375, 0.3, 20.0,
+                                   lane_policy_enabled=True, approach_time=0.23)
+    self.assertEqual(apply.call_args.args[-1], 0.23)
+
+  def test_adaptive_time_keeps_exact_fallbacks_and_offset_cap(self):
+    for anticipation in (0.17, 0.20, 0.25):
+      self.arm_lane_policy()
+      output = make_model_output(lane_center=0.2, lane_heading=-0.02)
+      damped = modeld.get_lane_lock_approach_offset(0.2, -0.02, 28.0, 1.0, 0.99, anticipation)
+      self.assertGreaterEqual(damped, 0.2 * (1.0 - modeld.LANE_LOCK_APPROACH_MAX_FRACTION))
+      self.assertEqual(modeld.apply_lane_lock(output, 0.00123, 28.0, True, True, anticipation), 0.00123)
+      self.assertEqual(modeld.apply_lane_lock(output, 0.00123, 28.0, False, False, anticipation), 0.00123)
+
+
+class TestLanePolicyApproachTiming(unittest.TestCase):
+  def settle(self, delay):
+    timing = modeld.LanePolicyApproachTiming()
+    for _ in range(1200):
+      timing.update(delay, True, True, 0.1)
+    return timing
+
+  def test_reference_retains_working_tune(self):
+    self.assertEqual(self.settle(0.30).approach_time, 0.20)
+    self.assertAlmostEqual(self.settle(0.302).approach_time, 0.2005)
+
+  def test_slower_response_adds_bounded_anticipation(self):
+    for delay, expected in ((0.15, 0.17), (0.20, 0.175), (0.40, 0.225), (0.50, 0.25), (0.65, 0.25)):
+      with self.subTest(delay=delay):
+        self.assertAlmostEqual(self.settle(delay).approach_time, expected)
+
+  def test_missing_invalid_and_stale_estimates_use_baseline(self):
+    for delay, estimated, valid, age in ((0.4, False, True, 0.1), (0.4, True, False, 0.1),
+                                       (0.4, True, True, 1.01), (0.4, True, True, -0.1),
+                                       (0.4, True, True, float('nan')), (float('nan'), True, True, 0.1),
+                                       (float('inf'), True, True, 0.1), (0.0, True, True, 0.1),
+                                       (0.66, True, True, 0.1)):
+      timing = modeld.LanePolicyApproachTiming()
+      self.assertEqual(timing.update(delay, estimated, valid, age), 0.20)
+      self.assertFalse(timing.using_estimate)
+
+  def test_loss_and_recovery_never_step_the_tune(self):
+    timing = self.settle(0.65)
+    for valid in (False, True, False):
+      for _ in range(1200):
+        previous = timing.approach_time
+        actual = timing.update(0.15, True, valid, 0.1)
+        self.assertLessEqual(abs(actual - previous), modeld.LANE_LOCK_TIMING_MAX_RATE * modeld.DT_MDL + 1e-12)
+        self.assertGreaterEqual(actual, modeld.LANE_LOCK_APPROACH_MIN_TIME)
+        self.assertLessEqual(actual, modeld.LANE_LOCK_APPROACH_MAX_TIME)
+      self.assertAlmostEqual(actual, 0.17 if valid else 0.20)
+
+  def test_lane_reset_does_not_reset_delay_schedule(self):
+    timing = self.settle(0.40)
+    before = timing.approach_time
+    modeld.reset_lane_lock()
+    self.assertEqual(timing.approach_time, before)
+
+  def test_jittering_delay_remains_bounded(self):
+    timing = modeld.LanePolicyApproachTiming()
+    for i in range(400):
+      timing.update(0.15 if i % 2 else 0.65, True, True, 0.0)
+      self.assertLess(abs(timing.approach_time - 0.20), 0.01)
+
 
 if __name__ == "__main__":
   unittest.main()

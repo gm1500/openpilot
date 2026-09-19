@@ -70,6 +70,15 @@ LANE_LOCK_HEADING_GAIN = 0.55
 # A short geometric prediction eases the offset term while approaching center.
 # It adds no filter state or delay and cannot remove more than 35% of that term.
 LANE_LOCK_APPROACH_TIME = 0.20                 # s
+LANE_LOCK_APPROACH_MIN_TIME = 0.17             # s
+LANE_LOCK_APPROACH_MAX_TIME = 0.25             # s
+LANE_LOCK_DELAY_REFERENCE = 0.30              # s; ~0.302 s in the reference drive
+LANE_LOCK_DELAY_GAIN = 0.25                   # schedule a fraction, not the full compensated delay
+LANE_LOCK_DELAY_MIN = 0.15                    # lagd's accepted range
+LANE_LOCK_DELAY_MAX = 0.65
+LANE_LOCK_DELAY_MAX_AGE = 1.0                 # s; lateralDelay publishes at 4 Hz
+LANE_LOCK_TIMING_TIME_CONSTANT = 2.0          # s; filters the tuning parameter only
+LANE_LOCK_TIMING_MAX_RATE = 0.01              # s of anticipation / s
 LANE_LOCK_APPROACH_MAX_FRACTION = 0.35
 LANE_LOCK_APPROACH_FULL_OFFSET = 0.25          # m
 LANE_LOCK_APPROACH_END_OFFSET = 0.50           # m
@@ -145,7 +154,7 @@ def log_lane_lock_mode(mode: str) -> None:
   global _lane_lock_last_logged_mode, _lane_lock_last_log_time
   now = time.monotonic()
   if mode != _lane_lock_last_logged_mode and now - _lane_lock_last_log_time >= LANE_LOCK_LOG_INTERVAL:
-    cloudlog.info(f"lp-final-v2: {mode}")
+    cloudlog.info(f"lp-final-v3: {mode}")
     _lane_lock_last_logged_mode = mode
     _lane_lock_last_log_time = now
 
@@ -182,8 +191,35 @@ def get_lane_width_measurement(left_y: np.ndarray, right_y: np.ndarray,
   return float(width_median), bool(valid)
 
 
+class LanePolicyApproachTiming:
+  """Slowly schedule the extra lane correction's anticipation, not E2E delay.
+
+  Model action_t and the torque controller already compensate lateralDelay.
+  This empirical, bounded schedule only adjusts the added lane-offset damping
+  around the working 0.20 s tune. It is not a second actuator-delay correction.
+  Keep this state across lane-policy transitions; never filter lane geometry.
+  """
+  def __init__(self):
+    self.approach_time = LANE_LOCK_APPROACH_TIME
+    self.using_estimate = False
+
+  def update(self, delay: float, estimated: bool, valid: bool, age: float) -> float:
+    self.using_estimate = (estimated and valid and math.isfinite(delay) and math.isfinite(age) and
+                           LANE_LOCK_DELAY_MIN <= delay <= LANE_LOCK_DELAY_MAX and
+                           0.0 <= age <= LANE_LOCK_DELAY_MAX_AGE)
+    target = LANE_LOCK_APPROACH_TIME
+    if self.using_estimate:
+      target += LANE_LOCK_DELAY_GAIN * (delay - LANE_LOCK_DELAY_REFERENCE)
+    target = float(np.clip(target, LANE_LOCK_APPROACH_MIN_TIME, LANE_LOCK_APPROACH_MAX_TIME))
+    delta = DT_MDL / (LANE_LOCK_TIMING_TIME_CONSTANT + DT_MDL) * (target - self.approach_time)
+    max_step = LANE_LOCK_TIMING_MAX_RATE * DT_MDL
+    self.approach_time += float(np.clip(delta, -max_step, max_step))
+    return self.approach_time
+
+
 def get_lane_lock_approach_offset(offset: float, heading: float, v_ego: float,
-                                  heading_scale: float, confidence: float) -> float:
+                                  heading_scale: float, confidence: float,
+                                  approach_time: float = LANE_LOCK_APPROACH_TIME) -> float:
   """Ease only the offset term when lane-relative heading indicates convergence.
 
   For small lane-relative angles, offset rate is approximately speed * heading.
@@ -200,13 +236,17 @@ def get_lane_lock_approach_offset(offset: float, heading: float, v_ego: float,
   confidence_weight = float(np.clip((confidence - LANE_LOCK_RETAIN_LINE_PROB) /
                                    (LANE_LOCK_ARM_LINE_PROB - LANE_LOCK_RETAIN_LINE_PROB), 0.0, 1.0))
   speed_weight = float(np.clip((v_ego - 8.0) / 4.0, 0.0, 1.0))
-  approach = min(LANE_LOCK_APPROACH_TIME * max(v_ego, 0.0) * abs(heading) * heading_scale,
+  if not math.isfinite(approach_time):
+    approach_time = LANE_LOCK_APPROACH_TIME
+  approach_time = float(np.clip(approach_time, LANE_LOCK_APPROACH_MIN_TIME, LANE_LOCK_APPROACH_MAX_TIME))
+  approach = min(approach_time * max(v_ego, 0.0) * abs(heading) * heading_scale,
                  LANE_LOCK_APPROACH_MAX_FRACTION * abs(offset))
   return offset - math.copysign(approach * offset_weight * confidence_weight * speed_weight, offset)
 
 
 def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
-                    blinkers_active: bool = False, lane_policy_enabled: bool = False) -> float:
+                    blinkers_active: bool = False, lane_policy_enabled: bool = False,
+                    approach_time: float = LANE_LOCK_APPROACH_TIME) -> float:
   """Anchor E2E progressively to a stable lane midpoint without output blending.
 
   E2E remains the road-shape feed-forward command. Once a clean two-line lane
@@ -325,7 +365,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     # Only a valid two-line midpoint supplies approach damping. Preserve the
     # original learned-width behavior during a one-line hold.
     approach_offset = (get_lane_lock_approach_offset(float(offset), float(heading), v_ego,
-                                                    heading_scale, two_line_confidence)
+                                                    heading_scale, two_line_confidence, approach_time)
                        if two_line_geometry else float(offset))
     center_correction = (2.0 * (LANE_LOCK_HEADING_GAIN * heading_scale * heading * lookahead + approach_offset) /
                          (lookahead * lookahead))
@@ -401,7 +441,8 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                           lat_action_t: float, long_action_t: float, v_ego: float,
-                          blinkers_active: bool = False, lane_policy_enabled: bool = False) -> log.ModelDataV2.Action:
+                          blinkers_active: bool = False, lane_policy_enabled: bool = False,
+                          approach_time: float = LANE_LOCK_APPROACH_TIME) -> log.ModelDataV2.Action:
   if 'action' not in model_output:
     plan = model_output['plan'][0]
     desired_accel = get_accel_from_plan(plan[:,Plan.VELOCITY][:,0],
@@ -417,7 +458,7 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
     desired_accel = model_output['action'][0,1]
     desired_curvature = model_output['action'][0,0] / (max(1.0, v_ego))**2
   desired_curvature = apply_lane_lock(model_output, desired_curvature, v_ego,
-                                      blinkers_active, lane_policy_enabled)
+                                      blinkers_active, lane_policy_enabled, approach_time)
   stop = should_stop(v_ego, desired_accel)
   desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, LONG_SMOOTH_SECONDS)
   if v_ego > MIN_LAT_CONTROL_SPEED:
@@ -665,6 +706,8 @@ def main(demo=False):
   # TODO Move smooth seconds to action function
   long_delay = CP.longitudinalActuatorDelay + LONG_SMOOTH_SECONDS
   prev_action = log.ModelDataV2.Action()
+  lane_approach_timing = LanePolicyApproachTiming()
+  last_lane_timing_log = 0.0
 
   DH = DesireHelper()
   lane_policy_enabled = get_lane_policy_enabled(params)
@@ -779,8 +822,18 @@ def main(demo=False):
       # Read the on-road HUD selector for every model frame so OFF -> ON and
       # ON -> OFF take effect immediately, not on the next one-second poll.
       lane_policy_enabled = get_lane_policy_enabled(params)
+      delay_msg = sm['lateralDelay']
+      now = time.monotonic()
+      approach_time = lane_approach_timing.update(
+        delay_msg.lateralDelay, delay_msg.status == log.LateralDelay.Status.estimated,
+        sm.seen['lateralDelay'] and sm.valid['lateralDelay'] and sm.alive['lateralDelay'],
+        now - sm.logMonoTime['lateralDelay'] / 1e9)
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
-                                     blinkers_active, lane_policy_enabled)
+                                     blinkers_active, lane_policy_enabled, approach_time)
+      if now - last_lane_timing_log >= 5.0:
+        source = 'estimated' if lane_approach_timing.using_estimate else 'baseline'
+        cloudlog.info(f"lp-final-v3 timing: source={source} delay={delay_msg.lateralDelay:.4f} approach={approach_time:.4f}")
+        last_lane_timing_log = now
       lane_policy_active = lane_policy_enabled and _lane_lock_full_active
       # Retain the existing UI parameter as a status bit: READY while the
       # two-line timer arms, HOLD while a single line is being reconstructed.
