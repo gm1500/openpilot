@@ -9,7 +9,9 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 
 def make_model_output(left_prob: float = 0.99, right_prob: float = 0.99, lane_width: float = 3.6,
                       lane_width_end: float | None = None, lane_center: float = 0.0,
-                      lane_heading: float = 0.0) -> dict[str, np.ndarray]:
+                      lane_heading: float = 0.0, lane_quadratic: float = 0.0,
+                      e2e_path_center: float = 0.0, e2e_path_heading: float = 0.0,
+                      e2e_path_quadratic: float = 0.0) -> dict[str, np.ndarray]:
   x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
   lane_lines = np.zeros((1, 4, len(x), 2), dtype=np.float64)
   target_width = lane_width if lane_width_end is None else lane_width_end
@@ -17,7 +19,7 @@ def make_model_output(left_prob: float = 0.99, right_prob: float = 0.99, lane_wi
                             (modeld.LANE_LOCK_FIT_END - modeld.LANE_LOCK_FIT_START), 0.0, 1.0)
   widths = lane_width + (target_width - lane_width) * width_progress
   # openpilot lateral coordinates are left-negative and right-positive.
-  centerline = lane_center + lane_heading * x
+  centerline = lane_center + lane_heading * x + lane_quadratic * x * x
   lane_lines[0, 1, :, 0] = centerline - widths / 2.0
   lane_lines[0, 2, :, 0] = centerline + widths / 2.0
   lane_line_probs = np.zeros((1, 8), dtype=np.float64)
@@ -25,6 +27,7 @@ def make_model_output(left_prob: float = 0.99, right_prob: float = 0.99, lane_wi
   lane_line_probs[0, 5] = right_prob
   plan = np.zeros((1, len(x), ModelConstants.PLAN_WIDTH), dtype=np.float64)
   plan[0, :, 0] = x
+  plan[0, :, 1] = e2e_path_center + e2e_path_heading * x + e2e_path_quadratic * x * x
   return {'lane_lines': lane_lines, 'lane_lines_prob': lane_line_probs,
           'desire_state': np.zeros((1, ModelConstants.DESIRE_LEN), dtype=np.float64), 'plan': plan}
 
@@ -150,12 +153,32 @@ class TestLanePolicy(unittest.TestCase):
     modeld.apply_lane_lock(positive_heading, e2e_curve, 20.0, lane_policy_enabled=True)
     self.assertGreater(modeld._lane_lock_center_correction, 0.0)
 
-  def test_no_plan_gate_for_clean_lanes(self):
+
+  def test_anchor_blend_keeps_near_path_e2e_and_completes_far_ahead(self):
+    self.assertEqual(modeld.get_lane_anchor_blend(0.0), 0.0)
+    self.assertEqual(modeld.get_lane_anchor_blend(modeld.LANE_ANCHOR_BLEND_START), 0.0)
+    self.assertEqual(modeld.get_lane_anchor_blend(modeld.LANE_ANCHOR_BLEND_END), 1.0)
+
+  def test_anchor_leaves_matching_e2e_curve_unchanged(self):
+    curve = 0.0008
+    output = make_model_output(lane_quadratic=curve, e2e_path_quadratic=curve)
+    self.arm_lane_policy(output)
+    e2e = 0.0010
+    self.assertAlmostEqual(modeld.apply_lane_lock(output, e2e, 28.0, lane_policy_enabled=True), e2e, places=6)
+
+  def test_anchor_needs_no_extra_correction_when_e2e_is_lane_centered(self):
+    output = make_model_output(lane_center=0.30, e2e_path_center=0.30)
+    self.arm_lane_policy(output)
+    e2e = 0.0010
+    self.assertAlmostEqual(modeld.apply_lane_lock(output, e2e, 28.0, lane_policy_enabled=True), e2e, places=6)
+
+  def test_invalid_e2e_path_returns_exact_e2e(self):
+    self.arm_lane_policy()
     output = make_model_output(lane_center=0.35)
     output['plan'][:] = np.nan
-    self.arm_lane_policy(output)
-    curvature = modeld.apply_lane_lock(output, 0.0, 20.0, lane_policy_enabled=True)
-    self.assertGreater(curvature, 0.0)
+    e2e = -0.0012
+    self.assertEqual(modeld.apply_lane_lock(output, e2e, 20.0, lane_policy_enabled=True), e2e)
+    self.assertFalse(modeld._lane_lock_full_active)
 
   def test_hysteresis_retains_full_center_above_exit_threshold(self):
     self.arm_lane_policy()
