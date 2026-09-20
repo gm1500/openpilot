@@ -66,16 +66,29 @@ LANE_LOCK_FIT_START = 8.0                      # m
 LANE_LOCK_FIT_END = 55.0                       # m
 LANE_LOCK_MIN_LOOKAHEAD = 25.0                 # m
 LANE_LOCK_MAX_LOOKAHEAD = 45.0                 # m
-# lp-anchor-v2 keeps the near path as raw E2E, then smoothly translates that
-# E2E path toward the lane midpoint. At 100 km/h this is 0.36 s raw E2E, then
-# a 1.26 s spatial transition; the far end is a lane-centre best fit.
-LANE_ANCHOR_BLEND_START = 10.0                 # m, pure E2E through here
-LANE_ANCHOR_BLEND_END = 45.0                   # m, fully anchored by here
+# These distances schedule the gain of a scalar curvature correction. The
+# model's position path is used for comparison and is not rewritten.
+LANE_ANCHOR_BLEND_START = 10.0                 # m, zero correction gain
+LANE_ANCHOR_BLEND_END = 45.0                   # m, full correction gain
 LANE_ANCHOR_FIT_START = 8.0                    # m, local lane/E2E alignment
-LANE_ANCHOR_FIT_END = 30.0                     # m, before far-curve geometry dominates
+LANE_ANCHOR_FIT_END = 40.0                     # m, eight spatial samples
+LANE_ANCHOR_FIT_FALLBACK_END = 30.0            # m, retain short-plan availability
 LANE_ANCHOR_MIN_LOOKAHEAD = 32.0               # m
 LANE_ANCHOR_MAX_LOOKAHEAD = 45.0               # m
 LANE_ANCHOR_HEADING_GAIN = 0.55                # retain E2E authority in transitions
+LANE_ANCHOR_NEAR_FIT_END = 20.0               # m, lane-relative position/heading
+LANE_ANCHOR_APPROACH_TIME = 0.20               # s, geometric prediction only
+LANE_ANCHOR_APPROACH_MAX_FRACTION = 0.25       # ease an inward correction by at most 25%
+LANE_ANCHOR_BIAS_ARM_TIME = 2.0                # s of persistent same-side error
+LANE_ANCHOR_BIAS_DEADBAND = 0.015              # m, do not integrate perception jitter
+LANE_ANCHOR_BIAS_MAX_OFFSET = 0.35             # m, leave large transients to the base policy
+LANE_ANCHOR_BIAS_MAX_RATE = 0.05               # m/s, learn only while position is steady
+LANE_ANCHOR_BIAS_KI = 0.00008                  # 1/(m^2 s), build more slowly than the residual sway
+LANE_ANCHOR_BIAS_MAX = 0.00015                 # 1/m, included in the existing total cap
+LANE_ANCHOR_BIAS_BUILD_RATE = 0.00001          # 1/(m s)
+LANE_ANCHOR_BIAS_RELEASE_PREVIEW = 0.35        # s, anticipate crossing from lane-relative heading
+LANE_ANCHOR_BIAS_RELEASE_GAIN = 0.003          # 1/(m^2 s), promptly discard stale bias
+LANE_ANCHOR_BIAS_RELEASE_RATE = 0.00008        # 1/(m s)
 # The anchor retains E2E road curvature. This threshold only enables the
 # existing reversal guard when a lane/E2E alignment target changes sign in a
 # substantial curve.
@@ -115,6 +128,16 @@ _lane_lock_curve_reversal_hold_time = 0.0
 _lane_lock_last_logged_mode = None
 _lane_lock_last_log_time = 0.0
 _lane_lock_last_anchor_log_time = 0.0
+_lane_lock_center_bias = 0.0
+_lane_lock_bias_arm_time = 0.0
+_lane_lock_bias_error_sign = 0
+
+
+def reset_lane_anchor_bias() -> None:
+  global _lane_lock_center_bias, _lane_lock_bias_arm_time, _lane_lock_bias_error_sign
+  _lane_lock_center_bias = 0.0
+  _lane_lock_bias_arm_time = 0.0
+  _lane_lock_bias_error_sign = 0
 
 
 def reset_lane_lock() -> None:
@@ -142,6 +165,7 @@ def reset_lane_lock() -> None:
   _lane_lock_turn_release_time = 0.0
   _lane_lock_last_curve_target_sign = 0
   _lane_lock_curve_reversal_hold_time = 0.0
+  reset_lane_anchor_bias()
 
 
 def log_lane_lock_mode(mode: str) -> None:
@@ -155,13 +179,14 @@ def log_lane_lock_mode(mode: str) -> None:
 
 
 def log_lane_anchor(lookahead: float, target_error: float, correction: float,
-                    e2e_curvature: float) -> None:
-  """Emit enough detail to compare spatial anchoring against the next rlog."""
+                    e2e_curvature: float, offset: float, offset_rate: float) -> None:
+  """Log base alignment, actual lane offset and bias feedback for rlog review."""
   global _lane_lock_last_anchor_log_time
   now = time.monotonic()
   if now - _lane_lock_last_anchor_log_time >= LANE_LOCK_LOG_INTERVAL:
     cloudlog.info(f"lp-anchor-v2: x={lookahead:.1f}m error={target_error:+.3f}m "
-                  f"corr={correction:+.6f} e2e={e2e_curvature:+.6f}")
+                  f"corr={correction:+.6f} e2e={e2e_curvature:+.6f} "
+                  f"offset={offset:+.3f}m rate={offset_rate:+.3f}m/s bias={_lane_lock_center_bias:+.6f}")
     _lane_lock_last_anchor_log_time = now
 
 
@@ -198,7 +223,7 @@ def get_lane_width_measurement(left_y: np.ndarray, right_y: np.ndarray,
 
 
 def get_lane_anchor_blend(x: np.ndarray | float) -> np.ndarray | float:
-  """Quintic spatial blend: zero slope at both E2E and lane-anchor ends."""
+  """Quintic correction gain at the selected lookahead distance."""
   progress = np.clip((np.asarray(x) - LANE_ANCHOR_BLEND_START) /
                      (LANE_ANCHOR_BLEND_END - LANE_ANCHOR_BLEND_START), 0.0, 1.0)
   return progress ** 3 * (10.0 + progress * (-15.0 + 6.0 * progress))
@@ -206,12 +231,11 @@ def get_lane_anchor_blend(x: np.ndarray | float) -> np.ndarray | float:
 
 def get_lane_anchor_correction(model_output: dict[str, np.ndarray], center_y: np.ndarray,
                                x: np.ndarray, v_ego: float) -> tuple[float, float, float]:
-  """Return an E2E-preserving correction from a spatially anchored path.
+  """Compare lane and E2E geometry, returning a scalar curvature correction.
 
-  The lane midpoint and E2E plan are compared over the local 8--30 m horizon.
-  A best-fit offset and heading align E2E to lane centre, while E2E retains the
-  road-shape command. That affine alignment is zero through 10 m and reaches
-  full authority at 45 m, so near-vehicle movements retain raw E2E behavior.
+  Fit over 8--40 m when the E2E plan covers those samples. Shorter plans retain
+  the original 8--30 m fit; never extrapolate beyond a stopping plan. The gain
+  is evaluated at one lookahead, not applied to an output path's points.
   """
   position = np.asarray(model_output['plan'][0, :, Plan.POSITION], dtype=np.float64)
   if position.ndim != 2 or position.shape[1] < 2:
@@ -224,12 +248,15 @@ def get_lane_anchor_correction(model_output: dict[str, np.ndarray], center_y: np
   if plan_x.shape[0] < 4 or np.any(np.diff(plan_x) <= 0.0):
     raise ValueError("E2E position path is not a finite increasing path")
 
-  fit = (x >= LANE_ANCHOR_FIT_START) & (x <= LANE_ANCHOR_FIT_END)
+  fit = (x >= LANE_ANCHOR_FIT_START) & (x <= LANE_ANCHOR_FIT_FALLBACK_END)
   if np.count_nonzero(fit) < 3:
     raise ValueError("lane horizon has too few anchor samples")
-  fit_x = x[fit]
-  if plan_x[0] > fit_x[0] or plan_x[-1] < fit_x[-1]:
+  if plan_x[0] > x[fit][0] or plan_x[-1] < x[fit][-1]:
     raise ValueError("E2E position path does not cover the anchor horizon")
+  extended_fit = (x >= LANE_ANCHOR_FIT_START) & (x <= LANE_ANCHOR_FIT_END)
+  if plan_x[-1] >= x[extended_fit][-1]:
+    fit = extended_fit
+  fit_x = x[fit]
 
   e2e_y = np.interp(fit_x, plan_x, plan_y)
   relative_path = center_y[fit] - e2e_y
@@ -250,14 +277,86 @@ def get_lane_anchor_correction(model_output: dict[str, np.ndarray], center_y: np
   return center_correction, target_error, lookahead
 
 
-def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
-                    blinkers_active: bool = False, lane_policy_enabled: bool = False) -> float:
-  """Anchor E2E's path to lane centre while preserving its immediate response.
+def get_lane_anchor_near_geometry(center_y: np.ndarray, x: np.ndarray) -> tuple[float, float]:
+  """Estimate vehicle-to-lane offset and tangent without a temporal filter.
 
-  The first 10 m remain raw E2E. From there to 45 m, a smooth spatial blend
-  translates E2E toward the lane midpoint's best-fit offset and heading. The
-  lane/E2E curvature disagreement is explicitly excluded, so a clean curve
-  keeps E2E road shape instead of receiving a second lane-curvature command.
+  The quadratic term accounts for local road curvature; only the intercept
+  and tangent are used for position feedback. Positive offset means the lane
+  center is to the right of the vehicle.
+  """
+  fit = (x >= 0.0) & (x <= LANE_ANCHOR_NEAR_FIT_END)
+  if np.count_nonzero(fit) < 3 or not np.all(np.isfinite(center_y[fit])):
+    raise ValueError("invalid near-lane geometry")
+  _, heading, offset = np.polyfit(x[fit], center_y[fit], 2)
+  return float(offset), float(heading)
+
+
+def get_lane_anchor_approach_scale(offset: float, heading: float, v_ego: float) -> float:
+  """Ease inward steering as the vehicle approaches center; parallel error keeps full gain."""
+  if offset * heading >= 0.0:
+    return 1.0
+  near_weight = float(np.clip((0.30 - abs(offset)) / 0.20, 0.0, 1.0))
+  approach_fraction = min(LANE_ANCHOR_APPROACH_TIME * max(v_ego, 0.0) * abs(heading) /
+                          max(abs(offset), 1e-6), LANE_ANCHOR_APPROACH_MAX_FRACTION)
+  return 1.0 - near_weight * approach_fraction
+
+
+def update_lane_anchor_bias(offset: float, heading: float, v_ego: float,
+                            base_correction: float, allowed: bool) -> float:
+  """Learn a bounded correction for persistent position error on reliable lanes.
+
+  This state belongs to the current lane-control episode, not the vehicle.
+  Retain it at zero error to cancel a continuing E2E preference, unwind faster
+  on opposite error, and never build while already converging quickly. It is
+  cleared on driver input, loss of strong two-line geometry, or guarded turns.
+  """
+  global _lane_lock_center_bias, _lane_lock_bias_arm_time, _lane_lock_bias_error_sign
+  if not allowed or abs(offset) > LANE_ANCHOR_BIAS_MAX_OFFSET:
+    reset_lane_anchor_bias()
+    return 0.0
+
+  error = math.copysign(max(abs(offset) - LANE_ANCHOR_BIAS_DEADBAND, 0.0), offset)
+  bias_sign = 1.0 if _lane_lock_center_bias > 0.0 else -1.0 if _lane_lock_center_bias < 0.0 else 0.0
+  projected_offset = offset + LANE_ANCHOR_BIAS_RELEASE_PREVIEW * v_ego * heading
+  release_error = bias_sign * min(bias_sign * offset, bias_sign * projected_offset, 0.0)
+  if release_error * _lane_lock_center_bias < 0.0:
+    # Start unwinding when crossing is imminent. No release deadband: an old
+    # bias must not pin the vehicle to the opposite edge of the build deadband.
+    # A new direction still has to qualify before building again.
+    change = float(np.clip(LANE_ANCHOR_BIAS_RELEASE_GAIN * release_error,
+                           -LANE_ANCHOR_BIAS_RELEASE_RATE, LANE_ANCHOR_BIAS_RELEASE_RATE)) * DT_MDL
+    remaining = max(abs(_lane_lock_center_bias) - abs(change), 0.0)
+    _lane_lock_center_bias = math.copysign(remaining, _lane_lock_center_bias)
+    _lane_lock_bias_arm_time = 0.0
+    _lane_lock_bias_error_sign = 0
+  elif error == 0.0 or abs(v_ego * heading) > LANE_ANCHOR_BIAS_MAX_RATE:
+    _lane_lock_bias_arm_time = 0.0
+    _lane_lock_bias_error_sign = 0
+  else:
+    error_sign = 1 if error > 0.0 else -1
+    if error_sign != _lane_lock_bias_error_sign:
+      _lane_lock_bias_arm_time = 0.0
+    _lane_lock_bias_error_sign = error_sign
+    _lane_lock_bias_arm_time = min(_lane_lock_bias_arm_time + DT_MDL, LANE_ANCHOR_BIAS_ARM_TIME)
+    if _lane_lock_bias_arm_time >= LANE_ANCHOR_BIAS_ARM_TIME:
+      change = float(np.clip(LANE_ANCHOR_BIAS_KI * error,
+                             -LANE_ANCHOR_BIAS_BUILD_RATE, LANE_ANCHOR_BIAS_BUILD_RATE)) * DT_MDL
+      candidate = float(np.clip(_lane_lock_center_bias + change, -LANE_ANCHOR_BIAS_MAX, LANE_ANCHOR_BIAS_MAX))
+      total = base_correction + candidate
+      # Do not integrate further into the shared correction limit.
+      if abs(total) <= LANE_LOCK_MAX_CENTER_CORRECTION or change * total < 0.0:
+        _lane_lock_center_bias = candidate
+  return _lane_lock_center_bias
+
+
+def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
+                    blinkers_active: bool = False, lane_policy_enabled: bool = False,
+                    lateral_active: bool = False, steering_pressed: bool = False) -> float:
+  """Add lane alignment and bounded vehicle-position feedback to E2E curvature.
+
+  The E2E position path remains unchanged. Its disagreement with the lane
+  midpoint supplies the base correction; persistent vehicle offset supplies a
+  small learned bias while the driver is allowing active steering control.
   A temporarily missing side uses the learned lane width for one second;
   blinkers and lane-change intent always return exact E2E.
   """
@@ -360,10 +459,14 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
       _lane_lock_weight = 1.0
       _lane_lock_line_loss_time = 0.0
 
-    # Construct the spatially anchored path from the E2E plan and the lane
-    # midpoint. This is an E2E-to-lane fit, not a lane-curvature target.
+    # Compare paths for the base correction, then measure actual lane-relative
+    # position independently of E2E's preferred lateral position.
     center_correction, anchor_error, anchor_lookahead = get_lane_anchor_correction(
       model_output, center_y, x, v_ego)
+    lane_offset, lane_heading = get_lane_anchor_near_geometry(center_y, x)
+    strong_geometry = two_line_geometry and two_line_confidence >= LANE_LOCK_ARM_LINE_PROB
+    if strong_geometry and center_correction * lane_offset > 0.0:
+      center_correction *= get_lane_anchor_approach_scale(lane_offset, lane_heading, v_ego)
     if abs(center_correction) < LANE_LOCK_CORRECTION_DEADBAND:
       center_correction = 0.0
 
@@ -390,6 +493,7 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
       if _lane_lock_last_turn_sign and e2e_turn_sign != _lane_lock_last_turn_sign:
         _lane_lock_turn_release_time = LANE_LOCK_TURN_RELEASE_TIME
       _lane_lock_last_turn_sign = e2e_turn_sign
+    guarded_turn = _lane_lock_turn_release_time > 0.0 or _lane_lock_curve_reversal_hold_time > 0.0
     if _lane_lock_turn_release_time > 0.0:
       _lane_lock_turn_release_time = max(0.0, _lane_lock_turn_release_time - DT_MDL)
       if center_correction * e2e_curvature < 0.0:
@@ -398,6 +502,13 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     if _lane_lock_curve_reversal_hold_time > 0.0:
       _lane_lock_curve_reversal_hold_time = max(0.0, _lane_lock_curve_reversal_hold_time - DT_MDL)
       center_correction = 0.0
+
+    bias_allowed = (lateral_active and not steering_pressed and strong_geometry and
+                    not _lane_lock_one_line_hold and not guarded_turn and v_ego >= 10.0 and
+                    abs(e2e_curvature) * v_ego ** 2 < 1.5)
+    center_bias = update_lane_anchor_bias(lane_offset, lane_heading, v_ego, center_correction, bias_allowed)
+    center_correction = float(np.clip(center_correction + center_bias,
+                                      -LANE_LOCK_MAX_CENTER_CORRECTION, LANE_LOCK_MAX_CENTER_CORRECTION))
 
     # Enter smoothly after arming. Build correction deliberately, but release
     # it faster when the target shrinks or reverses after a curve/lane change.
@@ -412,7 +523,8 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
     delta = float(np.clip(center_correction - _lane_lock_center_correction,
                           -correction_step, correction_step))
     _lane_lock_center_correction += delta
-    log_lane_anchor(anchor_lookahead, anchor_error, _lane_lock_center_correction, e2e_curvature)
+    log_lane_anchor(anchor_lookahead, anchor_error, _lane_lock_center_correction, e2e_curvature,
+                    lane_offset, v_ego * lane_heading)
 
     _lane_lock_lane_curvature = float(e2e_curvature + _lane_lock_center_correction)
     _lane_lock_has_lane_curvature = True
@@ -434,7 +546,8 @@ def apply_lane_lock(model_output: dict[str, np.ndarray], e2e_curvature: float, v
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                           lat_action_t: float, long_action_t: float, v_ego: float,
-                          blinkers_active: bool = False, lane_policy_enabled: bool = False) -> log.ModelDataV2.Action:
+                          blinkers_active: bool = False, lane_policy_enabled: bool = False,
+                          lateral_active: bool = False, steering_pressed: bool = False) -> log.ModelDataV2.Action:
   if 'action' not in model_output:
     plan = model_output['plan'][0]
     desired_accel = get_accel_from_plan(plan[:,Plan.VELOCITY][:,0],
@@ -450,7 +563,7 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
     desired_accel = model_output['action'][0,1]
     desired_curvature = model_output['action'][0,0] / (max(1.0, v_ego))**2
   desired_curvature = apply_lane_lock(model_output, desired_curvature, v_ego,
-                                      blinkers_active, lane_policy_enabled)
+                                      blinkers_active, lane_policy_enabled, lateral_active, steering_pressed)
   stop = should_stop(v_ego, desired_accel)
   desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, LONG_SMOOTH_SECONDS)
   if v_ego > MIN_LAT_CONTROL_SPEED:
@@ -813,7 +926,8 @@ def main(demo=False):
       # ON -> OFF take effect immediately, not on the next one-second poll.
       lane_policy_enabled = get_lane_policy_enabled(params)
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
-                                     blinkers_active, lane_policy_enabled)
+                                     blinkers_active, lane_policy_enabled,
+                                     sm['carControl'].latActive, sm['carState'].steeringPressed)
       lane_policy_active = lane_policy_enabled and _lane_lock_full_active
       # Retain the existing UI parameter as a status bit: READY while the
       # two-line timer arms, HOLD while a single line is being reconstructed.
