@@ -1,7 +1,7 @@
-"""E2E lane anchoring, independent of model inference and messaging.
+"""Fit an E2E-shaped lane target over the shared, reliable path horizon.
 
-Only the scalar curvature command is adjusted; the E2E position path is never
-rewritten. Positive lane offset means the lane centre is right of the vehicle.
+The virtual target is used for a bounded curvature correction. The raw model
+path stays intact for logging and fallback. Positive offset means lane right.
 """
 import math
 import time
@@ -21,10 +21,12 @@ ARM_TIME = 0.75                             # s of strong two-line confidence
 WIDTH_TIME = 9.95                           # s, learned width for one-line hold
 ONE_LINE_HOLD_TIME = 1.00                    # s
 WIDTH_FIT_START, WIDTH_FIT_END = 8.0, 55.0    # m
-ANCHOR_BLEND_START, ANCHOR_BLEND_END = 10.0, 45.0  # m, scalar correction gain
-ANCHOR_FIT_START, ANCHOR_FIT_END = 8.0, 40.0  # m, compare nearby lane/E2E geometry
+ANCHOR_BLEND_START, ANCHOR_BLEND_END = 10.0, 45.0  # m, spatial transition to lane geometry
+ANCHOR_FIT_START, ANCHOR_FIT_END = 8.0, 55.0  # m, shared lane/E2E fit, no extrapolation
+HOLD_FIT_END = 40.0                         # m, retain v3's one-line behavior
 ANCHOR_FALLBACK_END = 30.0                   # m, short-plan fit without extrapolation
 MIN_LOOKAHEAD, MAX_LOOKAHEAD = 32.0, 45.0     # m
+PATH_WEIGHT_SPREAD = 0.25                   # fraction of lookahead, spatial weighting
 HEADING_GAIN = 0.55
 NEAR_FIT_END = 20.0                         # m, lane-relative offset and tangent
 MOTION_BIAS_TIME = 2.0                       # s, reconcile heading with offset changes
@@ -84,7 +86,20 @@ def anchor_gain(x: np.ndarray | float) -> np.ndarray | float:
   return progress ** 3 * (10.0 + progress * (-15.0 + 6.0 * progress))
 
 
-def anchor_correction(output: dict[str, np.ndarray], center: np.ndarray, x: np.ndarray, speed: float) -> tuple[float, float, float]:
+def blend_path(center: np.ndarray, e2e: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, float]:
+  """Align E2E's offset/heading over the whole fit, then blend residual shape.
+
+  Near samples retain E2E's shape plus the affine alignment. Far samples reach
+  the lane midpoint. This virtual target need not start at the vehicle origin:
+  its displacement is a tracking error, not a curvature to differentiate.
+  """
+  heading, offset = np.polyfit(x, center - e2e, 1)
+  aligned = e2e + offset + heading * x
+  return aligned + anchor_gain(x) * (center - aligned), float(heading)
+
+
+def anchor_correction(output: dict[str, np.ndarray], center: np.ndarray, x: np.ndarray, speed: float,
+                      path_blend: bool = True) -> tuple[float, float, float]:
   position = np.asarray(output['plan'][0, :, Plan.POSITION], dtype=np.float64)
   if position.ndim != 2 or position.shape[1] < 2:
     raise ValueError("E2E position path has an invalid shape")
@@ -98,16 +113,31 @@ def anchor_correction(output: dict[str, np.ndarray], center: np.ndarray, x: np.n
     raise ValueError("lane horizon has too few anchor samples")
   if plan_x[0] > x[fit][0] or plan_x[-1] < x[fit][-1]:
     raise ValueError("E2E position path does not cover the anchor horizon")
-  extended = (x >= ANCHOR_FIT_START) & (x <= ANCHOR_FIT_END)
-  if plan_x[-1] >= x[extended][-1]:
+  extended = (x >= ANCHOR_FIT_START) & (x <= (ANCHOR_FIT_END if path_blend else HOLD_FIT_END))
+  if path_blend:
+    fit = extended & (x <= plan_x[-1])
+  elif plan_x[-1] >= x[extended][-1]:
     fit = extended
-  relative = center[fit] - np.interp(x[fit], plan_x, plan_y)
+  fit_x = x[fit]
+  e2e = np.interp(fit_x, plan_x, plan_y)
+  relative = center[fit] - e2e
   if not np.all(np.isfinite(relative)):
     raise ValueError("lane/E2E anchor path is not finite")
-  # Align affine disagreement, retaining E2E's road curvature.
-  heading, offset = np.polyfit(x[fit], relative, 1)
   lookahead = float(np.clip(2.0 * speed, MIN_LOOKAHEAD, MAX_LOOKAHEAD))
-  error = float(anchor_gain(lookahead) * (HEADING_GAIN * heading * lookahead + offset))
+  if path_blend:
+    target, heading = blend_path(center[fit], e2e, fit_x)
+    gain = anchor_gain(fit_x)
+    # Keep v3's heading damping while fitting an arc to all target samples.
+    field = gain * (target - e2e - (1.0 - HEADING_GAIN) * heading * fit_x)
+    weights = np.exp(-0.5 * ((fit_x - lookahead) / (PATH_WEIGHT_SPREAD * lookahead)) ** 2)
+    weights *= np.gradient(fit_x) * fit_x ** 2
+    # Normalize the least-squares arc response to a parallel path displacement.
+    # Steady centering keeps exactly v3's gain at every speed/covered horizon.
+    error = float(anchor_gain(lookahead) * np.dot(weights, field) / np.dot(weights, gain))
+  else:
+    # A single line plus learned width does not justify the new far shape fit.
+    heading, offset = np.polyfit(fit_x, relative, 1)
+    error = float(anchor_gain(lookahead) * (HEADING_GAIN * heading * lookahead + offset))
   correction = float(np.clip(2.0 * error / (lookahead * lookahead), -MAX_CORRECTION, MAX_CORRECTION))
   return correction, error, lookahead
 
@@ -180,14 +210,16 @@ class LanePolicy:
     self._mode(reason)
     return float(e2e)
 
-  def _record(self, lookahead: float, error: float, e2e: float, offset: float, rate: float, geometric_rate: float, ready: bool) -> None:
+  def _record(self, lookahead: float, error: float, e2e: float, offset: float, rate: float, geometric_rate: float,
+              ready: bool, path_blend: bool) -> None:
     now = time.monotonic()
     if self.logger is not None and now - self.last_anchor_time >= LOG_INTERVAL:
       self.logger.info(" ".join((
-        f"lp-anchor-v3: x={lookahead:.1f}m error={error:+.3f}m corr={self.correction:+.6f} e2e={e2e:+.6f}",
+        f"lp-e2e-blend: x={lookahead:.1f}m error={error:+.3f}m corr={self.correction:+.6f} e2e={e2e:+.6f}",
         f"offset={offset:+.3f}m rate={rate:+.3f}m/s bias={self.bias:+.6f}",
         f"geom_rate={geometric_rate:+.3f}m/s rate_bias={self.motion_bias:+.3f}m/s motion_ready={int(ready)}",
         f"bias_arm={self.bias_arm_time:.2f}s bias_pause={self.bias_pause_time:.2f}s",
+        f"path_blend={int(path_blend)}",
       )))
       self.last_anchor_time = now
 
@@ -325,7 +357,8 @@ class LanePolicy:
           return float(e2e_curvature)
         self.active, self.line_loss_time = True, 0.0
 
-      correction, error, lookahead = anchor_correction(model_output, center, x, v_ego)
+      path_blend = not self.holding_line
+      correction, error, lookahead = anchor_correction(model_output, center, x, v_ego, path_blend)
       offset, heading = near_geometry(center, x)
       self._track_turn(e2e_curvature)
       feedback_allowed = lateral_active and not steering_pressed and strong and v_ego >= 10.0 and abs(e2e_curvature) * v_ego ** 2 < 1.5
@@ -343,9 +376,9 @@ class LanePolicy:
       releasing = abs(correction) < abs(self.correction) or correction * self.correction < 0.0
       step = RELEASE_STEP if releasing else ENGAGE_STEP
       self.correction += float(np.clip(correction - self.correction, -step, step))
-      self._record(lookahead, error, e2e_curvature, offset, rate, geometric_rate, ready)
+      self._record(lookahead, error, e2e_curvature, offset, rate, geometric_rate, ready, path_blend)
       self.error_logged = False
-      self._mode("anchor lane center hold" if self.holding_line else "E2E lane anchor")
+      self._mode("anchor lane center hold" if self.holding_line else "E2E path fit")
       return float(e2e_curvature + self.correction)
     except (KeyError, IndexError, TypeError, ValueError, FloatingPointError, np.linalg.LinAlgError) as err:
       if not self.error_logged and self.logger is not None:

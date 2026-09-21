@@ -181,6 +181,101 @@ class TestLanePolicy(unittest.TestCase):
     e2e = 0.0010
     self.assertAlmostEqual(self.policy.update(output, e2e, 28.0, lane_policy_enabled=True), e2e, places=6)
 
+  def test_whole_path_alignment_removes_affine_disagreement(self):
+    x = np.asarray(ModelConstants.X_IDXS)
+    x = x[x <= lane_policy.ANCHOR_FIT_END]
+    e2e = 0.0003 * x ** 2 + 0.02 * np.sin(x / 12.0)
+    for side in (-1, 1):
+      center = e2e + side * (0.12 + 0.003 * x)
+      target, _ = lane_policy.blend_path(center, e2e, x)
+      np.testing.assert_allclose(target, center, atol=1e-12)
+
+  def test_virtual_path_keeps_near_e2e_shape_and_reaches_far_lane(self):
+    x = np.asarray(ModelConstants.X_IDXS)
+    x = x[x <= lane_policy.ANCHOR_FIT_END]
+    e2e = 0.0004 * x ** 2
+    center = 0.08 + 0.002 * x + 0.0001 * x ** 2
+    target, _ = lane_policy.blend_path(center, e2e, x)
+    near = x <= lane_policy.ANCHOR_BLEND_START
+    # The near transformation is affine, so it adds no second derivative.
+    near_change = np.polyfit(x[near], target[near] - e2e[near], 2)
+    self.assertAlmostEqual(near_change[0], 0.0, places=12)
+    far = x >= lane_policy.ANCHOR_BLEND_END
+    np.testing.assert_allclose(target[far], center[far], atol=1e-12)
+    np.testing.assert_array_equal(e2e, 0.0004 * x ** 2)
+
+  def test_distributed_fit_preserves_parallel_centering_gain(self):
+    x = np.asarray(ModelConstants.X_IDXS)
+    for speed in (5.0, 16.0, 20.0, 25.0, 35.0):
+      for horizon in (30.0, 45.0, 60.0):
+        for displacement in (-0.20, 0.20):
+          with self.subTest(speed=speed, horizon=horizon, displacement=displacement):
+            output = make_model_output(lane_center=displacement)
+            output['plan'] = output['plan'][:, x <= horizon, :]
+            center = np.full_like(x, displacement)
+            correction, _, lookahead = lane_policy.anchor_correction(output, center, x, speed)
+            expected = 2.0 * lane_policy.anchor_gain(lookahead) * displacement / lookahead ** 2
+            self.assertAlmostEqual(correction, expected, places=12)
+
+  def test_path_hugging_still_produces_opposing_correction(self):
+    x = np.asarray(ModelConstants.X_IDXS)
+    for side in (-1, 1):
+      output = make_model_output(e2e_path_center=side * 0.80)
+      correction, _, _ = lane_policy.anchor_correction(output, np.zeros_like(x), x, 30.0)
+      self.assertAlmostEqual(correction, -side * lane_policy.MAX_CORRECTION)
+
+  def test_far_shape_inside_fit_influences_correction(self):
+    x = np.asarray(ModelConstants.X_IDXS)
+    output = make_model_output()
+    center = 0.20 * np.clip((x - 40.0) / 15.0, 0.0, 1.0)
+    correction, _, _ = lane_policy.anchor_correction(output, center, x, 30.0)
+    self.assertGreater(correction, lane_policy.CORRECTION_DEADBAND)
+    # This shape was invisible to v3's 8-40 m alignment fit.
+    legacy, _, _ = lane_policy.anchor_correction(output, center, x, 30.0, path_blend=False)
+    self.assertEqual(legacy, 0.0)
+
+  def test_fit_ignores_geometry_beyond_shared_horizon(self):
+    x = np.asarray(ModelConstants.X_IDXS)
+    for horizon in (30.0, 45.0, 192.0):
+      with self.subTest(horizon=horizon):
+        output = make_model_output(lane_center=0.10)
+        output['plan'] = output['plan'][:, x <= horizon, :]
+        center = np.full_like(x, 0.10)
+        expected = lane_policy.anchor_correction(output, center, x, 25.0)
+        shared_end = min(lane_policy.ANCHOR_FIT_END, output['plan'][0, -1, 0])
+        center[x > shared_end] = np.nan
+        actual = lane_policy.anchor_correction(output, center, x, 25.0)
+        np.testing.assert_allclose(actual, expected, atol=1e-12)
+
+  def test_one_line_fit_keeps_v3_heading_and_offset_response(self):
+    x = np.asarray(ModelConstants.X_IDXS)
+    output = make_model_output(e2e_path_center=-0.04, e2e_path_heading=0.001)
+    center = 0.08 + 0.003 * x
+    correction, _, lookahead = lane_policy.anchor_correction(output, center, x, 20.0, path_blend=False)
+    expected = 2.0 * lane_policy.anchor_gain(lookahead) * (0.12 + lane_policy.HEADING_GAIN * 0.002 * lookahead) / lookahead ** 2
+    self.assertAlmostEqual(correction, expected, places=12)
+
+  def test_one_line_hold_uses_legacy_fit_for_non_affine_geometry(self):
+    output = make_model_output(lane_center=0.08, lane_quadratic=0.0001)
+    self.arm_lane_policy(output)
+    output['lane_lines_prob'][0, 5] = 0.10
+    result = self.apply_for(output, 0.50)
+    self.assertTrue(self.policy.holding_line)
+    x = np.asarray(ModelConstants.X_IDXS)
+    center = output['lane_lines'][0, 1, :, 0] + self.policy.width / 2.0
+    legacy, _, _ = lane_policy.anchor_correction(output, center, x, 20.0, path_blend=False)
+    self.assertAlmostEqual(result, lane_policy.soften_correction(legacy), places=12)
+
+  def test_distributed_fit_has_symmetric_steering_response(self):
+    x = np.asarray(ModelConstants.X_IDXS)
+    center = 0.07 - 0.002 * x + 0.0001 * x ** 2
+    positive = make_model_output(e2e_path_center=-0.02, e2e_path_quadratic=0.00004)
+    negative = make_model_output(e2e_path_center=0.02, e2e_path_quadratic=-0.00004)
+    for speed in (10.0, 20.0, 30.0):
+      a = lane_policy.anchor_correction(positive, center, x, speed)
+      b = lane_policy.anchor_correction(negative, -center, x, speed)
+      self.assertAlmostEqual(a[0], -b[0], places=12)
+
   def test_matching_paths_have_no_base_correction_without_active_feedback(self):
     output = make_model_output(lane_center=0.30, e2e_path_center=0.30)
     self.arm_lane_policy(output)
