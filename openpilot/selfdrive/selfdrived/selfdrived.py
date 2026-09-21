@@ -45,6 +45,11 @@ MonitoringPolicy = log.DriverMonitoringState.MonitoringPolicy
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
+# This only selects the normal on-road takeover reminder for this maintained
+# nightly build. It deliberately does not alter release, telemetry, or feature
+# gating metadata.
+CLEAN_STARTUP_CHANNELS = frozenset({"nightly-dev-av2st"})
+
 
 class SelfdriveD:
   def __init__(self, CP=None):
@@ -134,7 +139,9 @@ class SelfdriveD:
     self.rk = Ratekeeper(100, print_delay_threshold=None)
 
     # Determine startup event
-    self.startup_event = EventName.startup if build_metadata.openpilot.comma_remote and build_metadata.tested_channel else EventName.startupMaster
+    clean_startup = ((build_metadata.openpilot.comma_remote and build_metadata.tested_channel) or
+                     build_metadata.channel in CLEAN_STARTUP_CHANNELS)
+    self.startup_event = EventName.startup if clean_startup else EventName.startupMaster
     if HARDWARE.get_device_type() == 'mici':
       self.startup_event = None
     if not car_recognized:
