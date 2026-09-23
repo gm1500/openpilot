@@ -12,7 +12,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL, Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.simple_kalman import KF1D
-from openpilot.selfdrive.controls.lib.vision_lead_kalman import VisionLeadKalman
+from openpilot.selfdrive.controls.lib.vision_lead_tracker import VisionLeadObservation, VisionLeadTracker
 
 
 # Default lead acceleration decay set to 50% at 1s
@@ -182,7 +182,7 @@ class RadarD:
     self.tracks: dict[int, Track] = {}
     self.kalman_params = KalmanParams(DT_MDL)
     self.lead_prob_filters = [FirstOrderFilter(0.0, 0.2, DT_MDL) for _ in range(2)]
-    self.vision_lead_filters = [VisionLeadKalman() for _ in range(2)]
+    self.vision_lead_tracker = VisionLeadTracker()
     self.last_vision_log = 0.0
 
     self.v_ego = 0.0
@@ -242,28 +242,28 @@ class RadarD:
           self.lead_prob_filters[i].update(lead_prob)
 
       timestamp = self.radar_state.mdMonoTime * 1e-9
-      for i, field in enumerate(('leadOne', 'leadTwo')):
+      observations, leads = [], []
+      for i in range(2):
         lead_msg = leads_v3[i]
-        lead = get_lead(self.v_ego, self.ready, self.tracks, lead_msg, model_v_ego, self.lead_prob_filters[i].x, low_speed_override=(i == 0))
-        filt = self.vision_lead_filters[i]
-        if self.radar_state_valid and self.ready:
-          # Raw confidence, not the delayed probability used to retain a lead.
-          distance_std = lead_msg.xStd[0] if len(lead_msg.xStd) else float('nan')
-          lead = filt.update(lead, timestamp, self.v_ego, lead_msg.prob, distance_std)
-        else:
-          filt.reset('invalid message')
-        setattr(self.radar_state, field, lead)
+        leads.append(get_lead(self.v_ego, self.ready, self.tracks, lead_msg, model_v_ego, self.lead_prob_filters[i].x,
+                              low_speed_override=(i == 0)))
+        # Observe below control acceptance; raw confidence weights private history.
+        observations.append(VisionLeadObservation(float(lead_msg.x[0] - RADAR_TO_CAMERA), float(-lead_msg.y[0]),
+                                                  float(lead_msg.xStd[0]) if len(lead_msg.xStd) else float('nan'), float(lead_msg.prob)))
+      leads = self.vision_lead_tracker.update(observations, leads, timestamp, self.v_ego, self.radar_state_valid and self.ready)
+      for i, field in enumerate(('leadOne', 'leadTwo')):
+        setattr(self.radar_state, field, leads[i])
         if timestamp - self.last_vision_log >= 1.0:
+          track = self.vision_lead_tracker.slots[i]
           cloudlog.info(" ".join((
-            f"lead-kf: slot={i} active={int(filt.active)} reason={filt.reason}",
-            f"d={lead.get('dRel', 0.0):.2f} v={lead.get('vLead', 0.0):.2f}",
-            f"dv={filt.correction:+.3f} age={filt.age:.2f}",
+            f"lead-pre: slot={i} mode={track.mode if track else 'fallback'}",
+            f"age={track.age if track else 0.0:.2f} ready={int(track.ready) if track else 0}",
+            f"v={leads[i].get('vLead', 0.0):.2f}",
           )))
       if timestamp - self.last_vision_log >= 1.0:
         self.last_vision_log = timestamp
     else:
-      for filt in self.vision_lead_filters:
-        filt.reset('missing lead')
+      self.vision_lead_tracker.reset()
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
