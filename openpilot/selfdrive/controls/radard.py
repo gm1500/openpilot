@@ -12,6 +12,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL, Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.simple_kalman import KF1D
+from openpilot.selfdrive.controls.lib.vision_lead_kalman import VisionLeadKalman
 
 
 # Default lead acceleration decay set to 50% at 1s
@@ -181,6 +182,8 @@ class RadarD:
     self.tracks: dict[int, Track] = {}
     self.kalman_params = KalmanParams(DT_MDL)
     self.lead_prob_filters = [FirstOrderFilter(0.0, 0.2, DT_MDL) for _ in range(2)]
+    self.vision_lead_filters = [VisionLeadKalman() for _ in range(2)]
+    self.last_vision_log = 0.0
 
     self.v_ego = 0.0
     self.v_ego_hist = deque([0.0], maxlen=int(round(delay / DT_MDL))+1)
@@ -238,8 +241,29 @@ class RadarD:
         else:
           self.lead_prob_filters[i].update(lead_prob)
 
-      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.lead_prob_filters[0].x, low_speed_override=True)
-      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.lead_prob_filters[1].x, low_speed_override=False)
+      timestamp = self.radar_state.mdMonoTime * 1e-9
+      for i, field in enumerate(('leadOne', 'leadTwo')):
+        lead_msg = leads_v3[i]
+        lead = get_lead(self.v_ego, self.ready, self.tracks, lead_msg, model_v_ego, self.lead_prob_filters[i].x, low_speed_override=(i == 0))
+        filt = self.vision_lead_filters[i]
+        if self.radar_state_valid and self.ready:
+          # Raw confidence, not the delayed probability used to retain a lead.
+          distance_std = lead_msg.xStd[0] if len(lead_msg.xStd) else float('nan')
+          lead = filt.update(lead, timestamp, self.v_ego, lead_msg.prob, distance_std)
+        else:
+          filt.reset('invalid message')
+        setattr(self.radar_state, field, lead)
+        if timestamp - self.last_vision_log >= 1.0:
+          cloudlog.info(" ".join((
+            f"lead-kf: slot={i} active={int(filt.active)} reason={filt.reason}",
+            f"d={lead.get('dRel', 0.0):.2f} v={lead.get('vLead', 0.0):.2f}",
+            f"dv={filt.correction:+.3f} age={filt.age:.2f}",
+          )))
+      if timestamp - self.last_vision_log >= 1.0:
+        self.last_vision_log = timestamp
+    else:
+      for filt in self.vision_lead_filters:
+        filt.reset('missing lead')
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
