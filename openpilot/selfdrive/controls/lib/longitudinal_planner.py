@@ -4,7 +4,6 @@ import numpy as np
 
 import openpilot.cereal.messaging as messaging
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
-from opendbc.car.gm.values import CAR as GM_CAR
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
@@ -23,8 +22,6 @@ A_CRUISE_MIN = -1.2
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
-LEAD_STOP_ENTRY_SPEED = 0.6  # m/s; engage brake hold before prolonged creep
-LEAD_STOP_EXIT_SPEED = 0.8  # m/s; hysteresis while already stopping
 
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
@@ -63,7 +60,6 @@ class LongitudinalPlanner:
     self.fcw = False
     self.dt = dt
     self.allow_throttle = True
-    self.use_lead_stop_assist = CP.openpilotLongitudinalControl and CP.carFingerprint == GM_CAR.CHEVROLET_SILVERADO
 
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
@@ -108,17 +104,6 @@ class LongitudinalPlanner:
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
 
-    lead_stop_assist = (self.use_lead_stop_assist and not reset_state and
-                        not sm['carState'].gasPressed and not sm['carState'].brakePressed and
-                        sm.all_checks(['carState', 'radarState']))
-    stopped_lead = lead_stop_assist and any(
-      lead.present and lead.modelProb >= 0.9 and 0.0 < lead.dRel < 10.0 and -1.0 <= lead.vLead <= 0.5
-      for lead in (sm['radarState'].leadOne, sm['radarState'].leadTwo))
-    if stopped_lead and v_ego < MIN_ALLOW_THROTTLE_SPEED:
-      # A decelerating internal trajectory can reach zero before the truck does.
-      # Keep the MPC aware of measured creep instead of tapering the brakes early.
-      self.v_desired_filter.x = max(self.v_desired_filter.x, v_ego)
-
     # No change cost when user is controlling the speed, or when standstill
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
@@ -142,14 +127,6 @@ class LongitudinalPlanner:
     output_a_target_mpc = get_accel_from_plan(self.v_desired_trajectory, self.a_desired_trajectory, CONTROL_N_T_IDX,
                                               action_t=action_t)
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
-    if lead_stop_assist:
-      if sm['controlsState'].longControlState == LongCtrlState.stopping:
-        # Retain the existing brake command through small speed/lead fluctuations.
-        # A positive departure request releases hold through the normal state machine.
-        output_should_stop_mpc |= v_ego < LEAD_STOP_EXIT_SPEED and output_a_target_mpc < 0.1
-      else:
-        output_should_stop_mpc |= (stopped_lead and v_ego < LEAD_STOP_ENTRY_SPEED and
-                                   self.v_desired_trajectory[-1] < 0.1 and output_a_target_mpc < -0.1)
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
 
