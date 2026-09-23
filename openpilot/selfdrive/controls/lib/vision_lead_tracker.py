@@ -32,7 +32,7 @@ class VisionLeadObservation:
 
 
 class _DistanceTrack:
-  ACCEL_NOISE = 0.1  # continuous white acceleration spectral density
+  ACCEL_NOISE = 0.1  # nominal continuous white acceleration spectral density
   MIN_HISTORY = 1.5
   MAX_SPEED_VARIANCE = 2.25
 
@@ -63,10 +63,20 @@ class _DistanceTrack:
       return math.inf
     return distance_error / 5.0 + lateral_error / 0.75
 
+  def acceleration_noise(self, distance: float, ego: float) -> float:
+    # Keep the original response within a one-second gap; gradually smooth farther leads.
+    headway = distance / max(ego, 5.0)
+    factor = float(np.interp(headway, [1.0, 2.5], [1.0, 0.5]))
+    closing = max(ego - float(self.x[1]), 0.0)
+    if closing > 0.0:
+      # Distance alone must not slow the response to a rapidly closing lead.
+      factor = max(factor, float(np.interp(distance / closing, [6.0, 12.0], [2.0, 0.5])))
+    return self.ACCEL_NOISE * factor
+
   def update(self, observation: VisionLeadObservation, timestamp: float, ego: float) -> bool:
     dt = timestamp - self.time
     F = np.array([[1.0, dt], [0.0, 1.0]])
-    Q = self.ACCEL_NOISE * np.array([[dt**3 / 3, dt**2 / 2], [dt**2 / 2, dt]])
+    Q = self.acceleration_noise(observation.distance, ego) * np.array([[dt**3 / 3, dt**2 / 2], [dt**2 / 2, dt]])
     self.x = F @ self.x
     self.x[0] -= 0.5 * (ego + self.ego) * dt
     self.P = F @ self.P @ F.T + Q
