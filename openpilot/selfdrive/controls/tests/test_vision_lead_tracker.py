@@ -119,6 +119,62 @@ class TestVisionLeadTracker(unittest.TestCase):
     self.assertIs(self.tracker.slots[0], self.tracker.slots[1])
     self.assertEqual(len(self.tracker.tracks), 1)
 
+  def test_brief_duplicate_separation_keeps_warmed_speed(self):
+    self.step([observation(std=10)] * 2, [lead(speed=23)] * 2, count=160)
+    shared = self.tracker.slots[0]
+    self.assertTrue(shared.ready)
+    # Route 26c/12: 2.4 m longitudinal / 0.44 m lateral separation split a warm track.
+    for distance, lateral in ((57.6, 0.44), (58.2, 0.32), (58.3, 0.28), (60.0, 0.0)):
+      original = [lead(distance, speed=23), lead(speed=23)]
+      out = self.step([observation(distance, lateral=lateral, std=10), observation(std=10)], original)
+      self.assertIs(self.tracker.slots[0], shared)
+      self.assertIs(self.tracker.slots[1], shared)
+      self.assertGreater(out[0]['vLead'], 24.8)
+      self.assertEqual(out[0]['vLead'], out[1]['vLead'])
+      for before, after in zip(original, out, strict=True):
+        for key in before.keys() - {'vLead', 'vLeadK', 'vRel'}:
+          self.assertEqual(after[key], before[key])
+
+  def test_group_hysteresis_does_not_merge_new_distinct_tracks(self):
+    self.step([observation(), observation(62)], [lead(), lead(62)], count=160)
+    self.assertIsNot(self.tracker.slots[0], self.tracker.slots[1])
+    self.assertTrue(all(track.ready for track in self.tracker.slots))
+
+  def test_group_hysteresis_releases_distance_and_lateral_splits(self):
+    for distance, lateral in ((56.9, 0.0), (57.6, 0.51)):
+      with self.subTest(distance=distance, lateral=lateral):
+        self.tracker.reset()
+        self.step([observation()] * 2, [lead()] * 2, count=120)
+        shared = self.tracker.slots[0]
+        original = [lead(distance, speed=20), lead()]
+        out = self.step([observation(distance, lateral=lateral), observation()], original)
+        self.assertEqual(out[0], original[0])
+        self.assertIsNot(self.tracker.slots[0], shared)
+        self.assertFalse(self.tracker.slots[0].ready)
+        self.assertIs(self.tracker.slots[1], shared)
+
+  def test_group_hysteresis_requires_both_observations_to_match(self):
+    self.step([observation()] * 2, [lead()] * 2, count=120)
+    shared = self.tracker.slots[0]
+    original = [lead(52, speed=20), lead(54)]
+    out = self.step([observation(52), observation(54)], original)
+    self.assertEqual(out, original)
+    self.assertNotIn(shared, self.tracker.slots)
+    self.assertIsNot(self.tracker.slots[0], self.tracker.slots[1])
+
+  def test_braking_guard_is_immediate_during_retained_group(self):
+    for speed, acceleration in ((20, -1), (13, 0)):
+      with self.subTest(speed=speed, acceleration=acceleration):
+        self.tracker.reset()
+        self.step([observation()] * 2, [lead()] * 2, count=120)
+        shared = self.tracker.slots[0]
+        out = self.step([observation(57.6, lateral=0.44), observation()],
+                        [lead(57.6, speed=speed, acceleration=acceleration), lead()])
+        self.assertIs(self.tracker.slots[0], shared)
+        self.assertIs(self.tracker.slots[1], shared)
+        self.assertLessEqual(out[0]['vLead'], speed)
+        self.assertLessEqual(out[1]['vLead'], speed)
+
   def test_confidence_dip_keeps_history(self):
     self.step(count=120)
     old = self.tracker.slots[0]
