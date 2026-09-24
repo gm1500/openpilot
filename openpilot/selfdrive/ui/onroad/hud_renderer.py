@@ -30,6 +30,7 @@ class UIConfig:
 class FontSizes:
   current_speed: int = 176
   speed_unit: int = 66
+  map_speed_limit: int = 40
   max_speed: int = 40
   set_speed: int = 90
 
@@ -184,3 +185,13 @@ class HudRenderer(Widget):
     unit_text_size = measure_text_cached(self._font_medium, unit_text, FONT_SIZES.speed_unit)
     unit_pos = rl.Vector2(rect.x + rect.width / 2 - unit_text_size.x / 2, 290 - unit_text_size.y / 2)
     rl.draw_text_ex(self._font_medium, unit_text, unit_pos, FONT_SIZES.speed_unit, 0, COLORS.WHITE_TRANSLUCENT)
+
+    map_limit_kph = ui_state.map_speed_limit_kph
+    if map_limit_kph > 0:
+      map_limit = round(map_limit_kph if ui_state.is_metric else map_limit_kph * KM_TO_MILE)
+      map_limit_text = f"LIMIT {map_limit}  OSM"
+    else:
+      map_limit_text = "LIMIT –  OSM"
+    map_limit_size = measure_text_cached(self._font_semi_bold, map_limit_text, FONT_SIZES.map_speed_limit)
+    map_limit_pos = rl.Vector2(rect.x + rect.width / 2 - map_limit_size.x / 2, 350 - map_limit_size.y / 2)
+    rl.draw_text_ex(self._font_semi_bold, map_limit_text, map_limit_pos, FONT_SIZES.map_speed_limit, 0, COLORS.WHITE_TRANSLUCENT)

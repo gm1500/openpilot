@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import time
 import threading
@@ -76,6 +77,7 @@ class UIState:
         "selfdriveState",
         "longitudinalPlan",
         "gpsLocationExternal",
+        "customReservedRawData0",
         "carOutput",
         "carControl",
         "vehicleParameters",
@@ -120,6 +122,8 @@ class UIState:
     self.is_body: bool | None = False
     self.CP: car.CarParams | None = None
     self.light_sensor: float = -1.0
+    self.map_speed_limit_kph: int = 0
+    self._map_speed_limit_update_time: float = 0.0
 
     self._params_thread: threading.Thread | None = None
 
@@ -188,6 +192,20 @@ class UIState:
 
     # Update started state
     self.started = self.sm["deviceState"].started and self.ignition
+
+    # POC OSM speed-limit feed over the existing fork-reserved raw cereal channel.
+    if self.sm.updated["customReservedRawData0"]:
+      try:
+        payload = json.loads(bytes(self.sm["customReservedRawData0"]).decode("utf-8"))
+        self.map_speed_limit_kph = max(0, int(payload.get("speed_limit_kph", 0)))
+        self._map_speed_limit_update_time = time.monotonic()
+      except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        self.map_speed_limit_kph = 0
+        self._map_speed_limit_update_time = time.monotonic()
+
+    if not self.started or (self._map_speed_limit_update_time > 0.0 and
+                            time.monotonic() - self._map_speed_limit_update_time > 12.0):
+      self.map_speed_limit_kph = 0
 
     # Update body state
     if self.CP is not None and self.is_body != self.CP.notCar:
