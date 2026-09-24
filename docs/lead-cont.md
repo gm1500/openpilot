@@ -1,52 +1,45 @@
-# lead-cont: preserve established duplicate-lead history
+# lead-cont: bounded speed handoff across a brief lead split
 
-Based on `brake-map` at `43e9ef63912723510fd7dae20538817f3979393f`.
+This revision replaces the wider history-retention gates introduced in
+`0668c426cd378e43d49b004ba1160aeaac33f8aa`. The underlying estimator and vehicle
+configuration remain based on `brake-map` at `43e9ef63912723510fd7dae20538817f3979393f`.
 
-An established distance track can be shared by the model's two lead hypotheses.
-A brief disagreement beyond the grouping threshold previously split that group,
-assigned its warm history to one hypothesis, and forced the other back to model
-velocity. The lead could remain accepted throughout this discontinuity.
+## Why the history change needed correcting
 
-This change adds grouping hysteresis:
+The wider gates removed short model-speed fallback dips, but a subsequent
+recorded drive exposed a range-reversal regression. Keeping the older filter
+state through a hypothesis split produced a lead-speed estimate up to 20.2 km/h
+above the previous estimator on the same inputs. The planner continued to
+request acceleration as the reported gap shrank before segment 9.
 
-| Situation | Maximum distance difference | Maximum lateral difference |
-| --- | ---: | ---: |
-| First joining hypotheses | 1.5 m | 0.35 m |
-| Retaining a ready, already shared track | 3.0 m | 0.5 m |
+## Updated behavior
 
-The wider release limits apply only when both observations still independently
-pass the existing association check against that shared track. A separation
-beyond either release limit, an association failure, or an unready track uses
-the original grouping behavior. Independently established tracks do not gain
-the wider joining limits. A retained pair is still one correlated observation
-and receives one Kalman update.
+- Grouping again always uses the original **1.5 m longitudinal / 0.35 m lateral**
+  limits. A new track learns its own state and covariance.
+- When a ready, shared distance track briefly splits, its last published speed
+  may seed the new track's existing **one-second output transition**. Both
+  observations must be valid, match the previous track independently, and stay
+  within **3 m / 0.5 m** of each other. These wider limits permit an output
+  handoff only; they never retain or copy the Kalman history.
+- A persistent split fades to model fallback. A new, unready track cannot
+  repeatedly renew the handoff. Rejected filter states cancel the bridge for
+  both slots before either output is published.
+- Mode transitions now interpolate between a fixed starting output and the
+  current target. The previous additive-offset approach could overshoot both
+  when the target changed during the transition.
+- Current model-braking and closing-time guards override the transition
+  immediately. Lead acceptance and unsupported/low-speed fallback are preserved.
 
-The model braking/closing-time guards and normal fallback remain in place.
-Lead acceptance, raw published distance and acceleration, filtering gains,
-planner policy, actuator tuning, and the opendbc revision are unchanged.
+The Kalman gains, raw published distance and acceleration, planner policy,
+actuator delay, Ki, brake mapping, and opendbc revision are unchanged.
 
-## Recorded-input comparison
+## Verification
 
-Replay of all 7,200 radar/model frames from the six supplied highway segments
-reproduces the following changes in segment 12:
-
-| Time | Previous one-frame speed change | With continuity hysteresis |
-| --- | ---: | ---: |
-| 56.45 s | -6.290 km/h | -0.032 km/h |
-| 57.15 s | -6.366 km/h | -0.023 km/h |
-
-The first event exceeded both original grouping gates (2.424 m longitudinal
-and 0.438 m lateral). The second exceeded the distance gate. Both remain in
-distance mode with the change, removing four fallback frames in total.
-
-The segment-15 reset after a much larger gap jump still occurs. Its later
-steady-following brake cycles have the same lead-speed output within recorded
-float rounding. This patch targets the sharp split/fallback discontinuities;
-it does not claim to resolve all slower following oscillation.
-
-35 focused estimator/adaptive unit tests pass, including five new regressions
-covering temporary splits, original joining limits, release on true separation,
-failed association, and immediate model braking/closing-time guards:
+39 focused tracker/adaptive tests pass. They cover cold/prewarmed acquisition,
+independent tracks, slot swaps, loss and reacquisition, low-speed/radar fallback,
+cut-ins, immediate braking guards, covariance behavior, bounded handoff expiry,
+changing-target interpolation, rejection of stale states, and regrouping onto
+new history.
 
 ```sh
 python3 -m unittest \
@@ -54,6 +47,24 @@ python3 -m unittest \
   openpilot.selfdrive.controls.tests.test_vision_lead_adaptive
 ```
 
-Replay holds the recorded vehicle motion and model observations fixed. It
-validates the changed lead-speed input, not a new planner/brake trajectory or
-road performance. No native MPC or full-stack vehicle simulation was run.
+Recorded-input replay covers **29,998 frames across 25 supplied segments** from
+three routes, including city stops and the two highway regression cases. Both
+lead slots are replayed. The new private filter states match the original
+strict-grouping estimator; only the published handoff differs.
+
+| Earlier dip window | Original maximum downward speed step | Updated maximum downward step |
+| --- | ---: | ---: |
+| Route 26c, segment 12, 56.39–56.70 s | 6.290 km/h | 0.011 km/h |
+| Route 26c, segment 12, 57.09–57.50 s | 6.366 km/h | 0.269 km/h |
+
+For route 26d, segment 8, 55–59 s, the current estimate's 2 s gap-consistency
+error falls from **11.76 m to 5.86 m**. The original strict-grouping version is
+5.58 m in this window. Peak estimated lead speed falls from **123.6 to
+112.5 km/h**. The update preserves short-dip suppression while addressing the
+large retention regression; it does not eliminate the underlying filter lag.
+
+The gap-consistency calculation uses recorded ego travel and the same model
+lead acceleration for all speed sources. It compares predictions against the
+later camera gap, not independent ground truth. These are estimator replays,
+not a native MPC solve or a simulated alternative vehicle trajectory. They do
+not establish a new minimum driving gap or road performance.

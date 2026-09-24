@@ -45,7 +45,7 @@ class _DistanceTrack:
     self.dt = 0.0
     self.output: float | None = None
     self.mode = 'fallback'
-    self.offset = 0.0
+    self.transition_from = 0.0
     self.transition = 1.0
     self.last_braking = -math.inf
 
@@ -109,13 +109,14 @@ class _DistanceTrack:
     if urgent or recovering:
       target = min(target, baseline)
       mode = 'braking'
-      self.offset, self.transition = 0.0, 1.0
+      self.transition_from, self.transition = 0.0, 1.0
     elif self.output is not None and mode != self.mode:
-      self.offset, self.transition = self.output - target, 0.0
+      # A fixed starting value keeps a changing target inside the blend.
+      self.transition_from, self.transition = self.output, 0.0
     else:
       self.transition = min(1.0, self.transition + self.dt)
     self.mode = mode
-    self.output = float(np.clip(target + self.offset * (1.0 - self.transition), 0.0, 70.0))
+    self.output = float(np.clip(self.transition * target + (1.0 - self.transition) * self.transition_from, 0.0, 70.0))
     return self.output
 
 
@@ -129,21 +130,12 @@ class VisionLeadTracker:
     self.slots: list[_DistanceTrack | None] = [None, None]
     self.history_slots: list[_DistanceTrack | None] = [None, None]
 
-  def _groups(self, observations: list[VisionLeadObservation], timestamp: float, ego: float) -> list[tuple[list[int], VisionLeadObservation]]:
+  @staticmethod
+  def _groups(observations: list[VisionLeadObservation]) -> list[tuple[list[int], VisionLeadObservation]]:
     valid = [i for i, obs in enumerate(observations) if obs.valid()]
     if len(valid) == 2:
       a, b = observations
-      shared = self.history_slots[0]
-      # Avoid dropping warmed history when duplicate hypotheses briefly separate.
-      # Joining new tracks keeps the tighter gates; both observations must still
-      # match the shared track before either release gate gets widened.
-      retain_shared = (
-        shared is not None and shared is self.history_slots[1] and shared.ready
-        and all(math.isfinite(shared.association_cost(obs, timestamp, ego)) for obs in observations)
-      )
-      distance_limit = 3.0 if retain_shared else 1.5
-      lateral_limit = 0.5 if retain_shared else 0.35
-      if abs(a.distance - b.distance) <= distance_limit and abs(a.lateral - b.lateral) <= lateral_limit:
+      if abs(a.distance - b.distance) <= 1.5 and abs(a.lateral - b.lateral) <= 0.35:
         weights = [obs.probability / max(obs.std, 1.0) ** 2 for obs in observations]
         total = sum(weights)
         # Two outputs of the same camera are correlated, not two measurements.
@@ -166,7 +158,18 @@ class VisionLeadTracker:
     self.time = timestamp
     previous_slots = self.history_slots
     tracks = [track for track in self.tracks if timestamp - track.time <= 0.2]
-    groups = self._groups(observations, timestamp, ego)
+    # A brief split may bridge the published speed, but must not widen the
+    # grouping gates or copy a stale Kalman state into a new track.
+    shared = previous_slots[0]
+    bridge = None
+    if (
+      shared is not None and shared is previous_slots[1] and shared.ready and shared.mode == 'distance'
+      and all(obs.valid() and math.isfinite(shared.association_cost(obs, timestamp, ego)) for obs in observations)
+      and abs(observations[0].distance - observations[1].distance) <= 3.0
+      and abs(observations[0].lateral - observations[1].lateral) <= 0.5
+    ):
+      bridge = shared.output
+    groups = self._groups(observations)
     costs = [[track.association_cost(obs, timestamp, ego) for track in tracks] for _, obs in groups]
     # Exhaustive assignment is tiny (at most two tracks); retain history on slot swaps.
     options = []
@@ -185,10 +188,17 @@ class VisionLeadTracker:
       if track is not None and not track.update(observation, timestamp, ego):
         # A rejected state must not survive through the other, missing slot.
         track = None
+        bridge = None
         previous_slots = [None if old is tracks[assignment[g]] else old for old in previous_slots]
       if track is None:
         track = _DistanceTrack(observation, timestamp, ego)
       used.append(track)
+
+    for (indices, observation), track in zip(groups, used, strict=True):
+      if track.age == 0.0 and bridge is not None:
+        # The existing one-second fallback transition expires this bridge.
+        # Current braking/closing guards still override it immediately.
+        track.output, track.mode = bridge, 'distance'
       for i in indices:
         self.slots[i] = self.history_slots[i] = track
       accepted = [i for i in indices if leads[i].get('present', False) and not leads[i].get('radar', False)]
@@ -198,7 +208,7 @@ class VisionLeadTracker:
         and all(10.0 < leads[i]['dRel'] < 150.0 and all(math.isfinite(leads[i][key]) for key in ('vLead', 'aLeadK')) for i in accepted)
       )
       if not supported:
-        track.output, track.mode, track.offset, track.transition = None, 'fallback', 0.0, 1.0
+        track.output, track.mode, track.transition_from, track.transition = None, 'fallback', 0.0, 1.0
         continue
       speed = track.speed([leads[i] for i in accepted], observation, ego)
       if (track.mode == 'fallback' and track.transition >= 1.0) or (track.mode == 'braking' and not track.ready):
@@ -216,6 +226,6 @@ class VisionLeadTracker:
         used.append(track)
         speed = leads[i].get('vLead', math.nan)
         if leads[i].get('present', False) and not leads[i].get('radar', False) and math.isfinite(speed):
-          track.output, track.mode, track.offset, track.transition = speed, 'fallback', 0.0, 1.0
+          track.output, track.mode, track.transition_from, track.transition = speed, 'fallback', 0.0, 1.0
     self.tracks = used[:2]
     return output

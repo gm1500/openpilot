@@ -119,28 +119,77 @@ class TestVisionLeadTracker(unittest.TestCase):
     self.assertIs(self.tracker.slots[0], self.tracker.slots[1])
     self.assertEqual(len(self.tracker.tracks), 1)
 
-  def test_brief_duplicate_separation_keeps_warmed_speed(self):
+  def test_brief_duplicate_split_bridges_output_without_copying_history(self):
     self.step([observation(std=10)] * 2, [lead(speed=23)] * 2, count=160)
     shared = self.tracker.slots[0]
-    self.assertTrue(shared.ready)
-    # Route 26c/12: 2.4 m longitudinal / 0.44 m lateral separation split a warm track.
-    for distance, lateral in ((57.6, 0.44), (58.2, 0.32), (58.3, 0.28), (60.0, 0.0)):
-      original = [lead(distance, speed=23), lead(speed=23)]
-      out = self.step([observation(distance, lateral=lateral, std=10), observation(std=10)], original)
-      self.assertIs(self.tracker.slots[0], shared)
-      self.assertIs(self.tracker.slots[1], shared)
-      self.assertGreater(out[0]['vLead'], 24.8)
-      self.assertEqual(out[0]['vLead'], out[1]['vLead'])
-      for before, after in zip(original, out, strict=True):
-        for key in before.keys() - {'vLead', 'vLeadK', 'vRel'}:
-          self.assertEqual(after[key], before[key])
+    old_output = shared.output
+    original = [lead(57.6, speed=23), lead(speed=23)]
+    out = self.step([observation(57.6, lateral=0.44, std=10), observation(std=10)], original)
+    fresh = self.tracker.slots[0]
+    self.assertIsNot(fresh, shared)
+    self.assertIs(self.tracker.slots[1], shared)
+    self.assertFalse(fresh.ready)
+    self.assertEqual(fresh.age, 0.0)
+    self.assertEqual(fresh.P[1, 1], 1000.0)
+    self.assertAlmostEqual(out[0]['vLead'], old_output)
+    for before, after in zip(original, out, strict=True):
+      for key in before.keys() - {'vLead', 'vLeadK', 'vRel'}:
+        self.assertEqual(after[key], before[key])
 
-  def test_group_hysteresis_does_not_merge_new_distinct_tracks(self):
+  def test_persistent_split_bridge_expires_without_restarting(self):
+    self.step([observation(std=10)] * 2, [lead(speed=23)] * 2, count=160)
+    obs = [observation(57.6, lateral=0.44, std=10), observation(std=10)]
+    leads = [lead(57.6, speed=23), lead(speed=23)]
+    self.step(obs, leads)
+    speeds = [self.step(obs, leads)[0]['vLead'] for _ in range(22)]
+    self.assertTrue(all(a >= b for a, b in zip(speeds, speeds[1:])))
+    self.assertEqual(speeds[-1], 23.0)
+    self.assertFalse(self.tracker.slots[0].ready)
+
+  def test_bridge_stays_between_previous_output_and_changing_model(self):
+    self.step([observation(std=10)] * 2, [lead(speed=23)] * 2, count=160)
+    previous = self.tracker.slots[0].output
+    obs = [observation(57.6, lateral=0.44, std=10), observation(std=10)]
+    for speed in (23.0, 23.4, 24.0, 24.3):
+      out = self.step(obs, [lead(57.6, speed=speed), lead(speed=23)])
+      self.assertGreaterEqual(out[0]['vLead'], speed)
+      self.assertLessEqual(out[0]['vLead'], previous)
+
+  def test_regrouping_keeps_new_history_when_observations_match_it(self):
+    for i in range(160):
+      gap = 60.0 + 0.1 * i
+      self.step([observation(gap)] * 2, [lead(gap, speed=25)] * 2)
+    old = self.tracker.slots[0]
+    self.assertGreater(old.x[1], 26.9)
+    gap -= 2.4
+    self.step([observation(gap, lateral=0.44), observation(gap + 2.4)],
+              [lead(gap, speed=25), lead(gap + 2.4, speed=25)])
+    fresh = self.tracker.slots[0]
+    self.step([observation(gap, lateral=0.44)] * 2, [lead(gap, speed=25)] * 2)
+    self.assertIs(self.tracker.slots[0], fresh)
+    self.assertIs(self.tracker.slots[1], fresh)
+    self.assertNotIn(old, self.tracker.tracks)
+    self.assertLess(fresh.age, 0.1)
+    self.assertFalse(fresh.ready)
+
+  def test_rejected_filter_does_not_bridge_stale_output(self):
+    self.step([observation()] * 2, [lead(speed=23)] * 2, count=160)
+    shared = self.tracker.slots[0]
+    shared.x[0] = 100.0
+    # Association succeeds, but the innovation rejects the state. Even the
+    # first split slot must fall back, before the old track's update runs.
+    obs = [observation(57.6, lateral=0.44), observation()]
+    leads = [lead(57.6, speed=23), lead(speed=23)]
+    out = self.step(obs, leads)
+    self.assertEqual(out, leads)
+    self.assertNotIn(shared, self.tracker.tracks)
+
+  def test_output_bridge_does_not_merge_distinct_tracks(self):
     self.step([observation(), observation(62)], [lead(), lead(62)], count=160)
     self.assertIsNot(self.tracker.slots[0], self.tracker.slots[1])
     self.assertTrue(all(track.ready for track in self.tracker.slots))
 
-  def test_group_hysteresis_releases_distance_and_lateral_splits(self):
+  def test_output_bridge_rejects_large_distance_and_lateral_splits(self):
     for distance, lateral in ((56.9, 0.0), (57.6, 0.51)):
       with self.subTest(distance=distance, lateral=lateral):
         self.tracker.reset()
@@ -153,7 +202,7 @@ class TestVisionLeadTracker(unittest.TestCase):
         self.assertFalse(self.tracker.slots[0].ready)
         self.assertIs(self.tracker.slots[1], shared)
 
-  def test_group_hysteresis_requires_both_observations_to_match(self):
+  def test_output_bridge_requires_both_observations_to_match(self):
     self.step([observation()] * 2, [lead()] * 2, count=120)
     shared = self.tracker.slots[0]
     original = [lead(52, speed=20), lead(54)]
@@ -162,7 +211,7 @@ class TestVisionLeadTracker(unittest.TestCase):
     self.assertNotIn(shared, self.tracker.slots)
     self.assertIsNot(self.tracker.slots[0], self.tracker.slots[1])
 
-  def test_braking_guard_is_immediate_during_retained_group(self):
+  def test_braking_guard_is_immediate_during_output_bridge(self):
     for speed, acceleration in ((20, -1), (13, 0)):
       with self.subTest(speed=speed, acceleration=acceleration):
         self.tracker.reset()
@@ -170,10 +219,10 @@ class TestVisionLeadTracker(unittest.TestCase):
         shared = self.tracker.slots[0]
         out = self.step([observation(57.6, lateral=0.44), observation()],
                         [lead(57.6, speed=speed, acceleration=acceleration), lead()])
-        self.assertIs(self.tracker.slots[0], shared)
+        self.assertIsNot(self.tracker.slots[0], shared)
         self.assertIs(self.tracker.slots[1], shared)
-        self.assertLessEqual(out[0]['vLead'], speed)
-        self.assertLessEqual(out[1]['vLead'], speed)
+        self.assertEqual(out[0]['vLead'], speed)
+        self.assertEqual(out[0]['vLeadK'], speed)
 
   def test_confidence_dip_keeps_history(self):
     self.step(count=120)
