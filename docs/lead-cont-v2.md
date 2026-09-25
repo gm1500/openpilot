@@ -104,3 +104,31 @@ bounded speed handoff when neither guard fires. Its model-speed response can
 therefore be delayed by up to one second. The thresholds are conservative
 experimental gates tested on these logs, not calibrated target-identity
 probabilities. Closed-loop validation remains necessary before road use.
+
+
+## Mild kinematic planner-range filter
+
+The branch now also applies a deliberately mild causal correction to the camera
+range only while an established vision track is publishing distance-derived
+speed. Each frame predicts the next range from the previous filtered range and
+the published relative speed, then accepts 60% of the new camera-range
+innovation:
+
+`predicted = previous + (vLead - vEgo) * dt`
+
+`filtered = predicted + 0.60 * (raw - predicted)`
+
+This is not a conventional long time-constant low-pass. It is intended to
+reduce frame-to-frame range inconsistency while retaining most new measurement
+information. New/cold tracks, radar leads, unsupported leads, active uncertain
+handoffs, and braking/rapid-closing mode continue to publish raw range. Entering
+braking mode resets the private filtered range to the raw measurement so a real
+closing/braking event is not delayed by stale range history.
+
+When two model hypotheses share one private track, the range state updates once
+per frame from the merged observation; each slot retains its small raw offset.
+
+The 0.60 correction gain is the conservative candidate from the prior offline
+kinematic comparison. The newly supplied route-270 raw logs still require a
+capnp-capable replay environment for quantitative retuning; this commit does
+not claim a fresh full-stack replay of those files.
