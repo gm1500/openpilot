@@ -35,12 +35,16 @@ class _DistanceTrack:
   ACCEL_NOISE = 0.1  # nominal continuous white acceleration spectral density
   MIN_HISTORY = 1.5
   MAX_SPEED_VARIANCE = 2.25
+  UNCERTAIN_MAX_DISTANCE = 15.0
+  UNCERTAIN_MAX_LATERAL = 0.15
+  UNCERTAIN_MIN_HISTORY = 5.0
 
   def __init__(self, observation: VisionLeadObservation, timestamp: float, ego: float):
     self.x = np.array([observation.distance, ego], dtype=float)
     self.P = np.diag([observation.variance, 1000.0])
     self.time, self.ego = timestamp, ego
     self.distance, self.lateral = observation.distance, observation.lateral
+    self.distance_std = observation.std
     self.age = 0.0
     self.dt = 0.0
     self.output: float | None = None
@@ -48,6 +52,7 @@ class _DistanceTrack:
     self.transition_from = 0.0
     self.transition = 1.0
     self.last_braking = -math.inf
+    self.uncertain_handoff_until = -math.inf
 
   @property
   def ready(self) -> bool:
@@ -62,6 +67,29 @@ class _DistanceTrack:
     if not 0.01 <= dt <= 0.2 or distance_error > 5.0 or lateral_error > 0.75:
       return math.inf
     return distance_error / 5.0 + lateral_error / 0.75
+
+  def uncertain_handoff_cost(self, observation: VisionLeadObservation, timestamp: float, ego: float) -> float:
+    # Range uncertainty cannot establish target identity. A plausible match may
+    # hand off its published speed, but must never transfer the Kalman state.
+    dt = timestamp - self.time
+    if (
+      not self.ready or self.mode != 'distance' or self.age < self.UNCERTAIN_MIN_HISTORY
+      or not 0.01 <= dt <= 0.1 or self.output is None or not math.isfinite(self.output)
+      or not np.isfinite(self.x).all() or not np.isfinite(self.P).all()
+      or observation.probability < 0.9 or observation.std < max(10.0, 2.0 * self.distance_std)
+    ):
+      return math.inf
+    travel = (float(self.x[1]) - 0.5 * (ego + self.ego)) * dt
+    distance_error = abs(observation.distance - (self.distance + travel))
+    lateral_error = abs(observation.lateral - self.lateral)
+    innovation = observation.distance - (float(self.x[0]) + travel)
+    predicted_variance = self.P[0, 0] + 2.0 * dt * self.P[0, 1] + dt**2 * self.P[1, 1]
+    if (
+      distance_error > self.UNCERTAIN_MAX_DISTANCE or lateral_error > self.UNCERTAIN_MAX_LATERAL
+      or innovation**2 > predicted_variance + observation.variance
+    ):
+      return math.inf
+    return distance_error / self.UNCERTAIN_MAX_DISTANCE + lateral_error / self.UNCERTAIN_MAX_LATERAL
 
   def acceleration_noise(self, distance: float, ego: float) -> float:
     # Keep the original response within a one-second gap; gradually smooth farther leads.
@@ -93,6 +121,7 @@ class _DistanceTrack:
       return False
     self.time, self.ego, self.dt = timestamp, ego, dt
     self.distance, self.lateral = observation.distance, observation.lateral
+    self.distance_std = observation.std
     self.age += dt
     return True
 
@@ -102,7 +131,8 @@ class _DistanceTrack:
     target = float(self.x[1]) if use_distance else baseline
     mode = 'distance' if use_distance else 'fallback'
     closing = ego - baseline
-    urgent = min(lead['aLeadK'] for lead in leads) < -0.5 or (closing > 0.0 and min(lead['dRel'] for lead in leads) < 5.0 * closing)
+    closing_time = 8.0 if self.time < self.uncertain_handoff_until else 5.0
+    urgent = min(lead['aLeadK'] for lead in leads) < -0.5 or (closing > 0.0 and min(lead['dRel'] for lead in leads) < closing_time * closing)
     if urgent:
       self.last_braking = self.time
     recovering = self.time - self.last_braking < 2.0 and target > baseline + 0.5
@@ -179,6 +209,25 @@ class VisionLeadTracker:
         continue
       options.append(((-len(assigned), sum(costs[g][i] for g, i in enumerate(assignment) if i >= 0)), assignment))
     assignment = min(options)[1]
+    handoffs = [None] * len(groups)
+    for j, track in enumerate(tracks):
+      if j in assignment:
+        continue
+      matches = []
+      for g, (indices, observation) in enumerate(groups):
+        # Only an unassigned old track can hand off to one unambiguous group
+        # in its previous slots. Never borrow speed from another matched car.
+        supported = assignment[g] < 0 and 15.0 < ego < 60.0 and all(
+          previous_slots[i] is track and leads[i].get('present', False) and not leads[i].get('radar', False)
+          and all(math.isfinite(leads[i][key]) for key in ('dRel', 'vLead', 'aLeadK'))
+          and 10.0 < leads[i]['dRel'] < 150.0 and leads[i]['aLeadK'] >= -0.5
+          and leads[i]['dRel'] >= 8.0 * max(ego - leads[i]['vLead'], 0.0)
+          for i in indices
+        )
+        if supported and math.isfinite(track.uncertain_handoff_cost(observation, timestamp, ego)):
+          matches.append(g)
+      if len(matches) == 1:
+        handoffs[matches[0]] = track.output
     self.slots = [None, None]
     self.history_slots = [None, None]
     used = []
@@ -194,11 +243,14 @@ class VisionLeadTracker:
         track = _DistanceTrack(observation, timestamp, ego)
       used.append(track)
 
-    for (indices, observation), track in zip(groups, used, strict=True):
-      if track.age == 0.0 and bridge is not None:
+    for (indices, observation), track, handoff in zip(groups, used, handoffs, strict=True):
+      initial_output = handoff if handoff is not None else bridge
+      if track.age == 0.0 and initial_output is not None:
         # The existing one-second fallback transition expires this bridge.
         # Current braking/closing guards still override it immediately.
-        track.output, track.mode = bridge, 'distance'
+        track.output, track.mode = initial_output, 'distance'
+        if handoff is not None:
+          track.uncertain_handoff_until = timestamp + 1.0
       for i in indices:
         self.slots[i] = self.history_slots[i] = track
       accepted = [i for i in indices if leads[i].get('present', False) and not leads[i].get('radar', False)]
