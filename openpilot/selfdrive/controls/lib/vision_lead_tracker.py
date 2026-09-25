@@ -279,8 +279,10 @@ class VisionLeadTracker:
       if (track.mode == 'fallback' and track.transition >= 1.0) or (track.mode == 'braking' and not track.ready):
         continue
       urgent_range = track.mode == 'braking' or timestamp < track.uncertain_handoff_until
+      filtered_group_distance = track.filtered_range(observation.distance, speed, ego, track.mode == 'distance' and not urgent_range)
       for i in accepted:
-        d_rel = track.filtered_range(leads[i]['dRel'], speed, ego, track.mode == 'distance' and not urgent_range)
+        # Preserve any small per-hypothesis range offset when both slots share a track.
+        d_rel = filtered_group_distance + (leads[i]['dRel'] - observation.distance)
         output[i] = dict(leads[i], dRel=d_rel, vLead=speed, vLeadK=speed, vRel=speed - ego)
 
     # Brief missing observations retain only private history, never lead presence.
