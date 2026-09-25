@@ -59,6 +59,24 @@ class TestVisionLeadTracker(unittest.TestCase):
     self.assertAlmostEqual(output[0]['vRel'], 0.0, delta=0.02)
     self.assertEqual(output[0]['vLead'], output[0]['vLeadK'])
 
+  def test_mild_kinematic_range_filter_rejects_single_frame_jump(self):
+    self.step(count=200)
+    out = self.step([observation(61.0)] * 2, [lead(61.0)] * 2)
+    self.assertGreater(out[0]['dRel'], 60.5)
+    self.assertLess(out[0]['dRel'], 60.8)
+
+  def test_range_filter_bypasses_immediately_for_braking(self):
+    self.step(count=200)
+    self.step([observation(61.0)] * 2, [lead(61.0)] * 2)
+    original = [lead(60.0, speed=22.0, acceleration=-1.0)] * 2
+    out = self.step([observation(60.0)] * 2, original)
+    self.assertEqual(out[0]['dRel'], 60.0)
+    self.assertEqual(out[1]['dRel'], 60.0)
+
+  def test_range_filter_is_raw_for_cold_or_unsupported_lead(self):
+    original = [lead(61.0)] * 2
+    self.assertEqual(self.step([observation(61.0)] * 2, original), original)
+
   def test_established_state_is_independent_of_model_speed(self):
     a, b = VisionLeadTracker(), VisionLeadTracker()
     for i in range(200):
