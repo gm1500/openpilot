@@ -38,6 +38,7 @@ class _DistanceTrack:
   UNCERTAIN_MAX_DISTANCE = 15.0
   UNCERTAIN_MAX_LATERAL = 0.15
   UNCERTAIN_MIN_HISTORY = 5.0
+  DISTANCE_CORRECTION_GAIN = 0.60  # mild kinematic range correction at 20 Hz
 
   def __init__(self, observation: VisionLeadObservation, timestamp: float, ego: float):
     self.x = np.array([observation.distance, ego], dtype=float)
@@ -53,6 +54,7 @@ class _DistanceTrack:
     self.transition = 1.0
     self.last_braking = -math.inf
     self.uncertain_handoff_until = -math.inf
+    self.filtered_distance = observation.distance
 
   @property
   def ready(self) -> bool:
@@ -124,6 +126,17 @@ class _DistanceTrack:
     self.distance_std = observation.std
     self.age += dt
     return True
+
+  def filtered_range(self, raw_distance: float, speed: float, ego: float, active: bool) -> float:
+    # Predict range from the same lead speed sent to planning, then accept most
+    # of each new camera range sample. This rejects single-frame range noise
+    # without the braking lag of a conventional low-pass filter.
+    if not active or self.dt <= 0.0 or not all(math.isfinite(v) for v in (raw_distance, speed, ego, self.filtered_distance)):
+      self.filtered_distance = raw_distance
+      return raw_distance
+    predicted = self.filtered_distance + (speed - ego) * self.dt
+    self.filtered_distance = predicted + self.DISTANCE_CORRECTION_GAIN * (raw_distance - predicted)
+    return float(self.filtered_distance)
 
   def speed(self, leads: list[dict], observation: VisionLeadObservation, ego: float) -> float:
     baseline = min(lead['vLead'] for lead in leads)
@@ -265,8 +278,10 @@ class VisionLeadTracker:
       speed = track.speed([leads[i] for i in accepted], observation, ego)
       if (track.mode == 'fallback' and track.transition >= 1.0) or (track.mode == 'braking' and not track.ready):
         continue
+      urgent_range = track.mode == 'braking' or timestamp < track.uncertain_handoff_until
       for i in accepted:
-        output[i] = dict(leads[i], vLead=speed, vLeadK=speed, vRel=speed - ego)
+        d_rel = track.filtered_range(leads[i]['dRel'], speed, ego, track.mode == 'distance' and not urgent_range)
+        output[i] = dict(leads[i], dRel=d_rel, vLead=speed, vLeadK=speed, vRel=speed - ego)
 
     # Brief missing observations retain only private history, never lead presence.
     for i, observation in enumerate(observations):
