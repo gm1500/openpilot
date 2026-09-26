@@ -1,9 +1,10 @@
-"""Experimental distance-derived speed with private, pre-acceptance lead history.
+"""Private vision history with bounded handoffs and mild planner-range correction.
 
-Control acceptance and raw distance/acceleration remain owned by radard. Model
-velocity never updates the Kalman state; it remains a fallback and brake guard.
+Control acceptance and acceleration remain owned by radard. Model velocity
+never updates the Kalman state; it remains the fallback and immediate brake guard.
 """
 
+from collections import deque
 from dataclasses import dataclass
 from itertools import product
 import math
@@ -39,6 +40,12 @@ class _DistanceTrack:
   UNCERTAIN_MAX_LATERAL = 0.15
   UNCERTAIN_MIN_HISTORY = 5.0
   DISTANCE_CORRECTION_GAIN = 0.60  # mild kinematic range correction at 20 Hz
+  PRE_CLOSING_HISTORY = 0.7
+  PRE_CLOSING_WINDOW = 0.8
+  PRE_CLOSING_TTC = 13.0
+  PRE_CLOSING_WEIGHT = 0.35
+  PRE_CLOSING_MAX_OFFSET = 3.0  # m/s, never accelerate an immature lead estimate
+  PRE_CLOSING_OFFSET_RATE = 2.0  # m/s per second, additional downward cue only
 
   def __init__(self, observation: VisionLeadObservation, timestamp: float, ego: float):
     self.x = np.array([observation.distance, ego], dtype=float)
@@ -49,12 +56,26 @@ class _DistanceTrack:
     self.age = 0.0
     self.dt = 0.0
     self.output: float | None = None
+    self.output_active = False
     self.mode = 'fallback'
     self.transition_from = 0.0
     self.transition = 1.0
     self.last_braking = -math.inf
     self.uncertain_handoff_until = -math.inf
     self.filtered_distance = observation.distance
+    self.range_active = False
+    self.range_history = deque([(timestamp, observation.distance, observation.probability)])
+    self.pre_closing_offset = 0.0
+
+  def reset_output(self) -> None:
+    # Unsupported or missing output must not leave a stale range/transition
+    # behind. Private association/Kalman history can still survive a brief gap.
+    self.output, self.mode = None, 'fallback'
+    self.output_active = False
+    self.transition_from, self.transition = 0.0, 1.0
+    self.filtered_distance = self.distance
+    self.range_active = False
+    self.pre_closing_offset = 0.0
 
   @property
   def ready(self) -> bool:
@@ -125,13 +146,49 @@ class _DistanceTrack:
     self.distance, self.lateral = observation.distance, observation.lateral
     self.distance_std = observation.std
     self.age += dt
+    if dt > 0.1:
+      self.range_history.clear()
+    self.range_history.append((timestamp, observation.distance, observation.probability))
+    while timestamp - self.range_history[0][0] > self.PRE_CLOSING_WINDOW:
+      self.range_history.popleft()
     return True
+
+  def pre_closing_target(self, baseline: float, observation: VisionLeadObservation, ego: float) -> float:
+    # An immature Kalman speed is only a small downward cue. Require both its
+    # conservative closing estimate and a sustained raw-range trend to agree.
+    offset = 0.0
+    available_offset = min(self.PRE_CLOSING_MAX_OFFSET, self.PRE_CLOSING_WEIGHT * max(baseline - float(self.x[1]), 0.0))
+    history = self.range_history
+    if (
+      self.age >= self.PRE_CLOSING_HISTORY and len(history) >= 7
+      and history[-1][0] - history[0][0] >= 0.6
+      and min(point[2] for point in history) > 0.9
+      and 0.0 <= self.x[1] < baseline and self.P[1, 1] <= 36.0
+      and self.time >= self.uncertain_handoff_until and self.transition >= 1.0
+    ):
+      times = np.array([point[0] - self.time for point in history])
+      distances = np.array([point[1] for point in history])
+      times -= times.mean()
+      distances -= distances.mean()
+      time_variance = float(times @ times)
+      rate = float(times @ distances) / time_variance
+      residual = distances - rate * times
+      rate_std = math.sqrt(float(residual @ residual) / ((len(history) - 2) * time_variance))
+      closing = min(-rate - 2.0 * rate_std, ego - float(self.x[1]) - math.sqrt(self.P[1, 1]))
+      if closing > observation.distance / self.PRE_CLOSING_TTC:
+        offset = available_offset
+    step = self.PRE_CLOSING_OFFSET_RATE * self.dt
+    self.pre_closing_offset += float(np.clip(offset - self.pre_closing_offset, -step, step))
+    self.pre_closing_offset = min(self.pre_closing_offset, available_offset)
+    return max(0.0, baseline - self.pre_closing_offset)
 
   def filtered_range(self, raw_distance: float, speed: float, ego: float, active: bool) -> float:
     # Predict range from the same lead speed sent to planning, then accept most
     # of each new camera range sample. This rejects single-frame range noise
     # without the braking lag of a conventional low-pass filter.
-    if not active or self.dt <= 0.0 or not all(math.isfinite(v) for v in (raw_distance, speed, ego, self.filtered_distance)):
+    active = active and self.dt > 0.0 and all(math.isfinite(v) for v in (raw_distance, speed, ego, self.filtered_distance))
+    if not active or not self.range_active:
+      self.range_active = active
       self.filtered_distance = raw_distance
       return raw_distance
     predicted = self.filtered_distance + (speed - ego) * self.dt
@@ -143,6 +200,12 @@ class _DistanceTrack:
     use_distance = self.ready and observation.probability >= 0.5 and 15.0 < ego < 60.0 and 10.0 < observation.distance < 150.0
     target = float(self.x[1]) if use_distance else baseline
     mode = 'distance' if use_distance else 'fallback'
+    if not use_distance:
+      target = self.pre_closing_target(baseline, observation, ego)
+      if self.pre_closing_offset > 0.0:
+        mode = 'pre-closing'
+    else:
+      self.pre_closing_offset = 0.0
     closing = ego - baseline
     closing_time = 8.0 if self.time < self.uncertain_handoff_until else 5.0
     urgent = min(lead['aLeadK'] for lead in leads) < -0.5 or (closing > 0.0 and min(lead['dRel'] for lead in leads) < closing_time * closing)
@@ -152,6 +215,11 @@ class _DistanceTrack:
     if urgent or recovering:
       target = min(target, baseline)
       mode = 'braking'
+      self.transition_from, self.transition = 0.0, 1.0
+      self.pre_closing_offset = 0.0
+    elif mode == 'pre-closing' or (not use_distance and (not self.output_active or self.mode == 'pre-closing')):
+      # Pre-closing already ramps its bounded offset. Pure model fallback must
+      # not blend from a shared internal minimum that was never published.
       self.transition_from, self.transition = 0.0, 1.0
     elif self.output is not None and mode != self.mode:
       # A fixed starting value keeps a changing target inside the blend.
@@ -245,7 +313,7 @@ class VisionLeadTracker:
     self.history_slots = [None, None]
     used = []
     output = list(leads)
-    for g, (indices, observation) in enumerate(groups):
+    for g, (_indices, observation) in enumerate(groups):
       track = tracks[assignment[g]] if assignment[g] >= 0 else None
       if track is not None and not track.update(observation, timestamp, ego):
         # A rejected state must not survive through the other, missing slot.
@@ -262,6 +330,7 @@ class VisionLeadTracker:
         # The existing one-second fallback transition expires this bridge.
         # Current braking/closing guards still override it immediately.
         track.output, track.mode = initial_output, 'distance'
+        track.output_active = True
         if handoff is not None:
           track.uncertain_handoff_until = timestamp + 1.0
       for i in indices:
@@ -273,17 +342,22 @@ class VisionLeadTracker:
         and all(10.0 < leads[i]['dRel'] < 150.0 and all(math.isfinite(leads[i][key]) for key in ('vLead', 'aLeadK')) for i in accepted)
       )
       if not supported:
-        track.output, track.mode, track.transition_from, track.transition = None, 'fallback', 0.0, 1.0
+        track.reset_output()
         continue
       speed = track.speed([leads[i] for i in accepted], observation, ego)
-      if (track.mode == 'fallback' and track.transition >= 1.0) or (track.mode == 'braking' and not track.ready):
-        continue
       urgent_range = track.mode == 'braking' or timestamp < track.uncertain_handoff_until
       filtered_group_distance = track.filtered_range(observation.distance, speed, ego, track.mode == 'distance' and not urgent_range)
+      if (track.mode == 'fallback' and track.transition >= 1.0) or (track.mode == 'braking' and not track.ready):
+        track.output_active = False
+        continue
+      track.output_active = True
       for i in accepted:
         # Preserve any small per-hypothesis range offset when both slots share a track.
         d_rel = filtered_group_distance + (leads[i]['dRel'] - observation.distance)
-        output[i] = dict(leads[i], dRel=d_rel, vLead=speed, vLeadK=speed, vRel=speed - ego)
+        # Fallback hypotheses can disagree on model speed. The immature cue
+        # must not replace either baseline with the other slot's lower speed.
+        slot_speed = max(0.0, leads[i]['vLead'] - track.pre_closing_offset) if track.mode == 'pre-closing' else speed
+        output[i] = dict(leads[i], dRel=d_rel, vLead=slot_speed, vLeadK=slot_speed, vRel=slot_speed - ego)
 
     # Brief missing observations retain only private history, never lead presence.
     for i, observation in enumerate(observations):
@@ -293,8 +367,6 @@ class VisionLeadTracker:
         if track in used:
           continue
         used.append(track)
-        speed = leads[i].get('vLead', math.nan)
-        if leads[i].get('present', False) and not leads[i].get('radar', False) and math.isfinite(speed):
-          track.output, track.mode, track.transition_from, track.transition = speed, 'fallback', 0.0, 1.0
+        track.reset_output()
     self.tracks = used[:2]
     return output
