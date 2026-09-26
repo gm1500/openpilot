@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from openpilot.cereal import log
 from openpilot.selfdrive.controls.radard import RadarD, get_RadarState_from_vision
@@ -20,6 +21,7 @@ class FakeSubMaster(dict):
       lead.xStd = [2.0]
       lead.yStd = [0.5]
       lead.vStd = [1.0]
+      lead.aStd = [0.7]
     self['modelV2'] = model
     self['carState'] = SimpleNamespace(vEgo=25.0)
     self.seen = {'modelV2': True}
@@ -108,6 +110,7 @@ class TestRadarDPrelead(unittest.TestCase):
     self.step()
     self.assertFalse(self.rd.radar_state_valid)
     self.assertEqual(self.rd.vision_lead_tracker.tracks, [])
+    self.assertEqual(self.rd.vision_confidence_filter.states, [None, None])
     self.assert_original(0)
     self.assert_original(1)
 
@@ -118,6 +121,7 @@ class TestRadarDPrelead(unittest.TestCase):
     self.assertFalse(self.rd.radar_state.leadOne.present)
     self.assertFalse(self.rd.radar_state.leadTwo.present)
     self.assertEqual(self.rd.vision_lead_tracker.tracks, [])
+    self.assertEqual(self.rd.vision_confidence_filter.states, [None, None])
 
   def test_radar_track_is_unchanged(self):
     self.step(240)
@@ -157,6 +161,36 @@ class TestRadarDPrelead(unittest.TestCase):
     self.sm['modelV2'].velocity.x = [26.0]
     self.step()
     self.assertAlmostEqual(self.rd.radar_state.leadOne.vLead, 25.0, delta=0.03)
+
+  def test_confidence_filters_published_range_and_acceleration_only(self):
+    baseline = RadarD()
+    changed = 0
+    with patch.object(baseline.vision_confidence_filter, 'update', side_effect=lambda raw, leads, *args: leads):
+      for i in range(300):
+        for slot, lead in enumerate(self.sm['modelV2'].leadsV3):
+          lead.x = [61.52 + 20.0 * slot + (0.5 if i % 2 else 0.0)]
+          lead.a = [0.10 if i % 2 else 0.0]
+        self.step()
+        baseline.update(self.sm, self.radar)
+        for field in ('leadOne', 'leadTwo'):
+          actual, original = getattr(self.rd.radar_state, field), getattr(baseline.radar_state, field)
+          self.assertLessEqual(abs(actual.dRel - original.dRel), 0.75001)
+          self.assertLessEqual(abs(actual.aLeadK - original.aLeadK), 0.08001)
+          for key in ('vLead', 'vLeadK', 'vRel', 'present', 'modelProb', 'radar', 'radarTrackId', 'aLeadTau'):
+            self.assertEqual(getattr(actual, key), getattr(original, key))
+          changed += actual.dRel != original.dRel and actual.aLeadK != original.aLeadK
+    self.assertGreater(changed, 50)
+
+  def test_missing_acceleration_uncertainty_bypasses_confidence_filter(self):
+    self.step(240)
+    self.assertEqual(self.rd.vision_confidence_filter.status[0].reason, 'active')
+    self.sm['modelV2'].leadsV3[0].aStd = []
+    self.sm['modelV2'].leadsV3[0].x = [42.52]
+    self.step()
+    self.assertEqual(self.rd.vision_confidence_filter.status[0].reason, 'invalid')
+    self.assertIsNone(self.rd.vision_confidence_filter.states[0])
+    self.assertAlmostEqual(self.rd.radar_state.leadOne.dRel, self.rd.vision_lead_tracker.slots[0].filtered_distance, places=4)
+    self.assertEqual(self.rd.vision_confidence_filter.status[1].reason, 'active')
 
 
 if __name__ == '__main__':

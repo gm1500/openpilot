@@ -12,6 +12,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL, Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.simple_kalman import KF1D
+from openpilot.selfdrive.controls.lib.vision_lead_confidence import LeadUncertainty, VisionLeadConfidenceFilter
 from openpilot.selfdrive.controls.lib.vision_lead_tracker import VisionLeadObservation, VisionLeadTracker
 
 
@@ -183,6 +184,7 @@ class RadarD:
     self.kalman_params = KalmanParams(DT_MDL)
     self.lead_prob_filters = [FirstOrderFilter(0.0, 0.2, DT_MDL) for _ in range(2)]
     self.vision_lead_tracker = VisionLeadTracker()
+    self.vision_confidence_filter = VisionLeadConfidenceFilter()
     self.last_vision_log = 0.0
 
     self.v_ego = 0.0
@@ -242,7 +244,7 @@ class RadarD:
           self.lead_prob_filters[i].update(lead_prob)
 
       timestamp = self.radar_state.mdMonoTime * 1e-9
-      observations, leads = [], []
+      observations, leads, uncertainties = [], [], []
       for i in range(2):
         lead_msg = leads_v3[i]
         leads.append(get_lead(self.v_ego, self.ready, self.tracks, lead_msg, model_v_ego, self.lead_prob_filters[i].x,
@@ -250,20 +252,34 @@ class RadarD:
         # Observe below control acceptance; raw confidence weights private history.
         observations.append(VisionLeadObservation(float(lead_msg.x[0] - RADAR_TO_CAMERA), float(-lead_msg.y[0]),
                                                   float(lead_msg.xStd[0]) if len(lead_msg.xStd) else float('nan'), float(lead_msg.prob)))
-      leads = self.vision_lead_tracker.update(observations, leads, timestamp, self.v_ego, self.radar_state_valid and self.ready)
+        uncertainties.append(LeadUncertainty(
+          float(lead_msg.prob), observations[-1].std,
+          float(lead_msg.vStd[0]) if len(lead_msg.vStd) else float('nan'),
+          float(lead_msg.aStd[0]) if len(lead_msg.aStd) else float('nan'),
+        ))
+      valid = self.radar_state_valid and self.ready
+      raw_leads = leads
+      baseline = self.vision_lead_tracker.update(observations, raw_leads, timestamp, self.v_ego, valid)
+      leads = self.vision_confidence_filter.update(raw_leads, baseline, uncertainties, self.vision_lead_tracker.slots,
+                                                  timestamp, self.v_ego, valid)
       for i, field in enumerate(('leadOne', 'leadTwo')):
         setattr(self.radar_state, field, leads[i])
         if timestamp - self.last_vision_log >= 1.0:
           track = self.vision_lead_tracker.slots[i]
+          confidence = self.vision_confidence_filter.status[i]
           cloudlog.info(" ".join((
             f"lead-pre: slot={i} mode={track.mode if track else 'fallback'}",
             f"age={track.age if track else 0.0:.2f} ready={int(track.ready) if track else 0}",
             f"v={leads[i].get('vLead', 0.0):.2f}",
+            f"confidence={confidence.reason} gains={confidence.range_gain:.3f},{confidence.accel_gain:.3f}",
+            f"conf_dr={leads[i].get('dRel', 0.0) - baseline[i].get('dRel', 0.0):.3f}",
+            f"conf_da={leads[i].get('aLeadK', 0.0) - baseline[i].get('aLeadK', 0.0):.3f}",
           )))
       if timestamp - self.last_vision_log >= 1.0:
         self.last_vision_log = timestamp
     else:
       self.vision_lead_tracker.reset()
+      self.vision_confidence_filter.reset()
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
