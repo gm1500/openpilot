@@ -6,6 +6,12 @@ confidence-adaptive filter evaluated offline on 28 uploaded segments from five
 routes. The filter is enabled on this branch. It has not demonstrated a
 meaningful reduction in planner fluctuations or phantom braking.
 
+The branch now also includes a Silverado/Sierra actuator follow-up from route
+27c. See [lead-confidence-stop.md](lead-confidence-stop.md) for the low-speed
+feedback tune, one-unit brake-onset hysteresis, validation and limitations.
+The sections below describe the original confidence-filter integration at
+`102ac92`; its lead estimator and planner policy remain unchanged.
+
 ## Implementation
 
 `VisionLeadConfidenceFilter` runs in radard after the unchanged V3 tracker and
