@@ -13,8 +13,8 @@ are an experimental ACC calibration, not a measured coastdown fit.
 | --- | ---: | --- |
 | Base mass | 2,450 kg | The interface adds the existing 136 kg payload allowance. |
 | Operating mass | 2,586 kg | Confirmed by the owner; unchanged. |
-| Wheel radius | 0.425 m | Confirmed by the owner; unchanged. |
-| `dragArea` | `0.30 * 3.97` = 1.191 m² | Drag coefficient times frontal area. |
+| Wheel radius | 0.419 m | Nominal radius for the confirmed 275/60R20 tire size. |
+| `dragArea` | `0.30 * 3.61` = 1.083 m² | Existing effective Cd multiplied by the revised frontal-area estimate. |
 | `rollingResistanceCoefficient` | 0.004 | Effective rolling feedforward; reduced from the initial 0.008. |
 | Nominal air density | 1.225 kg/m³ | Fixed reference assumption, not a weather estimate. |
 
@@ -23,7 +23,7 @@ Drag area and the original rolling-resistance estimate came from the experimenta
 The current calibration halves rolling compensation after route-response checks
 showed that the initial model underpredicted acceleration, especially at low
 speeds. This is a conservative parameter adjustment, not a measurement of the
-truck's tire coefficient. Mass, radius and drag area remain unchanged.
+truck's tire coefficient. Mass remains unchanged; wheel radius and frontal area are updated from the confirmed tire size and revised geometry estimate.
 Other GM fingerprints retain their prior torque mapping: `dragArea=None` selects
 the legacy 0.3 force multiplier, and rolling resistance defaults to zero. A future
 vehicle tune can set its own parameters in its `GMCarSpecs` entry. Fingerprinting
@@ -64,10 +64,10 @@ At zero acceleration command, the road-load feedforward is:
 | Speed | Legacy mapping | Initial gm-torque (0.008) | Current gm-torque (0.004) |
 | --- | ---: | ---: | ---: |
 | 0 km/h | 0.0 Nm | 0.0 Nm | 0.0 Nm |
-| 30 km/h | 8.9 Nm | 107.8 Nm | 64.7 Nm |
-| 60 km/h | 35.4 Nm | 172.4 Nm | 129.2 Nm |
-| 90 km/h | 79.7 Nm | 280.0 Nm | 236.9 Nm |
-| 120 km/h | 141.7 Nm | 430.7 Nm | 387.6 Nm |
+| 30 km/h | 8.9 Nm | 107.8 Nm | 61.8 Nm |
+| 60 km/h | 35.4 Nm | 172.4 Nm | 119.7 Nm |
+| 90 km/h | 79.7 Nm | 280.0 Nm | 216.2 Nm |
+| 120 km/h | 141.7 Nm | 430.7 Nm | 351.3 Nm |
 
 These are calculated requests, not measured delivered wheel torque. The refinement
 removes 43.13 Nm of rolling feedforward at speeds of at least 1 m/s, equivalent to
@@ -80,7 +80,7 @@ cannot predict how feedback or the vehicle trajectory will adapt.
 
 While moving, friction braking begins at a more negative acceleration command
 because the model includes more natural road-load deceleration. For example, at
-60 km/h the unrounded zero-torque point is about -0.1176 m/s², versus -0.1568 for
+60 km/h the unrounded zero-torque point is about -0.1105 m/s², versus -0.1568 for
 initial gm-torque and -0.0322 for the legacy mapping. Thus the refinement can
 request slightly more moving friction braking at the same frozen acceleration
 input, while requesting less propulsion. Gas and brakes retain the shared force
@@ -108,6 +108,16 @@ the recorded vehicle state and acceleration command fixed; it compares mappings,
 not the future vehicle trajectory. The synthetic plant is a regression check for
 allocation consistency, not evidence that the chosen coefficients are accurate
 for the real truck.
+
+## Vehicle-geometry refinement
+
+The current calibration also updates the Sierra/Silverado nominal wheel radius from
+0.425 m to 0.419 m for the confirmed 275/60R20 tire size and revises frontal area
+from 3.97 m² to 3.61 m². The existing effective Cd of 0.30 and the route-checked
+rolling-resistance coefficient of 0.004 are unchanged. These geometry changes lower
+zero-acceleration road-load torque from about 129.2 to 119.7 Nm at 60 km/h and from
+about 387.6 to 351.3 Nm at 120 km/h. They do not change planner targets, PID gains,
+brake tables, stopping-state calibration, or the mass-based acceleration gain.
 
 ## Rolling-compensation refinement
 
