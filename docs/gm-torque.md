@@ -16,6 +16,7 @@ are an experimental ACC calibration, not a measured coastdown fit.
 | Wheel radius | 0.419 m | Nominal radius for the confirmed 275/60R20 tire size. |
 | `dragArea` | `0.30 * 3.61` = 1.083 m² | Existing effective Cd multiplied by the revised frontal-area estimate. |
 | `rollingResistanceCoefficient` | 0.004 | Effective rolling feedforward; reduced from the initial 0.008. |
+| `roadLoadScale` | 0.75 | Experimental scale applied only to aero + rolling feedforward. |
 | Nominal air density | 1.225 kg/m³ | Fixed reference assumption, not a weather estimate. |
 
 Drag area and the original rolling-resistance estimate came from the experimental Silverado values in
@@ -36,8 +37,8 @@ The moving controller uses:
 ```
 torque = radius * (mass * accel_command
                   + mass * gravity * sin(pitch)
-                  + 0.5 * air_density * drag_area * speed**2
-                  + rolling_coefficient * mass * gravity * rolling_blend)
+                  + road_load_scale * (0.5 * air_density * drag_area * speed**2
+                                       + rolling_coefficient * mass * gravity * rolling_blend))
 ```
 
 `rolling_blend` rises continuously from zero at rest to one at 1 m/s. This is a
@@ -64,10 +65,10 @@ At zero acceleration command, the road-load feedforward is:
 | Speed | Legacy mapping | Initial gm-torque (0.008) | Current gm-torque (0.004) |
 | --- | ---: | ---: | ---: |
 | 0 km/h | 0.0 Nm | 0.0 Nm | 0.0 Nm |
-| 30 km/h | 8.9 Nm | 107.8 Nm | 61.8 Nm |
-| 60 km/h | 35.4 Nm | 172.4 Nm | 119.7 Nm |
-| 90 km/h | 79.7 Nm | 280.0 Nm | 216.2 Nm |
-| 120 km/h | 141.7 Nm | 430.7 Nm | 351.3 Nm |
+| 30 km/h | 8.9 Nm | 107.8 Nm | 46.4 Nm |
+| 60 km/h | 35.4 Nm | 172.4 Nm | 89.8 Nm |
+| 90 km/h | 79.7 Nm | 280.0 Nm | 162.2 Nm |
+| 120 km/h | 141.7 Nm | 430.7 Nm | 263.5 Nm |
 
 These are calculated requests, not measured delivered wheel torque. The refinement
 removes 43.13 Nm of rolling feedforward at speeds of at least 1 m/s, equivalent to
@@ -80,7 +81,7 @@ cannot predict how feedback or the vehicle trajectory will adapt.
 
 While moving, friction braking begins at a more negative acceleration command
 because the model includes more natural road-load deceleration. For example, at
-60 km/h the unrounded zero-torque point is about -0.1105 m/s², versus -0.1568 for
+60 km/h the unrounded zero-torque point is about -0.0829 m/s², versus -0.1568 for
 initial gm-torque and -0.0322 for the legacy mapping. Thus the refinement can
 request slightly more moving friction braking at the same frozen acceleration
 input, while requesting less propulsion. Gas and brakes retain the shared force
@@ -89,6 +90,26 @@ Rounding and the existing one-unit brake hysteresis also affect the actual onset
 This is a material actuation change; replay cannot establish real stopping
 distance or comfort. The late-braking 27c approach still needs particular attention
 in subsequent vehicle validation.
+
+## Road-load scaling experiment
+
+The current branch applies a Sierra/Silverado-specific `roadLoadScale=0.75` to the
+aerodynamic and rolling-resistance feedforward only. The planner/PID acceleration
+term `mass * accel_command` remains full strength, and the gravity term is not
+scaled so future grade compensation can remain physically independent. Other GM
+platforms default to a scale of 1.0.
+
+With the revised 0.419 m wheel radius and 3.61 m² frontal-area basis, the scale
+reduces zero-acceleration road-load torque from about 119.7 to 89.8 Nm at 60 km/h,
+216.2 to 162.2 Nm at 90 km/h, and 351.3 to 263.5 Nm at 120 km/h. At 60 km/h the
+moving zero-torque crossover shifts from about -0.1105 to -0.0829 m/s².
+
+This is deliberately a feedforward experiment rather than a throttle multiplier.
+It does not reduce requested acceleration gain and does not change the dedicated
+`stopping` force calculation or final-stop brake calibration. Because lowering
+road-load feedforward also moves the gas/brake crossover toward zero, it can cause
+friction braking to begin at a milder negative acceleration request; vehicle logs
+must determine whether earlier coasting reduces the later corrective brake events.
 
 ## Scope and validation
 
