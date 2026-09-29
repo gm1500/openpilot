@@ -300,9 +300,10 @@ class _DistanceTrack:
       self.response_boost = 1.0
     elif use_distance:
       target = self.closing_response_target(target, baseline, observation)
-    if mode in ('pre-closing', 'stop-hold') or (not use_distance and (not self.output_active or self.mode == 'pre-closing')):
-      # These modes already bound their output. Pure model fallback must not
-      # blend from a shared internal minimum that was never published.
+    if mode in ('braking', 'pre-closing', 'stop-hold') or (not use_distance and (not self.output_active or self.mode == 'pre-closing')):
+      # These modes already bound their output. Braking must remain immediate;
+      # pure model fallback must not blend from a shared internal minimum that
+      # was never published.
       self.transition_from, self.transition = 0.0, 1.0
     elif self.output is not None and mode != self.mode:
       # A fixed starting value keeps a changing target inside the blend.
