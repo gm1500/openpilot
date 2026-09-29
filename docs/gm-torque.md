@@ -46,17 +46,14 @@ request, one-unit entry rule and pitch handling are unchanged by this refinement
 ## Adaptive vision lead range velocity experiment
 
 The `lead-range-adaptive-v1` branch extends the private vision range tracker to
-all moving speeds and close range after the existing maturity gate. Raw model
-velocity remains the fallback while the range track is immature and the existing
-immediate braking/TTC guard can still override a lagging range estimate.
+low speed and close range after the existing maturity gate. Raw model velocity
+remains the fallback while the range track is immature, and the existing hard
+braking/TTC guard still overrides a lagging range estimate immediately.
 
 Uploaded route data shows raw `dRel` high-frequency residuals increasing strongly
 with range: about 0.06 m inside 5 m, 0.14 m at 5-10 m, 0.28 m at 15-20 m,
-0.55-0.65 m at 30-50 m, and about 0.92 m at 50-70 m. The current fixed Kalman
-process noise also showed roughly one second of velocity-state lag at 30-60 m
-and much larger stop-approach lag at close range.
-
-The route-regressed interpolated continuous-white-acceleration process-noise table is:
+0.55-0.65 m at 30-50 m, and about 0.92 m at 50-70 m. The quiet steady-following
+process-noise schedule is therefore still distance dependent:
 
 | dRel breakpoint | Process noise |
 | ---: | ---: |
@@ -68,38 +65,47 @@ The route-regressed interpolated continuous-white-acceleration process-noise tab
 | 70 m | 0.025 |
 | 100 m | 0.02 |
 
-The original 1.0 m minimum measurement-standard-deviation floor is intentionally
-unchanged. The uploaded logs do not contain model-reported `xStd` below about
-1.2 m, so lowering that floor was not route-supported and only increased
-unvalidated behavior outside the dataset.
+The original 1.0 m minimum measurement-standard-deviation floor remains unchanged.
 
-A 61-segment replay was used to compare the adaptive state against the current
-`gm-torque` range tracker. A non-causal smoothed `dRel` derivative is used only
-as a timing/reference diagnostic, not as ground truth. In the common high-speed
-range where both filters publish distance-derived velocity, the revised schedule
-keeps 20-35 m high-frequency motion approximately at the current level, and is
-less assertive beyond 35 m:
+A fixed-motion native planner replay of the earlier `82a811d` candidate found a
+mixed result: highway planner fluctuation improved, but low/mid-speed fluctuation
+increased and several sustained-closing events reached stronger deceleration
+later than `gm-torque`. Synthetic probes reproduced the same issue for mild
+lead deceleration: the quiet Kalman schedule could lag a real sustained speed
+change even though the hard-braking guard remained intact.
 
-| Range | Current 95th-percentile frame delta | Adaptive frame delta | Current HF residual | Adaptive HF residual |
-| --- | ---: | ---: | ---: | ---: |
-| 10-20 m | 0.141 m/s | 0.180 m/s | 0.076 m/s | 0.136 m/s |
-| 20-35 m | 0.088 m/s | 0.092 m/s | 0.059 m/s | 0.059 m/s |
-| 35-50 m | 0.078 m/s | 0.058 m/s | 0.065 m/s | 0.042 m/s |
-| 50-70 m | 0.146 m/s | 0.142 m/s | 0.073 m/s | 0.046 m/s |
-| 70-100 m | 0.172 m/s | 0.171 m/s | 0.078 m/s | 0.064 m/s |
+The refinement keeps the quiet distance schedule for normal following, but adds
+a separate sustained-closing response path. It activates only when both of these
+causal cues agree that the distance Kalman state is too fast:
 
-Against the same smoothed-range reference, 10-20 m RMSE improves from about
-1.26 to 1.14 m/s. The 20-35 m RMSE changes from about 2.08 to 2.11 m/s while
-its high-frequency motion stays essentially unchanged. Beyond 35 m, RMSE is
-effectively unchanged while high-frequency velocity motion is lower.
+1. model lead velocity is at least 0.35 m/s below the range state; and
+2. a 0.6 s high-confidence raw-range trend, including a +2 sigma uncertainty
+   bound, also implies a lead speed at least 0.35 m/s below the range state.
 
-At low ego speed, where current `gm-torque` normally publishes model velocity,
-the adaptive track is much smoother. In route replay it improves the same
-range-slope reference inside 10 m, while being within a few percent of the model
-reference error at 10-35 m. This is a filter-level regression check only. It does
-not reproduce a changed ego trajectory, MPC decisions, brake pulse counts, or
-stopping distance; those require new road logs or a source-identical closed-loop
-planner replay.
+When corroborated, the published range-derived speed is pulled down toward the
+less aggressive of the model and range-trend estimates at no more than
+2.5 m/s per second and no more than 3.0 m/s total offset. The Kalman process
+noise is also temporarily boosted, but only up to the previous nominal 0.1
+base responsiveness; the far-range steady-following filter therefore does not
+become globally noisier.
+
+Near standstill, the distance state continues learning privately, but when ego
+speed is below 5 m/s, range is below 10 m, and the model lead speed is below
+1 m/s, the published speed is held to the model baseline. This preserves the
+previous stop/launch semantics that the earlier all-speed extension changed.
+When the model indicates the lead is moving again, release begins no lower than
+that moving model speed before blending back toward the range state.
+
+The regression test suite now also checks that isolated model-speed drops or
+isolated range trends cannot trigger the sustained-closing response, that the
+dynamic far-range boost never exceeds the previous nominal process-noise level,
+and that stop-hold release does not begin below the model speed. The stale 20 m
+process-noise assertion from the earlier candidate is corrected from 1.2 to the
+intended 0.2.
+
+These refinements have not yet been rerun through the full 49-segment native
+planner regression or validated on-road. The previous replay remains the reason
+for the added gates, not evidence that the new revision has passed them.
 
 ## Vehicle parameters
 
