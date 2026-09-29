@@ -120,6 +120,18 @@ class TestVisionLeadAdaptive(unittest.TestCase):
     self.assertAlmostEqual(track.x[1], 0.9)
 
 
+  def test_stop_hold_release_never_starts_below_moving_model(self):
+    track = self.track(7.0, 0.5, 1.4)
+    track.age = 5.0
+    track.P[1, 1] = 0.1
+    track.time = 1.0
+    track.dt = 0.05
+    stopped = lead(7.0, speed=0.2, ego=0.5)
+    self.assertAlmostEqual(track.speed([stopped, stopped], observation(7.0), 0.5), 0.2)
+    moving = lead(7.0, speed=1.2, ego=0.5)
+    out = track.speed([moving, moving], observation(7.0), 0.5)
+    self.assertGreaterEqual(out, 1.2)
+
   def test_far_track_filters_identical_distance_noise_more(self):
     rng = np.random.default_rng(7)
     near, far = VisionLeadTracker(), VisionLeadTracker()
