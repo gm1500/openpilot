@@ -56,29 +56,50 @@ with range: about 0.06 m inside 5 m, 0.14 m at 5-10 m, 0.28 m at 15-20 m,
 process noise also showed roughly one second of velocity-state lag at 30-60 m
 and much larger stop-approach lag at close range.
 
-The initial interpolated continuous-white-acceleration process-noise table is:
+The route-regressed interpolated continuous-white-acceleration process-noise table is:
 
 | dRel breakpoint | Process noise |
 | ---: | ---: |
 | 5 m | 2.5 |
-| 10 m | 1.5 |
-| 20 m | 0.8 |
-| 35 m | 0.10 |
+| 10 m | 1.0 |
+| 20 m | 0.2 |
+| 35 m | 0.05 |
 | 50 m | 0.03 |
 | 70 m | 0.025 |
 | 100 m | 0.02 |
 
-The model-reported range standard deviation floor is also interpolated from
-0.85 m at 5 m to 1.0 m at 35 m so clean close-range measurements receive more
-weight without fully removing the existing floor.
+The original 1.0 m minimum measurement-standard-deviation floor is intentionally
+unchanged. The uploaded logs do not contain model-reported `xStd` below about
+1.2 m, so lowering that floor was not route-supported and only increased
+unvalidated behavior outside the dataset.
 
-In an offline replay against a non-causal smoothed `dRel` derivative used only as
-a reference, the 2-10 m speed RMSE fell from about 0.87 to 0.48 m/s and the
-10-20 m RMSE from about 2.24 to 1.97 m/s. The 95th-percentile frame-to-frame
-velocity change inside 10 m rose from about 0.08 to 0.15 m/s, approximately the
-raw model's 0.15 m/s in the same samples. At 20 m and beyond the schedule is much
-more conservative. These replay figures are tuning diagnostics, not independent
-ground truth or a stopping-distance validation.
+A 61-segment replay was used to compare the adaptive state against the current
+`gm-torque` range tracker. A non-causal smoothed `dRel` derivative is used only
+as a timing/reference diagnostic, not as ground truth. In the common high-speed
+range where both filters publish distance-derived velocity, the revised schedule
+keeps 20-35 m high-frequency motion approximately at the current level, and is
+less assertive beyond 35 m:
+
+| Range | Current 95th-percentile frame delta | Adaptive frame delta | Current HF residual | Adaptive HF residual |
+| --- | ---: | ---: | ---: | ---: |
+| 10-20 m | 0.141 m/s | 0.180 m/s | 0.076 m/s | 0.136 m/s |
+| 20-35 m | 0.088 m/s | 0.092 m/s | 0.059 m/s | 0.059 m/s |
+| 35-50 m | 0.078 m/s | 0.058 m/s | 0.065 m/s | 0.042 m/s |
+| 50-70 m | 0.146 m/s | 0.142 m/s | 0.073 m/s | 0.046 m/s |
+| 70-100 m | 0.172 m/s | 0.171 m/s | 0.078 m/s | 0.064 m/s |
+
+Against the same smoothed-range reference, 10-20 m RMSE improves from about
+1.26 to 1.14 m/s. The 20-35 m RMSE changes from about 2.08 to 2.11 m/s while
+its high-frequency motion stays essentially unchanged. Beyond 35 m, RMSE is
+effectively unchanged while high-frequency velocity motion is lower.
+
+At low ego speed, where current `gm-torque` normally publishes model velocity,
+the adaptive track is much smoother. In route replay it improves the same
+range-slope reference inside 10 m, while being within a few percent of the model
+reference error at 10-35 m. This is a filter-level regression check only. It does
+not reproduce a changed ego trajectory, MPC decisions, brake pulse counts, or
+stopping distance; those require new road logs or a source-identical closed-loop
+planner replay.
 
 ## Vehicle parameters
 
