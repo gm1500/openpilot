@@ -18,9 +18,7 @@ import numpy as np
 # therefore allows much faster velocity adaptation up close while preserving
 # strong smoothing at highway range.
 ACCEL_NOISE_BP = [5.0, 10.0, 20.0, 35.0, 50.0, 70.0, 100.0]
-ACCEL_NOISE_V = [2.5, 1.5, 0.8, 0.10, 0.03, 0.025, 0.02]
-MEASUREMENT_STD_FLOOR_BP = [5.0, 10.0, 20.0, 35.0]
-MEASUREMENT_STD_FLOOR_V = [0.85, 0.90, 0.95, 1.00]
+ACCEL_NOISE_V = [2.5, 1.0, 0.2, 0.05, 0.03, 0.025, 0.02]
 
 
 @dataclass(frozen=True)
@@ -40,8 +38,7 @@ class VisionLeadObservation:
 
   @property
   def variance(self) -> float:
-    std_floor = float(np.interp(self.distance, MEASUREMENT_STD_FLOOR_BP, MEASUREMENT_STD_FLOOR_V))
-    return max(self.std, std_floor) ** 2 / self.probability**2
+    return max(self.std, 1.0) ** 2 / self.probability**2
 
 
 class _DistanceTrack:
