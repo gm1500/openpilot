@@ -306,7 +306,9 @@ class _DistanceTrack:
       self.transition_from, self.transition = 0.0, 1.0
     elif self.output is not None and mode != self.mode:
       # A fixed starting value keeps a changing target inside the blend.
-      self.transition_from, self.transition = self.output, 0.0
+      # Leaving stop-hold must not publish a speed below the newly moving model.
+      transition_from = max(self.output, baseline) if self.mode == 'stop-hold' else self.output
+      self.transition_from, self.transition = transition_from, 0.0
     else:
       self.transition = min(1.0, self.transition + self.dt)
     self.mode = mode
