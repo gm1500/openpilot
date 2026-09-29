@@ -7,66 +7,41 @@ are an experimental ACC calibration, not a measured coastdown fit.
 
 ## Acceleration-feedback refinement
 
-The Sierra/Silverado openpilot-longitudinal tune now uses the existing integral
-gain table to reduce small city-speed corrections and track changing highway
-acceleration bias faster. No controller algorithm or planner policy is added.
+The Sierra/Silverado openpilot-longitudinal tune uses a strong integral correction
+only near the final approach, then rapidly reduces integral authority with speed.
+The current experimental table is:
 
-| Speed | Previous Ki | Updated Ki |
+| Speed | Previous Ki | Current Ki |
 | --- | ---: | ---: |
 | 0–7.2 km/h | 0.20 | 0.20 |
-| 18 km/h | 0.05 | 0.05 |
-| 36–54 km/h | 0.05 | 0.025 |
-| 72 km/h | 0.05 | 0.0875 |
-| 90 km/h and above | 0.05 | 0.15 |
+| 18 km/h | 0.05 | 0.02 |
+| 36 km/h | 0.025 | 0.005 |
+| 54 km/h | 0.025 | 0.005 |
+| 72 km/h | 0.0875 | 0.00375 |
+| 90 km/h and above | 0.15 | 0.0025 |
 
-The existing interpolation blends continuously between breakpoints. Feedback
-through 5 m/s (18 km/h) is identical to the previous tune. The parameter change
-is confined to the Sierra/Silverado with openpilot longitudinal control. Stock
-ACC and every other GM fingerprint keep their prior gains. Mass, geometry,
-road-load scale 1.0, 0.3 s delay, torque conversion, brake tables, braking-mode
-request, one-unit entry rule and final-stop path are unchanged. Pitch remains
-disabled in the torque equation.
+The exact breakpoints are `[2, 5, 10, 15, 25] m/s` with Ki values
+`[0.2, 0.02, 0.005, 0.005, 0.0025]`; interpolation between them is continuous.
+The high low-speed gain is retained for the final approach, while city and highway
+feedback is intentionally much weaker to reduce stored acceleration correction
+carried through the cruise setpoint.
 
-Route 285 segments 1–2 and 9–14 record the earlier 0.75 road-load build. The
-response analysis separated positive propulsion, friction-brake units and a
-braking-mode offset, removing slow local trends before fitting the dynamic
-response. The response fits are sensitivities, not measurements of delivered
-torque. They did not establish a reliable new physical torque or brake scale,
-so this update changes only the existing feedback gains.
+The Sierra/Silverado `longitudinalActuatorDelay` is now 0.5 s, up from 0.3 s.
+In route 286 segment 1, a command-to-measured-acceleration timing fit around the
+40 km/h approach/hold aligned best near 0.58 s effective lag; 0.5 s actuator
+delay corresponds to a 0.55 s MPC action point after the model timestep is added.
+That fit includes drivetrain response and filtered `aEgo`, so it is an effective
+control delay rather than a direct ECU dead-time measurement.
 
-The tune was compared with the published 1.0 baseline in route-conditioned
-differential projections using the source-identical native planner/MPC. The
-planner receives projected ego speed/acceleration and lead range adjusted for
-projected ego displacement. Recorded lead motion, neural outputs and unmodeled
-disturbances are reused. Three response models vary lag, time constant and
-propulsion/brake sensitivity. A uniform increase in moving-speed Ki was rejected
-because it added city-speed brake pulses.
+The delay parameter changes where the lead MPC trajectory is sampled; it does
+not delay or freeze the LongControl integrator, and it does not directly change
+the no-lead cruise acceleration candidate. The reduced Ki table therefore targets
+the observed integral carry-through independently of the longer MPC timing.
+Stopping-state logic still resets the integral and retains the dedicated final-stop
+calibration. Stock ACC and other GM fingerprints keep their existing tuning.
 
-| Projection metric | Published 1.0 baseline | Updated gain table |
-| --- | ---: | ---: |
-| 40 km/h holding: contiguous brake pulses | 9 | 8 |
-| 40 km/h holding: brake-active seconds | 2.64–2.84 | 2.40–2.68 |
-| 40 km/h holding: speed RMSE | 0.228–0.234 km/h | 0.227–0.236 km/h |
-| Highway, at least 80 km/h: contiguous brake pulses | 19 | 17 |
-| Highway acceleration RMSE | 0.159 m/s² | 0.148–0.150 m/s² |
-| Highway brake-active seconds | 69.95–70.11 | 69.27–69.55 |
-
-Pulse counts are contiguous nonzero command intervals, not hydraulic brake
-measurements. The 40 km/h speed-error change is at most 0.003 km/h in these
-projections; one model changes crawl-exit brake duration by +0.04 s. The minimum
-projected following range through the slow approach increases, while the minimum
-highway range changes by about -0.07 to +0.13 m across models. All native solver
-updates complete without failure and no additional stopping-state entries are
-predicted. These results support a modest trial tune, not a claim that real-world
-phantom braking or stopping distance has been validated. Reusing recorded
-disturbances makes the recorded-build closure exact by construction; it is not
-independent validation of the response model.
-
-The new level reference is approximately +0.2 degrees in route 284's calibrated
-frame. Inserting the corresponding +0.13 to +0.20 degree range directly into the
-highway force predictor worsens its RMSE. The earlier roughly 1.1 degree fitted
-offset must not be treated as an established neutral pitch, so grade compensation
-is not part of this refinement.
+Mass, geometry, road-load scale 1.0, torque conversion, brake tables, braking-mode
+request, one-unit entry rule and pitch handling are unchanged by this refinement.
 
 ## Vehicle parameters
 
