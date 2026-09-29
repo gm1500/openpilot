@@ -5,8 +5,6 @@ import numpy as np
 from openpilot.selfdrive.controls.lib.vision_lead_tracker import (
   ACCEL_NOISE_BP,
   ACCEL_NOISE_V,
-  MEASUREMENT_STD_FLOOR_BP,
-  MEASUREMENT_STD_FLOOR_V,
   VisionLeadObservation,
   VisionLeadTracker,
   _DistanceTrack,
@@ -57,10 +55,18 @@ class TestVisionLeadAdaptive(unittest.TestCase):
       self.assertLess(abs(track.acceleration_noise(boundary + 1e-5, max(boundary, 5.0))
                           - track.acceleration_noise(boundary - 1e-5, max(boundary, 5.0))), 1e-4)
 
-  def test_measurement_floor_relaxes_up_close(self):
-    for distance, expected in zip(MEASUREMENT_STD_FLOOR_BP, MEASUREMENT_STD_FLOOR_V, strict=True):
+  def test_measurement_floor_is_unchanged(self):
+    for distance in (5.0, 10.0, 20.0, 50.0):
       obs = VisionLeadObservation(distance, 0.0, 0.1, 1.0)
-      self.assertAlmostEqual(obs.variance, expected ** 2)
+      self.assertAlmostEqual(obs.variance, 1.0)
+
+  def test_far_range_is_not_more_assertive_than_previous_nominal_tune(self):
+    for distance in (35.0, 50.0, 70.0, 100.0):
+      ego = 25.0
+      track = self.track(distance, ego, ego)
+      headway = distance / max(ego, 5.0)
+      previous = 0.1 * float(np.interp(headway, [1.0, 2.5], [1.0, 0.5]))
+      self.assertLessEqual(track.acceleration_noise(distance, ego), previous)
 
   def test_far_track_filters_identical_distance_noise_more(self):
     rng = np.random.default_rng(7)
