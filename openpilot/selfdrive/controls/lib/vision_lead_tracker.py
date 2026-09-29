@@ -18,9 +18,9 @@ import numpy as np
 # therefore allows much faster velocity adaptation up close while preserving
 # strong smoothing at highway range.
 ACCEL_NOISE_BP = [5.0, 10.0, 20.0, 35.0, 50.0, 70.0, 100.0]
-ACCEL_NOISE_V = [12.0, 6.0, 1.2, 0.10, 0.03, 0.025, 0.02]
+ACCEL_NOISE_V = [2.5, 1.5, 0.8, 0.10, 0.03, 0.025, 0.02]
 MEASUREMENT_STD_FLOOR_BP = [5.0, 10.0, 20.0, 35.0]
-MEASUREMENT_STD_FLOOR_V = [0.35, 0.50, 0.75, 1.00]
+MEASUREMENT_STD_FLOOR_V = [0.85, 0.90, 0.95, 1.00]
 
 
 @dataclass(frozen=True)
