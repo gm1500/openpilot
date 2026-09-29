@@ -2,7 +2,15 @@ import unittest
 
 import numpy as np
 
-from openpilot.selfdrive.controls.lib.vision_lead_tracker import VisionLeadTracker, _DistanceTrack
+from openpilot.selfdrive.controls.lib.vision_lead_tracker import (
+  ACCEL_NOISE_BP,
+  ACCEL_NOISE_V,
+  MEASUREMENT_STD_FLOOR_BP,
+  MEASUREMENT_STD_FLOOR_V,
+  VisionLeadObservation,
+  VisionLeadTracker,
+  _DistanceTrack,
+)
 from openpilot.selfdrive.controls.tests.test_vision_lead_tracker import lead, observation
 
 
@@ -12,11 +20,18 @@ class TestVisionLeadAdaptive(unittest.TestCase):
     track.x[1] = speed
     return track
 
-  def test_same_time_gap_has_same_tuning_at_different_speeds(self):
+  def test_same_time_gap_is_more_responsive_when_closer(self):
     slow = self.track(30.0, 20.0, 20.0)
     fast = self.track(45.0, 30.0, 30.0)
-    self.assertAlmostEqual(slow.acceleration_noise(30.0, 20.0), fast.acceleration_noise(45.0, 30.0))
-    self.assertAlmostEqual(slow.acceleration_noise(30.0, 20.0), 1.0 / 12.0)
+    self.assertGreater(slow.acceleration_noise(30.0, 20.0), fast.acceleration_noise(45.0, 30.0))
+
+  def test_route_derived_process_noise_schedule(self):
+    track = self.track(40.0, 25.0, 25.0)
+    for distance, expected in zip(ACCEL_NOISE_BP, ACCEL_NOISE_V, strict=True):
+      # Choose ego so headway <= 1 s; this isolates the distance-interpolated base.
+      ego = max(distance, 5.0)
+      track.x[1] = ego
+      self.assertAlmostEqual(track.acceleration_noise(distance, ego), expected)
 
   def test_close_response_and_far_smoothing_are_bounded(self):
     for distance in np.linspace(2.0, 200.0, 20):
@@ -24,25 +39,28 @@ class TestVisionLeadAdaptive(unittest.TestCase):
         for speed in (-5.0, 0.0, 25.0, 70.0):
           track = self.track(distance, ego, speed)
           q = track.acceleration_noise(distance, ego)
-          self.assertGreaterEqual(q, 0.05)
-          self.assertLessEqual(q, 0.2)
+          self.assertGreaterEqual(q, 0.01)
+          self.assertLessEqual(q, 24.0)
     track = self.track(20.0, 25.0, 25.0)
-    self.assertAlmostEqual(track.acceleration_noise(20.0, 25.0), 0.1)
-    self.assertAlmostEqual(track.acceleration_noise(100.0, 25.0), 0.05)
+    self.assertAlmostEqual(track.acceleration_noise(20.0, 25.0), 1.2)
+    self.assertAlmostEqual(track.acceleration_noise(100.0, 25.0), 0.01)
 
-  def test_fast_closing_overrides_far_smoothing(self):
+  def test_fast_closing_boosts_far_response(self):
     track = self.track(100.0, 35.0, 15.0)
-    self.assertAlmostEqual(track.acceleration_noise(100.0, 35.0), 0.2)
+    self.assertAlmostEqual(track.acceleration_noise(100.0, 35.0), 0.04)
     track.x[1] = 35.0
-    self.assertAlmostEqual(track.acceleration_noise(100.0, 35.0), 0.05)
+    self.assertAlmostEqual(track.acceleration_noise(100.0, 35.0), 0.01)
 
   def test_schedule_has_no_boundary_jumps(self):
     track = self.track(40.0, 25.0, 25.0)
-    for boundary in (25.0, 62.5):
-      self.assertLess(abs(track.acceleration_noise(boundary + 1e-5, 25.0) - track.acceleration_noise(boundary - 1e-5, 25.0)), 1e-6)
-    track.x[1] = 20.0
-    for boundary in (30.0, 60.0):
-      self.assertLess(abs(track.acceleration_noise(boundary + 1e-5, 25.0) - track.acceleration_noise(boundary - 1e-5, 25.0)), 1e-6)
+    for boundary in ACCEL_NOISE_BP:
+      self.assertLess(abs(track.acceleration_noise(boundary + 1e-5, max(boundary, 5.0))
+                          - track.acceleration_noise(boundary - 1e-5, max(boundary, 5.0))), 1e-4)
+
+  def test_measurement_floor_relaxes_up_close(self):
+    for distance, expected in zip(MEASUREMENT_STD_FLOOR_BP, MEASUREMENT_STD_FLOOR_V, strict=True):
+      obs = VisionLeadObservation(distance, 0.0, 0.1, 1.0)
+      self.assertAlmostEqual(obs.variance, expected ** 2)
 
   def test_far_track_filters_identical_distance_noise_more(self):
     rng = np.random.default_rng(7)
