@@ -146,7 +146,7 @@ class TestVisionLeadV3(unittest.TestCase):
         self.assertEqual(self.tracker.slots[0].pre_closing_offset, 0.0)
 
   def test_unsupported_paths_remain_original(self):
-    for ego, gap, radar in ((15.0, 90.0, False), (30.0, 9.0, False), (30.0, 90.0, True)):
+    for ego, gap, radar in ((60.0, 90.0, False), (30.0, 160.0, False), (30.0, 90.0, True)):
       with self.subTest(ego=ego, gap=gap, radar=radar):
         self.setUp()
         for _ in range(60):
