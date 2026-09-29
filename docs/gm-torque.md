@@ -43,6 +43,43 @@ calibration. Stock ACC and other GM fingerprints keep their existing tuning.
 Mass, geometry, road-load scale 1.0, torque conversion, brake tables, braking-mode
 request, one-unit entry rule and pitch handling are unchanged by this refinement.
 
+## Adaptive vision lead range velocity experiment
+
+The `lead-range-adaptive-v1` branch extends the private vision range tracker to
+all moving speeds and close range after the existing maturity gate. Raw model
+velocity remains the fallback while the range track is immature and the existing
+immediate braking/TTC guard can still override a lagging range estimate.
+
+Uploaded route data shows raw `dRel` high-frequency residuals increasing strongly
+with range: about 0.06 m inside 5 m, 0.14 m at 5-10 m, 0.28 m at 15-20 m,
+0.55-0.65 m at 30-50 m, and about 0.92 m at 50-70 m. The current fixed Kalman
+process noise also showed roughly one second of velocity-state lag at 30-60 m
+and much larger stop-approach lag at close range.
+
+The initial interpolated continuous-white-acceleration process-noise table is:
+
+| dRel breakpoint | Process noise |
+| ---: | ---: |
+| 5 m | 2.5 |
+| 10 m | 1.5 |
+| 20 m | 0.8 |
+| 35 m | 0.10 |
+| 50 m | 0.03 |
+| 70 m | 0.025 |
+| 100 m | 0.02 |
+
+The model-reported range standard deviation floor is also interpolated from
+0.85 m at 5 m to 1.0 m at 35 m so clean close-range measurements receive more
+weight without fully removing the existing floor.
+
+In an offline replay against a non-causal smoothed `dRel` derivative used only as
+a reference, the 2-10 m speed RMSE fell from about 0.87 to 0.48 m/s and the
+10-20 m RMSE from about 2.24 to 1.97 m/s. The 95th-percentile frame-to-frame
+velocity change inside 10 m rose from about 0.08 to 0.15 m/s, approximately the
+raw model's 0.15 m/s in the same samples. At 20 m and beyond the schedule is much
+more conservative. These replay figures are tuning diagnostics, not independent
+ground truth or a stopping-distance validation.
+
 ## Vehicle parameters
 
 `opendbc/car/gm/values.py`, `GMCarSpecs`, defines:
