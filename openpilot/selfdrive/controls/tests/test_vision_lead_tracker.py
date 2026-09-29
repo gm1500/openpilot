@@ -315,13 +315,18 @@ class TestVisionLeadTracker(unittest.TestCase):
     self.assertNotIn(old, self.tracker.tracks)
     self.assertNotIn(old, self.tracker.history_slots)
 
-  def test_radar_low_speed_and_close_range_are_original(self):
-    for ego, gap, radar in [(25.0, 60.0, True), (10.0, 60.0, False), (25.0, 8.0, False)]:
-      with self.subTest(ego=ego, gap=gap, radar=radar):
+  def test_radar_lead_is_original_but_vision_uses_range_speed_at_low_speed_and_close_range(self):
+    self.tracker.reset()
+    original = [lead(60.0, ego=25.0, radar=True)] * 2
+    self.assertEqual(self.step([observation(60.0)] * 2, original, 25.0, count=120), original)
+
+    for ego, gap in [(10.0, 60.0), (25.0, 8.0)]:
+      with self.subTest(ego=ego, gap=gap):
         self.tracker.reset()
-        original = [lead(gap, ego=ego, radar=radar)] * 2
+        original = [lead(gap, speed=ego - 1.0, ego=ego)] * 2
         out = self.step([observation(gap)] * 2, original, ego, count=120)
-        self.assertEqual(out, original)
+        self.assertAlmostEqual(out[0]['vLead'], ego, delta=0.1)
+        self.assertAlmostEqual(out[0]['vRel'], 0.0, delta=0.1)
 
   def test_invalid_input_and_bad_time_reset(self):
     for timestamp, ego, valid in [(math.nan, 25.0, True), (1.0, math.nan, True), (1.0, 25.0, False), (1.0, 25.0, True), (100.0, 25.0, True)]:
