@@ -12,6 +12,17 @@ import math
 import numpy as np
 
 
+# Route-derived adaptive range tracker calibration.
+# Uploaded routes show raw dRel jitter rising from roughly 0.06 m inside 5 m
+# to ~0.65 m at 40-50 m and ~0.9 m at 50-70 m. The process-noise schedule
+# therefore allows much faster velocity adaptation up close while preserving
+# strong smoothing at highway range.
+ACCEL_NOISE_BP = [5.0, 10.0, 20.0, 35.0, 50.0, 70.0, 100.0]
+ACCEL_NOISE_V = [12.0, 6.0, 1.2, 0.10, 0.03, 0.025, 0.02]
+MEASUREMENT_STD_FLOOR_BP = [5.0, 10.0, 20.0, 35.0]
+MEASUREMENT_STD_FLOOR_V = [0.35, 0.50, 0.75, 1.00]
+
+
 @dataclass(frozen=True)
 class VisionLeadObservation:
   distance: float
@@ -29,11 +40,11 @@ class VisionLeadObservation:
 
   @property
   def variance(self) -> float:
-    return max(self.std, 1.0) ** 2 / self.probability**2
+    std_floor = float(np.interp(self.distance, MEASUREMENT_STD_FLOOR_BP, MEASUREMENT_STD_FLOOR_V))
+    return max(self.std, std_floor) ** 2 / self.probability**2
 
 
 class _DistanceTrack:
-  ACCEL_NOISE = 0.1  # nominal continuous white acceleration spectral density
   MIN_HISTORY = 1.5
   MAX_SPEED_VARIANCE = 2.25
   UNCERTAIN_MAX_DISTANCE = 15.0
@@ -115,14 +126,17 @@ class _DistanceTrack:
     return distance_error / self.UNCERTAIN_MAX_DISTANCE + lateral_error / self.UNCERTAIN_MAX_LATERAL
 
   def acceleration_noise(self, distance: float, ego: float) -> float:
-    # Keep the original response within a one-second gap; gradually smooth farther leads.
+    # Distance quality improves sharply as the lead gets closer. Interpolate the
+    # Kalman process noise from route-derived breakpoints so close-range velocity
+    # can follow real lead deceleration quickly while far-range noise stays damped.
+    base = float(np.interp(distance, ACCEL_NOISE_BP, ACCEL_NOISE_V))
     headway = distance / max(ego, 5.0)
     factor = float(np.interp(headway, [1.0, 2.5], [1.0, 0.5]))
     closing = max(ego - float(self.x[1]), 0.0)
     if closing > 0.0:
-      # Distance alone must not slow the response to a rapidly closing lead.
+      # Keep the existing TTC response as an additional conservative boost.
       factor = max(factor, float(np.interp(distance / closing, [6.0, 12.0], [2.0, 0.5])))
-    return self.ACCEL_NOISE * factor
+    return base * factor
 
   def update(self, observation: VisionLeadObservation, timestamp: float, ego: float) -> bool:
     dt = timestamp - self.time
@@ -197,7 +211,7 @@ class _DistanceTrack:
 
   def speed(self, leads: list[dict], observation: VisionLeadObservation, ego: float) -> float:
     baseline = min(lead['vLead'] for lead in leads)
-    use_distance = self.ready and observation.probability >= 0.5 and 15.0 < ego < 60.0 and 10.0 < observation.distance < 150.0
+    use_distance = self.ready and observation.probability >= 0.5 and 0.0 <= ego < 60.0 and 2.0 < observation.distance < 150.0
     target = float(self.x[1]) if use_distance else baseline
     mode = 'distance' if use_distance else 'fallback'
     if not use_distance:
@@ -338,8 +352,8 @@ class VisionLeadTracker:
       accepted = [i for i in indices if leads[i].get('present', False) and not leads[i].get('radar', False)]
       supported = (
         accepted
-        and 15.0 < ego < 60.0
-        and all(10.0 < leads[i]['dRel'] < 150.0 and all(math.isfinite(leads[i][key]) for key in ('vLead', 'aLeadK')) for i in accepted)
+        and 0.0 <= ego < 60.0
+        and all(2.0 < leads[i]['dRel'] < 150.0 and all(math.isfinite(leads[i][key]) for key in ('vLead', 'aLeadK')) for i in accepted)
       )
       if not supported:
         track.reset_output()
