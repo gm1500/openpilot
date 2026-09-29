@@ -40,7 +40,7 @@ class TestVisionLeadAdaptive(unittest.TestCase):
           self.assertGreaterEqual(q, 0.01)
           self.assertLessEqual(q, 24.0)
     track = self.track(20.0, 25.0, 25.0)
-    self.assertAlmostEqual(track.acceleration_noise(20.0, 25.0), 1.2)
+    self.assertAlmostEqual(track.acceleration_noise(20.0, 25.0), 0.2)
     self.assertAlmostEqual(track.acceleration_noise(100.0, 25.0), 0.01)
 
   def test_fast_closing_boosts_far_response(self):
@@ -67,6 +67,58 @@ class TestVisionLeadAdaptive(unittest.TestCase):
       headway = distance / max(ego, 5.0)
       previous = 0.1 * float(np.interp(headway, [1.0, 2.5], [1.0, 0.5]))
       self.assertLessEqual(track.acceleration_noise(distance, ego), previous)
+
+  def test_corroborated_closing_adds_bounded_response_only_when_both_cues_agree(self):
+    track = self.track(50.0, 25.0, 25.0)
+    track.age = 5.0
+    track.P[1, 1] = 0.1
+    track.time = 1.0
+    track.dt = 0.05
+    track.transition = 1.0
+    track.range_history.clear()
+    for i in range(13):
+      t = 0.4 + 0.05 * i
+      # 1 m/s closing with a constant 25 m/s ego implies a 24 m/s lead.
+      track.range_history.append((t, 50.6 - (t - 0.4), 1.0, 25.0))
+
+    out = track.closing_response_target(25.0, 24.0, observation(50.0))
+    self.assertLess(out, 25.0)
+    self.assertGreaterEqual(out, 24.0)
+    self.assertLessEqual(25.0 - out, track.CLOSING_RESPONSE_RATE * track.dt + 1e-8)
+    self.assertGreater(track.response_boost, 1.0)
+    # The dynamic boost may restore, but never exceed, the previous 0.1 nominal base response.
+    base = np.interp(50.0, ACCEL_NOISE_BP, ACCEL_NOISE_V)
+    self.assertLessEqual(base * track.response_boost, track.CLOSING_RESPONSE_BASE_NOISE + 1e-8)
+
+  def test_model_only_or_range_only_slowdown_does_not_trigger_response(self):
+    for baseline, range_rate in ((24.0, 0.0), (25.0, -1.0)):
+      with self.subTest(baseline=baseline, range_rate=range_rate):
+        track = self.track(50.0, 25.0, 25.0)
+        track.age = 5.0
+        track.P[1, 1] = 0.1
+        track.time = 1.0
+        track.dt = 0.05
+        track.transition = 1.0
+        track.range_history.clear()
+        for i in range(13):
+          t = 0.4 + 0.05 * i
+          track.range_history.append((t, 50.0 + range_rate * (t - 0.4), 1.0, 25.0))
+        out = track.closing_response_target(25.0, baseline, observation(50.0))
+        self.assertAlmostEqual(out, 25.0)
+        self.assertAlmostEqual(track.response_boost, 1.0)
+
+  def test_near_stop_hold_preserves_model_output_while_range_state_keeps_learning(self):
+    track = self.track(7.0, 0.5, 0.9)
+    track.age = 5.0
+    track.P[1, 1] = 0.1
+    track.time = 1.0
+    track.dt = 0.05
+    model = lead(7.0, speed=0.2, ego=0.5)
+    out = track.speed([model, model], observation(7.0), 0.5)
+    self.assertEqual(track.mode, 'stop-hold')
+    self.assertAlmostEqual(out, 0.2)
+    self.assertAlmostEqual(track.x[1], 0.9)
+
 
   def test_far_track_filters_identical_distance_noise_more(self):
     rng = np.random.default_rng(7)
