@@ -79,6 +79,40 @@ class TestGMLongControl(unittest.TestCase):
       b = after.update(True, self.car(speed + 1e-6), -.4, False, (-4., 2.))
       self.assertLess(abs(a - b), 1e-8)
 
+  def test_launch_integrator_waits_for_configured_actuator_delay(self):
+    controller = self.controller()
+    state = self.car(0.0, 0.0)
+
+    # Establish the normal stopping state first, then release into PID.
+    controller.update(True, state, 1.6, True, (-4., 2.))
+    self.assertEqual(controller.long_control_state, LongCtrlState.stopping)
+
+    first = controller.update(True, state, 1.6, False, (-4., 2.))
+    self.assertEqual(controller.long_control_state, LongCtrlState.pid)
+    self.assertAlmostEqual(first, 1.6)
+    self.assertAlmostEqual(controller.pid.i, 0.0)
+
+    held_ticks = round(controller.CP.longitudinalActuatorDelay / .01)
+    for _ in range(held_ticks - 1):
+      controller.update(True, state, 1.6, False, (-4., 2.))
+      self.assertAlmostEqual(controller.pid.i, 0.0)
+
+    controller.update(True, state, 1.6, False, (-4., 2.))
+    self.assertGreater(controller.pid.i, 0.0)
+
+  def test_launch_integrator_hold_does_not_delay_feedforward_or_moving_pid(self):
+    controller = self.controller()
+    state = self.car(0.0, 0.0)
+    controller.update(True, state, 1.2, True, (-4., 2.))
+    for _ in range(10):
+      self.assertAlmostEqual(controller.update(True, state, 1.2, False, (-4., 2.)), 1.2)
+
+    moving = self.controller()
+    moving_state = self.car(5.0, 0.0)
+    moving.update(True, moving_state, .5, False, (-4., 2.))
+    self.assertGreater(moving.pid.i, 0.0)
+    self.assertEqual(moving.launch_integrator_hold, 0.0)
+
   def test_stop_hold_and_disengagement_preserve_existing_behavior(self):
     before, after = self.controller(True), self.controller()
     before.last_output_accel = after.last_output_accel = -.25
