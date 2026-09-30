@@ -103,9 +103,30 @@ and that stop-hold release does not begin below the model speed. The stale 20 m
 process-noise assertion from the earlier candidate is corrected from 1.2 to the
 intended 0.2.
 
-These refinements have not yet been rerun through the full 49-segment native
-planner regression or validated on-road. The previous replay remains the reason
-for the added gates, not evidence that the new revision has passed them.
+Fresh route 288 data exposed two additional stop-approach effects. First, a
+standstill-to-PID launch accumulated about +0.39 m/s² of integral while the
+vehicle was still waiting for its longitudinal response, and roughly
++0.16-0.17 m/s² of that bias was still opposing braking at the later stopped-lead
+approach. LongControl now freezes integral accumulation, while preserving the
+planner feedforward command, for the configured longitudinal actuator delay
+when leaving the stopping state below 1 m/s with a positive acceleration target.
+With the Sierra's 0.5 s delay this targets launch windup without reducing the
+normal low-speed Ki used during braking.
+
+Second, a confirmed stopped-lead mode handles the model's small residual creep
+estimate. A mature vision lead is treated as stopped only after 0.30 s with all
+of the following true: ego at least 2 m/s, model lead speed at or below
+0.75 m/s, absolute model lead acceleration at or below 0.25 m/s², high model
+probability, and range inside a 6 s closing-time envelope. The published speed
+is then clamped to zero while the private distance state continues learning.
+The mode releases immediately to no lower than the moving model speed once the
+stopped conditions no longer hold. This supplements, rather than replaces, the
+existing hard-braking/TTC guard and near-standstill stop-hold path.
+
+These latest changes have not yet been rerun through the full native planner
+regression or validated on-road. Unit tests were updated for launch integral
+hold, stopped-lead confirmation, rejection of creeping/unsettled cases, and
+clean release, but have not been executed in this editing session.
 
 ## Vehicle parameters
 
