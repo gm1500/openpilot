@@ -74,6 +74,26 @@ Shared vehicle specs define a neutral wheel-radius default of zero. Platforms
 using wheel torque override it. This fixes the EV6/non-GM initialization crash
 without inventing a tire radius or applying the Sierra torque model to them.
 
+### Separate moving-Ki experiment
+
+Sierra/Silverado integral gain is unchanged through 36 km/h, blends down over
+36–40 km/h, and is 25% lower at 40 km/h and above. This changes only the existing
+gain table; planner outputs, stopping gain, actuator delay and torque/brake
+mapping retain the preceding Sierra Tune behavior.
+
+| Speed | Previous Ki | New Ki |
+| --- | ---: | ---: |
+| 36 km/h | 0.005 | 0.005 |
+| 40–54 km/h | 0.005 | 0.00375 |
+| 90 km/h and above | 0.0025 | 0.001875 |
+
+Offline replay of route `615b11d4c01d81ec/0000028a--c8284506d8`, segments 7–19,
+holds recorded motion and planner targets fixed. Across 69,214 moving frames
+at or above 40 km/h, mean positive integral correction falls 24.1%; the largest
+acceleration-command change is 0.0038 m/s². Projected brake-active actuator
+ticks change from 1,854 to 1,855. This supports a smaller integral contribution,
+but does not demonstrate fewer brakes or reduced closed-loop oscillation.
+
 ## Validation scope
 
 The feature port passes 194 lane/lead/controller/monitoring tests and 177 GM
