@@ -63,6 +63,11 @@ class _DistanceTrack:
   STOP_HOLD_EGO_MAX = 5.0
   STOP_HOLD_DISTANCE = 10.0
   STOP_HOLD_MODEL_SPEED = 1.0
+  STOPPED_LEAD_MIN_EGO = 2.0
+  STOPPED_LEAD_MODEL_SPEED = 0.75
+  STOPPED_LEAD_MODEL_ACCEL = 0.25
+  STOPPED_LEAD_TTC = 6.0
+  STOPPED_LEAD_CONFIRM_TIME = 0.30
 
   def __init__(self, observation: VisionLeadObservation, timestamp: float, ego: float):
     self.x = np.array([observation.distance, ego], dtype=float)
@@ -85,6 +90,7 @@ class _DistanceTrack:
     self.pre_closing_offset = 0.0
     self.closing_response_offset = 0.0
     self.response_boost = 1.0
+    self.stopped_lead_time = 0.0
 
   def reset_output(self) -> None:
     # Unsupported or missing output must not leave a stale range/transition
@@ -97,6 +103,7 @@ class _DistanceTrack:
     self.pre_closing_offset = 0.0
     self.closing_response_offset = 0.0
     self.response_boost = 1.0
+    self.stopped_lead_time = 0.0
 
   @property
   def ready(self) -> bool:
@@ -280,10 +287,31 @@ class _DistanceTrack:
       use_distance and ego < self.STOP_HOLD_EGO_MAX and observation.distance < self.STOP_HOLD_DISTANCE
       and baseline < self.STOP_HOLD_MODEL_SPEED
     )
+    stopped_candidate = (
+      use_distance and observation.probability >= self.CLOSING_RESPONSE_MIN_PROB
+      and ego >= self.STOPPED_LEAD_MIN_EGO
+      and baseline <= self.STOPPED_LEAD_MODEL_SPEED
+      and max(abs(lead['aLeadK']) for lead in leads) <= self.STOPPED_LEAD_MODEL_ACCEL
+      and closing > 0.0 and observation.distance < self.STOPPED_LEAD_TTC * closing
+    )
+    self.stopped_lead_time = self.stopped_lead_time + self.dt if stopped_candidate else 0.0
+    stopped_lead = self.stopped_lead_time >= self.STOPPED_LEAD_CONFIRM_TIME
+
     if urgent:
       self.last_braking = self.time
     recovering = self.time - self.last_braking < 2.0 and target > baseline + 0.5
-    if urgent or recovering:
+    if stopped_lead:
+      # A repeatedly near-zero, settled model speed under a short-TTC closing
+      # approach is treated as a confirmed stopped lead. The distance state
+      # continues learning privately, but publishing a small creep speed here
+      # made route 288's stop approach unnecessarily optimistic.
+      target = 0.0
+      mode = 'stopped-lead'
+      self.transition_from, self.transition = 0.0, 1.0
+      self.pre_closing_offset = 0.0
+      self.closing_response_offset = 0.0
+      self.response_boost = 1.0
+    elif urgent or recovering:
       target = min(target, baseline)
       mode = 'braking'
       self.transition_from, self.transition = 0.0, 1.0
@@ -300,15 +328,15 @@ class _DistanceTrack:
       self.response_boost = 1.0
     elif use_distance:
       target = self.closing_response_target(target, baseline, observation)
-    if mode in ('braking', 'pre-closing', 'stop-hold') or (not use_distance and (not self.output_active or self.mode == 'pre-closing')):
+    if mode in ('braking', 'pre-closing', 'stop-hold', 'stopped-lead') or (not use_distance and (not self.output_active or self.mode == 'pre-closing')):
       # These modes already bound their output. Braking must remain immediate;
       # pure model fallback must not blend from a shared internal minimum that
       # was never published.
       self.transition_from, self.transition = 0.0, 1.0
     elif self.output is not None and mode != self.mode:
       # A fixed starting value keeps a changing target inside the blend.
-      # Leaving stop-hold must not publish a speed below the newly moving model.
-      transition_from = max(self.output, baseline) if self.mode == 'stop-hold' else self.output
+      # Leaving a stopped mode must not publish below the newly moving model.
+      transition_from = max(self.output, baseline) if self.mode in ('stop-hold', 'stopped-lead') else self.output
       self.transition_from, self.transition = transition_from, 0.0
     else:
       self.transition = min(1.0, self.transition + self.dt)
@@ -431,7 +459,7 @@ class VisionLeadTracker:
         track.reset_output()
         continue
       speed = track.speed([leads[i] for i in accepted], observation, ego)
-      urgent_range = track.mode in ('braking', 'stop-hold') or timestamp < track.uncertain_handoff_until
+      urgent_range = track.mode in ('braking', 'stop-hold', 'stopped-lead') or timestamp < track.uncertain_handoff_until
       filtered_group_distance = track.filtered_range(observation.distance, speed, ego, track.mode == 'distance' and not urgent_range)
       if (track.mode == 'fallback' and track.transition >= 1.0) or (track.mode == 'braking' and not track.ready):
         track.output_active = False
