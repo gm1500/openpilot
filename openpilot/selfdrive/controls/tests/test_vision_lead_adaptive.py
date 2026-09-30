@@ -132,6 +132,50 @@ class TestVisionLeadAdaptive(unittest.TestCase):
     out = track.speed([moving, moving], observation(7.0), 0.5)
     self.assertGreaterEqual(out, 1.2)
 
+  def test_confirmed_stopped_lead_clamps_small_model_creep_to_zero(self):
+    track = self.track(50.0, 13.0, 2.0)
+    track.age = 5.0
+    track.P[1, 1] = 0.1
+    track.dt = 0.05
+    stopped = lead(50.0, speed=0.3, ego=13.0, acceleration=0.0)
+
+    for i in range(7):
+      track.time = 1.0 + i * 0.05
+      out = track.speed([stopped, stopped], observation(50.0), 13.0)
+
+    self.assertEqual(track.mode, 'stopped-lead')
+    self.assertAlmostEqual(out, 0.0)
+
+  def test_stopped_lead_confirmation_rejects_creeping_or_unsettled_model(self):
+    for speed, acceleration in ((0.9, 0.0), (0.3, -0.4)):
+      with self.subTest(speed=speed, acceleration=acceleration):
+        track = self.track(50.0, 13.0, 2.0)
+        track.age = 5.0
+        track.P[1, 1] = 0.1
+        track.dt = 0.05
+        candidate = lead(50.0, speed=speed, ego=13.0, acceleration=acceleration)
+        for i in range(10):
+          track.time = 1.0 + i * 0.05
+          out = track.speed([candidate, candidate], observation(50.0), 13.0)
+        self.assertNotEqual(track.mode, 'stopped-lead')
+        self.assertGreater(out, 0.0)
+
+  def test_stopped_lead_release_never_starts_below_moving_model(self):
+    track = self.track(50.0, 13.0, 2.0)
+    track.age = 5.0
+    track.P[1, 1] = 0.1
+    track.dt = 0.05
+    stopped = lead(50.0, speed=0.3, ego=13.0, acceleration=0.0)
+    for i in range(7):
+      track.time = 1.0 + i * 0.05
+      track.speed([stopped, stopped], observation(50.0), 13.0)
+    self.assertEqual(track.mode, 'stopped-lead')
+
+    moving = lead(50.0, speed=1.2, ego=13.0, acceleration=0.0)
+    track.time += 0.05
+    out = track.speed([moving, moving], observation(50.0), 13.0)
+    self.assertGreaterEqual(out, 1.2)
+
   def test_far_track_filters_identical_distance_noise_more(self):
     rng = np.random.default_rng(7)
     near, far = VisionLeadTracker(), VisionLeadTracker()
