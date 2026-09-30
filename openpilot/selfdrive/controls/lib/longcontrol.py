@@ -47,6 +47,7 @@ class LongControl:
 
   def reset(self):
     self.pid.reset()
+    self.launch_integrator_hold = 0.0
 
   def update(self, active, CS, a_target, should_stop, accel_limits):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
