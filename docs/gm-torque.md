@@ -34,9 +34,9 @@ That fit includes drivetrain response and filtered `aEgo`, so it is an effective
 control delay rather than a direct ECU dead-time measurement.
 
 The delay parameter changes where the lead MPC trajectory is sampled; it does
-not delay or freeze the LongControl integrator, and it does not directly change
-the no-lead cruise acceleration candidate. The reduced Ki table therefore targets
-the observed integral carry-through independently of the longer MPC timing.
+not directly change the no-lead cruise acceleration candidate. Normal moving PID
+feedback is immediate. The separate launch hold described below uses this same
+configured delay to avoid learning the expected initial acceleration shortfall.
 Stopping-state logic still resets the integral and retains the dedicated final-stop
 calibration. Stock ACC and other GM fingerprints keep their existing tuning.
 
@@ -84,22 +84,28 @@ causal cues agree that the distance Kalman state is too fast:
 
 When corroborated, the published range-derived speed is pulled down toward the
 less aggressive of the model and range-trend estimates at no more than
-2.5 m/s per second and no more than 3.0 m/s total offset. The Kalman process
-noise is also temporarily boosted, but only up to the previous nominal 0.1
-base responsiveness; the far-range steady-following filter therefore does not
-become globally noisier.
+2.5 m/s per second and no more than 3.0 m/s total offset. This correction does
+not change the private Kalman process-noise schedule. The temporary boost was
+removed after offline comparisons showed no improvement in the known-motion
+half-drop response timings and slightly higher highway variability.
 
 Near standstill, the distance state continues learning privately, but when ego
 speed is below 5 m/s, range is below 10 m, and the model lead speed is below
-1 m/s, the published speed is held to the model baseline. This preserves the
-previous stop/launch semantics that the earlier all-speed extension changed.
+1 m/s, the published speed is capped at the model baseline. The same ceiling
+now applies below 5 m/s whenever the model indicates a closing lead by more than
+0.35 m/s, even outside the original 10 m stop envelope. This prevents a mature
+but optimistic range state from weakening low-speed braking. The private state
+continues learning, and low-speed pullaway retains the distance filter.
 When the model indicates the lead is moving again, release begins no lower than
 that moving model speed before blending back toward the range state.
 
 The regression test suite now also checks that isolated model-speed drops or
 isolated range trends cannot trigger the sustained-closing response, that the
-dynamic far-range boost never exceeds the previous nominal process-noise level,
-and that stop-hold release does not begin below the model speed. The stale 20 m
+published correction leaves private process noise unchanged, and that stop-hold
+release does not begin below the model speed. Range-regression arrays explicitly
+use floating dtype so integer-valued observations cannot fail during centering.
+The moving-controller test checks the current speed-dependent Sierra gains
+instead of incorrectly expecting equality with the retired constant 0.05 Ki. The stale 20 m
 process-noise assertion from the earlier candidate is corrected from 1.2 to the
 intended 0.2.
 
@@ -123,10 +129,27 @@ The mode releases immediately to no lower than the moving model speed once the
 stopped conditions no longer hold. This supplements, rather than replaces, the
 existing hard-braking/TTC guard and near-standstill stop-hold path.
 
-These latest changes have not yet been rerun through the full native planner
-regression or validated on-road. Unit tests were updated for launch integral
-hold, stopped-lead confirmation, rejection of creeping/unsettled cases, and
-clean release, but have not been executed in this editing session.
+The September 30 follow-up passes 107 vision-lead tests and 7 controller tests.
+A 68-segment fixed-motion replay compares gm-torque `b199f7d`, the prior adaptive
+`e1f609c`, this refinement, and logged reconstruction: 81,460 updates per variant,
+325,840 solver calls, with no solver failures or urgent-guard violations.
+
+The low-speed weak-braking counterexample at route 270 / 11, 51.54 s now requests
+-0.527 m/s² versus -0.114 before and -0.526 from gm-torque. The -0.5 m/s² crossing
+matches gm-torque. The 10.8 km/h / 7 m synthetic half-drop lag improves from 0.90 s
+to zero; the higher-speed probe half-drop timings remain unchanged. Route 288 / 8
+retains its stronger confirmed-stopped-lead approach, and the launch hold is
+unchanged. Planner policy, MPC constraints, vehicle gains, torque control and
+actuator delay are unchanged by this follow-up.
+
+Highway fluctuation RMS improves only 0.25% versus e1f609c and remains 2.83% above
+gm-torque; highway jerk RMS is 3.27% below gm-torque. Route 27c and route 289 retain
+higher fluctuation scores, and 16 stopping-flag frames still differ from gm-torque.
+Quieter release/rate alternatives were rejected because they worsened some routes
+or delayed the strong slowdown probe. This is not a clean universal regression
+pass or on-road validation: future vehicle motion and actual brake activation
+are not simulated. More negative requests at a genuine stop are intentional and
+must not be counted as phantom braking from these metrics alone.
 
 ## Vehicle parameters
 

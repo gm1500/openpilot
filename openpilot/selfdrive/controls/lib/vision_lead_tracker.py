@@ -59,7 +59,6 @@ class _DistanceTrack:
   CLOSING_RESPONSE_MARGIN = 0.35  # m/s; both range trend and model must agree the Kalman state is high
   CLOSING_RESPONSE_MAX_OFFSET = 3.0
   CLOSING_RESPONSE_RATE = 2.5  # m/s per second; published correction is bounded and causal
-  CLOSING_RESPONSE_BASE_NOISE = 0.1  # restore at most the previous nominal Kalman responsiveness
   STOP_HOLD_EGO_MAX = 5.0
   STOP_HOLD_DISTANCE = 10.0
   STOP_HOLD_MODEL_SPEED = 1.0
@@ -89,7 +88,6 @@ class _DistanceTrack:
     self.range_history = deque([(timestamp, observation.distance, observation.probability, ego)])
     self.pre_closing_offset = 0.0
     self.closing_response_offset = 0.0
-    self.response_boost = 1.0
     self.stopped_lead_time = 0.0
 
   def reset_output(self) -> None:
@@ -102,7 +100,6 @@ class _DistanceTrack:
     self.range_active = False
     self.pre_closing_offset = 0.0
     self.closing_response_offset = 0.0
-    self.response_boost = 1.0
     self.stopped_lead_time = 0.0
 
   @property
@@ -153,7 +150,7 @@ class _DistanceTrack:
     if closing > 0.0:
       # Keep the existing TTC response as an additional conservative boost.
       factor = max(factor, float(np.interp(distance / closing, [6.0, 12.0], [2.0, 0.5])))
-    return base * factor * self.response_boost
+    return base * factor
 
   def update(self, observation: VisionLeadObservation, timestamp: float, ego: float) -> bool:
     dt = timestamp - self.time
@@ -197,8 +194,8 @@ class _DistanceTrack:
       and 0.0 <= self.x[1] < baseline and self.P[1, 1] <= 36.0
       and self.time >= self.uncertain_handoff_until and self.transition >= 1.0
     ):
-      times = np.array([point[0] - self.time for point in history])
-      distances = np.array([point[1] for point in history])
+      times = np.array([point[0] - self.time for point in history], dtype=float)
+      distances = np.array([point[1] for point in history], dtype=float)
       times -= times.mean()
       distances -= distances.mean()
       time_variance = float(times @ times)
@@ -215,11 +212,10 @@ class _DistanceTrack:
 
   def closing_response_target(self, target: float, baseline: float, observation: VisionLeadObservation) -> float:
     # Keep the quiet distance-dependent Kalman schedule during steady following.
-    # Only accelerate a lagging state when two independent cues agree for a
+    # Only accelerate a lagging state when two corroborating cues agree for a
     # sustained window: the model velocity is lower and the causal dRel trend,
     # including its 2-sigma upper bound, also implies a lower lead speed.
     desired_offset = 0.0
-    desired_boost = 1.0
     history = self.range_history
     if (
       self.ready and len(history) >= 7
@@ -228,9 +224,9 @@ class _DistanceTrack:
       and self.time >= self.uncertain_handoff_until and self.transition >= 1.0
       and baseline < target - self.CLOSING_RESPONSE_MARGIN
     ):
-      times = np.array([point[0] - self.time for point in history])
-      distances = np.array([point[1] for point in history])
-      egos = np.array([point[3] for point in history])
+      times = np.array([point[0] - self.time for point in history], dtype=float)
+      distances = np.array([point[1] for point in history], dtype=float)
+      egos = np.array([point[3] for point in history], dtype=float)
       times -= times.mean()
       distances -= distances.mean()
       time_variance = float(times @ times)
@@ -244,13 +240,10 @@ class _DistanceTrack:
         if range_speed_upper < target - self.CLOSING_RESPONSE_MARGIN:
           conservative_target = max(0.0, baseline, range_speed_upper)
           desired_offset = min(self.CLOSING_RESPONSE_MAX_OFFSET, max(target - conservative_target, 0.0))
-          base_noise = float(np.interp(observation.distance, ACCEL_NOISE_BP, ACCEL_NOISE_V))
-          desired_boost = max(1.0, min(self.CLOSING_RESPONSE_BASE_NOISE / max(base_noise, 1e-3), 5.0))
 
     step = self.CLOSING_RESPONSE_RATE * self.dt
     self.closing_response_offset += float(np.clip(desired_offset - self.closing_response_offset, -step, step))
     self.closing_response_offset = min(self.closing_response_offset, max(target - baseline, 0.0))
-    self.response_boost = desired_boost
     return max(0.0, target - self.closing_response_offset)
 
   def filtered_range(self, raw_distance: float, speed: float, ego: float, active: bool) -> float:
@@ -276,7 +269,6 @@ class _DistanceTrack:
       if self.pre_closing_offset > 0.0:
         mode = 'pre-closing'
       self.closing_response_offset = 0.0
-      self.response_boost = 1.0
     else:
       self.pre_closing_offset = 0.0
 
@@ -284,8 +276,9 @@ class _DistanceTrack:
     closing_time = 8.0 if self.time < self.uncertain_handoff_until else 5.0
     urgent = min(lead['aLeadK'] for lead in leads) < -0.5 or (closing > 0.0 and min(lead['dRel'] for lead in leads) < closing_time * closing)
     stop_hold = (
-      use_distance and ego < self.STOP_HOLD_EGO_MAX and observation.distance < self.STOP_HOLD_DISTANCE
-      and baseline < self.STOP_HOLD_MODEL_SPEED
+      use_distance and ego < self.STOP_HOLD_EGO_MAX
+      and ((observation.distance < self.STOP_HOLD_DISTANCE and baseline < self.STOP_HOLD_MODEL_SPEED)
+           or baseline < ego - self.CLOSING_RESPONSE_MARGIN)
     )
     stopped_candidate = (
       use_distance and observation.probability >= self.CLOSING_RESPONSE_MIN_PROB
@@ -310,22 +303,19 @@ class _DistanceTrack:
       self.transition_from, self.transition = 0.0, 1.0
       self.pre_closing_offset = 0.0
       self.closing_response_offset = 0.0
-      self.response_boost = 1.0
     elif urgent or recovering:
       target = min(target, baseline)
       mode = 'braking'
       self.transition_from, self.transition = 0.0, 1.0
       self.pre_closing_offset = 0.0
       self.closing_response_offset = 0.0
-      self.response_boost = 1.0
     elif stop_hold:
-      # Preserve the baseline near-stop/launch semantics while continuing to
-      # learn the distance-derived state privately.
+      # Preserve stop/launch semantics and prevent an optimistic range state
+      # from weakening low-speed closing. Keep learning the state privately.
       target = min(target, baseline)
       mode = 'stop-hold'
       self.transition_from, self.transition = 0.0, 1.0
       self.closing_response_offset = 0.0
-      self.response_boost = 1.0
     elif use_distance:
       target = self.closing_response_target(target, baseline, observation)
     if mode in ('braking', 'pre-closing', 'stop-hold', 'stopped-lead') or (not use_distance and (not self.output_active or self.mode == 'pre-closing')):

@@ -62,15 +62,18 @@ class TestGMLongControl(unittest.TestCase):
     self.assertLess(abs(after[-1, 1] - .5), abs(before[-1, 1] - .5))
     self.assertTrue(np.all((after[:, 0] > 0.) & (after[:, 0] < 1.)))
 
-  def test_high_speed_gain_preserves_identical_controller_response(self):
-    before, after = self.controller(True), self.controller()
-    before.pid.i = after.pid.i = .08
-    for speed in [5., 10., 25., 40.]:
+  def test_moving_pid_preserves_configured_speed_dependent_feedback(self):
+    # Compare against the current Sierra gains, not the superseded constant Ki.
+    for speed, gain in [(5., .02), (10., .005), (15., .005), (25., .0025), (40., .0025)]:
       for target in [-1., -.2, 0., .5]:
+        controller = self.controller()
+        controller.pid.i = integral = .08
         state = self.car(speed, target + .2)
         for _ in range(50):
-          self.assertEqual(before.update(True, state, target, False, (-4., 2.)),
-                           after.update(True, state, target, False, (-4., 2.)))
+          integral += gain * (target - state.aEgo) * .01
+          self.assertAlmostEqual(controller.update(True, state, target, False, (-4., 2.)),
+                                 target + integral, places=8)
+          self.assertEqual(controller.launch_integrator_hold, 0.0)
 
   def test_gain_blend_does_not_introduce_a_command_step(self):
     for speed in [2., 5.]:
