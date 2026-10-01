@@ -4,7 +4,7 @@ Based on commaai/openpilot master `c8fb906815530460ed156f14e09e1f312bb0f851`.
 This includes upstream's **Super Leicht** driver-monitoring model and its
 current model-loading, hardware and vehicle-support changes.
 
-The custom history is grouped into five commits: **Nudgeless**, **Lane centering
+The base custom history is grouped into five commits: **Nudgeless**, **Lane centering
 policy**, **Lead distance velocity**, **Sierra Tune**, and a separate moving-Ki
 experiment. Earlier experimental documentation and custom test files are not
 carried into this branch. Upstream tests remain available.
@@ -106,3 +106,42 @@ invalid lane-input fallback are checked separately.
 
 These are offline checks. A full device boot, comma 4 display rendering and
 closed-loop road behavior have not been validated here.
+
+## Positive cruise propulsion POC
+
+Branch `boat-anchor-torque90-poc` adds one isolated experiment on this baseline.
+It retains the lower boat-anchor Ki table above; it does not include the doubled
+Ki experiment or the withdrawn pitch compensation POC. Planner, lead estimation,
+lane centering, nudgeless, actuator delay and physical vehicle parameters are
+unchanged.
+
+For the Sierra/Silverado fingerprint, positive propulsion torque is unchanged
+through 30 km/h, reduced linearly from 0% to 10% over 30–40 km/h, and reduced 10%
+at 40 km/h and above. The reduction applies to the limited torque request before
+integer CAN rounding, after the original gas/brake decision. Negative torque,
+friction-brake requests, stopping mode and disengaged commands retain baseline
+behavior. Other fingerprints are unchanged. A negative requested acceleration
+can still require positive propulsion against road load; the torque sign, not
+the acceleration sign, determines eligibility.
+
+Offline regression checks pass 15,552 boundary/saturation/state cases across
+18 GM fingerprints, including 14,688 cases on other fingerprints. Brake requests
+and CAN messages other than the eligible gas request remain identical. Route 28e
+segments 4–12 replay 53,798 controller cycles; 10,484 positive transmission slots
+after the known integrator reset show the intended 10% reduction within integer
+rounding. Mean reduction is 36.34 Nm. Every brake request matches the lower-Ki
+baseline on the same inputs. The baseline replay reproduces the previously
+validated lower-Ki trace exactly.
+
+Route 28d segments 1–2 replay 11,956 cycles. All brake requests match the baseline;
+gas and brake requests in the stopped-lead braking approach and standstill-fault
+window also match. This does not establish a counterfactual stopping distance or
+repair the separate, unresolved standstill cruise fault.
+
+These comparisons hold the measured trajectory and planner requests fixed.
+They verify the intended command change, not fewer brake pulses or improved
+closed-loop behavior. During the 10 seconds before the route 28e bookmark, the
+mean torque reduction is 34.97 Nm, equivalent to about 0.0323 m/s² under the
+existing torque model. This is a model projection, not measured acceleration
+with the new tune. Actual driving around 40 km/h is not covered by route 28e;
+the blend boundaries are checked by the offline controller grid.
