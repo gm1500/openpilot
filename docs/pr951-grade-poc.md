@@ -1,6 +1,27 @@
 # PR 951 grade compensation POC
 
-This experimental branch adds the missing direct grade input to the Sierra /
+## Withdrawn after the stopped-lead incident
+
+The pitch-compensation experiment has been reverted. The current branch pins
+OpenDBC `e0a5a21aadd48195ca8d3afc9b776e4177b27d3c`; its source tree is identical to
+the `boat-anchor` dependency at `6151ef3de18e0813ede7a83b9c5a3dc91edccc71`.
+Planner, lead estimation, Ki, lane centering and nudgeless retain the base behavior.
+
+Replay of the reported incident exactly reproduced 2,795 analyzed gas/brake
+transmission pairs. Positive measured pitch reduced approach braking by up to
+31 command units (approximately 0.31 m/s² in the lookup). Removing that input
+restores the prior brake mapping; it does not prove a different stopping outcome.
+
+A separate cruise fault appeared in the vehicle's raw status while stationary
+and was only surfaced by the existing car-state logic after movement began.
+Grade compensation was zero in that interval and both controller versions
+produce identical outputs there. That standstill fault remains unresolved.
+The earlier offline plant did not model ECU acceptance or validate on-road stops.
+This branch is withdrawn as a driving experiment, not promoted as a verified fix.
+
+## Historical experiment and results
+
+The original experimental commit added the missing direct grade input to the Sierra /
 Silverado torque conversion. It is based on `boat-anchor` at
 `b1fc9dbabad49c38e0aef012e21e8995316f5380` and pins OpenDBC
 `17dfd16fd469e6b4995dd50ecd0a5540d25f55d9`, based on
