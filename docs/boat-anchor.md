@@ -145,3 +145,34 @@ mean torque reduction is 34.97 Nm, equivalent to about 0.0323 m/s² under the
 existing torque model. This is a model projection, not measured acceleration
 with the new tune. Actual driving around 40 km/h is not covered by route 28e;
 the blend boundaries are checked by the offline controller grid.
+
+## Softer positive acceleration POC
+
+Branch `boat-anchor-soft-accel-poc` builds on `boat-anchor-torque90-poc`.
+It reduces the Sierra/Silverado positive acceleration component of wheel torque
+by 30% at 40 km/h and above, blending from no additional reduction at 30 km/h.
+This removes `reduction * wheelRadius * mass * positive acceleration` after
+the original brake decision and before torque limiting. The existing 10%
+positive-torque scale remains. This is not a uniform 30% cut in total propulsion:
+the current contribution for drag and rolling resistance is retained.
+
+At 40 km/h, a +0.2 m/s² request changes from 264 to 206 Nm after rounding;
+a zero-acceleration request remains 69 Nm. Nonpositive acceleration, stopping,
+disengaged commands and speeds through 30 km/h retain the current mapping.
+The planner, lead estimator, Ki, actuator delay, physical vehicle parameters,
+lane centering and nudgeless behavior are unchanged. Other fingerprints are
+unchanged. This POC adds no new control state or filter.
+
+Offline regression passes 31,104 controller cases across 18 GM fingerprints,
+including 29,376 cases on other fingerprints. Brake requests and all CAN messages
+except eligible gas commands remain identical. The speed-blend endpoints and
+acceleration-zero crossover are continuous within integer command rounding.
+Route 28f segments 9–18 replay 59,777 controller cycles and match the previously
+plotted candidate exactly. The baseline matches all 14,942 checked recorded
+gas/brake transmission pairs. The bookmark's peak torque changes from 1,007 to
+790 Nm; every friction-brake request remains identical on the recorded inputs.
+
+These are fixed-input command checks, not closed-loop validation. They do not
+establish fewer brake events, improved speed holding or unchanged stopping
+distance. The uploaded route contains no 40 km/h driving; that speed is covered
+only by the controller grid. The previously noted standstill fault is unresolved.
