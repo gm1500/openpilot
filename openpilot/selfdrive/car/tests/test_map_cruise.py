@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from opendbc.car.structs import car
 from openpilot.selfdrive.car.cruise import VCruiseHelper, ButtonType, IMPERIAL_INCREMENT
-from openpilot.selfdrive.car.map_cruise import read_map_speed
+from openpilot.selfdrive.car.map_cruise import read_map_speed, read_map_display
 
 
 class TestMapCruise(unittest.TestCase):
@@ -226,6 +226,29 @@ class TestMapCruise(unittest.TestCase):
     self.assertIsNone(read_map_speed(sm, 104.)[0])
     self.assertAlmostEqual(read_map_speed(sm, 104., replay=True)[0], 50 / 3.6)
     self.assertIsNone(read_map_speed(sm, 105., replay=True)[0])
+
+  def test_held_sign_is_display_only_and_expires(self):
+    from openpilot.cereal import log
+    class SM(dict):
+      pass
+    event = log.Event.new_message(valid=False, logMonoTime=int(101e9))
+    msg = event.init('mapSpeedLimit')
+    msg.displayValid = True
+    msg.displaySpeedLimit = 110 / 3.6
+    msg.displayGpsMonoTime = int(100e9)
+    msg.gpsMonoTime = int(101e9)
+    msg.headingValid = True
+    msg.speedLimit = 110 / 3.6
+    with log.Event.from_bytes(event.to_bytes()) as decoded:
+      sm = SM(mapSpeedLimit=decoded.mapSpeedLimit)
+      sm.valid = {'mapSpeedLimit': decoded.valid}
+      sm.logMonoTime = {'mapSpeedLimit': decoded.logMonoTime}
+      sm.recv_time = {'mapSpeedLimit': 101.}
+      self.assertAlmostEqual(read_map_display(sm, 101.), 110 / 3.6, places=5)
+      self.assertIsNone(read_map_speed(sm, 101.)[0])
+      sm.logMonoTime['mapSpeedLimit'] = int(102.1e9)
+      sm.recv_time['mapSpeedLimit'] = 102.1
+      self.assertIsNone(read_map_display(sm, 102.1))  # a new packet cannot prolong old display data
 
 
 if __name__ == '__main__':

@@ -25,6 +25,17 @@ def read_map_speed(sm, now: float, require_heading: bool = True, replay: bool = 
   return (msg.speedLimit if valid else None), stamp
 
 
+def read_map_display(sm, now: float) -> float | None:
+  """Advisory display has independent validity; Event.valid is for control only."""
+  msg = sm['mapSpeedLimit']
+  valid = (msg.displayValid and 0 < msg.displayGpsMonoTime * 1e-9 <= now and
+           now - msg.displayGpsMonoTime * 1e-9 <= 2.0 and
+           0 <= now - sm.logMonoTime['mapSpeedLimit'] * 1e-9 <= MAP_MESSAGE_MAX_AGE and
+           0 <= now - sm.recv_time['mapSpeedLimit'] <= MAP_MESSAGE_MAX_AGE and
+           math.isfinite(msg.displaySpeedLimit) and 0 < msg.displaySpeedLimit <= 300 / 3.6)
+  return msg.displaySpeedLimit if valid else None
+
+
 class MapCruise:
   def __init__(self, CP):
     self.supported = map_cruise_supported(CP)

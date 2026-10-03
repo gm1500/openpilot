@@ -90,13 +90,11 @@ class TestOSMSpeedLimit(unittest.TestCase):
     internal.horizontalAccuracy = 25.
     self.assertIsNone(osm.gps_fix(sm, 10, 101.))
 
-  def test_matched_fix_and_stale_distant_offroad_results(self):
+  def test_display_clears_stale_distant_and_offroad_results(self):
     service = osm.OSMSpeedLimit()
     service._thread = Mock()
     service._result = (self.fix, 40 / 3.6)
-    matched_fix, speed = service.update(replace(self.fix, timestamp=101.), 101.)
-    self.assertAlmostEqual(speed, 40 / 3.6)
-    self.assertEqual(matched_fix.timestamp, 100.)  # retain the matched fix's age, not the newest input's age
+    self.assertAlmostEqual(service.update(self.fix, 101.), 40 / 3.6)
     self.assertIsNone(service.update(self.fix, 104.))
     self.assertIsNone(service.update(replace(self.fix, latitude=.001), 101.))
     self.assertIsNone(service.update(replace(self.fix, bearing=180), 101.))
@@ -107,6 +105,96 @@ class TestOSMSpeedLimit(unittest.TestCase):
     r = osm.Road(((0., 179.999), (0., -179.999)), {"maxspeed": "40"})
     fix = replace(self.fix, longitude=180., bearing=90.)
     self.assertAlmostEqual(osm.match_speed((r,), fix), 40 / 3.6)
+
+  def test_highway_gps_step_holds_until_new_match_without_extending_age(self):
+    service = osm.OSMSpeedLimit()
+    service._thread = Mock()
+    service._result = (self.fix, 110 / 3.6)
+    self.assertAlmostEqual(service.update(self.fix, 100.), 110 / 3.6)
+    service._wake.clear()
+    moved = replace(self.fix, latitude=math.degrees(31 / osm.EARTH_RADIUS), timestamp=101.)
+    self.assertAlmostEqual(service.update(moved, 101.), 110 / 3.6)
+    self.assertTrue(service._wake.is_set())  # new fix wakes the matcher immediately
+    service._result = (moved, None)
+    self.assertAlmostEqual(service.update(moved, 101.8), 110 / 3.6)
+    self.assertIsNone(service.update(replace(moved, timestamp=102.1), 102.1))
+
+  def test_confirmed_limit_change_is_immediate(self):
+    service = osm.OSMSpeedLimit()
+    service._thread = Mock()
+    service._result = (self.fix, 110 / 3.6)
+    service.update(self.fix, 100.)
+    moved = replace(self.fix, timestamp=101.)
+    service._result = (moved, 60 / 3.6)
+    self.assertAlmostEqual(service.update(moved, 101.), 60 / 3.6)
+
+  def test_display_hold_is_not_a_confirmed_control_sample(self):
+    service = osm.OSMSpeedLimit()
+    service._thread = Mock()
+    service._result = (self.fix, 110 / 3.6)
+    service.update(self.fix, 100.)
+    moved = replace(self.fix, latitude=math.degrees(31 / osm.EARTH_RADIUS), timestamp=101.)
+    self.assertAlmostEqual(service.update(moved, 101.), 110 / 3.6)
+    self.assertEqual(service.control_sample[0].timestamp, 100.)  # never restamp an older match
+    self.assertAlmostEqual(service.update(moved, 101.4), 110 / 3.6)
+    self.assertIsNone(service.control_sample)  # 0.3 s processing grace has expired
+    service._result = (moved, None)  # fresh but ambiguous match, with sign still held
+    self.assertAlmostEqual(service.update(moved, 101.5), 110 / 3.6)
+    self.assertIsNone(service.control_sample[1])
+    self.assertEqual(service.display_timestamp, 100.)
+    self.assertIsNone(service.update(None, 101.6))
+    self.assertIsNone(service.control_sample)
+
+  def test_control_handoff_rejects_turns_and_position_jumps(self):
+    for moved in (replace(self.fix, bearing=21, timestamp=101.), replace(self.fix, latitude=.001, timestamp=101.)):
+      service = osm.OSMSpeedLimit()
+      service._thread = Mock()
+      service._result = (self.fix, 110 / 3.6)
+      service.update(self.fix, 100.)
+      service.update(moved, 101.)
+      self.assertIsNone(service.control_sample)
+
+  def test_hold_clears_on_turn_jump_invalid_fix_and_offroad(self):
+    for fix, now in ((replace(self.fix, bearing=21, timestamp=101.), 101.),
+                     (replace(self.fix, latitude=.001, timestamp=101.), 101.),
+                     (self.fix, 104.), (None, 101.)):
+      service = osm.OSMSpeedLimit()
+      service._thread = Mock()
+      service._result = (self.fix, 110 / 3.6)
+      service.update(self.fix, 100.)
+      self.assertIsNone(service.update(fix, now))
+      self.assertIsNone(service._display)
+
+  def test_ramp_continuity_requires_the_established_closer_aligned_road(self):
+    main = road('110', tags={'highway': 'motorway'})
+    ramp = road('80', x=12., tags={'highway': 'motorway_link'})
+    fix = replace(self.fix, accuracy=15.)
+    self.assertIsNone(osm.match_speed((main, ramp), fix))  # no prior road: keep strict ambiguity
+    self.assertAlmostEqual(osm.match_road((main, ramp), fix, main).speed, 110 / 3.6)
+    self.assertIsNone(osm.match_road((main, ramp), fix, ramp))  # cannot stick to the farther road
+    on_ramp = replace(fix, longitude=math.degrees(11 / osm.EARTH_RADIUS))
+    self.assertIsNone(osm.match_road((main, ramp), on_ramp, main))
+    self.assertIsNone(osm.match_road((main, ramp), replace(fix, bearing=16), main))
+    self.assertIsNone(osm.match_road((main, road('80', x=2.)), fix, main))
+    self.assertIsNone(osm.match_road((main, ramp), replace(fix, bearing=None), main))
+    self.assertIsNone(osm.match_road((road(None), ramp), fix, road(None)))
+
+  def test_continuity_crosses_connected_way_split_but_not_unrelated_roads(self):
+    before = osm.Road(((-.001, 0.), (0., 0.)), {'highway': 'motorway', 'maxspeed': '110'})
+    after = osm.Road(((0., 0.), (.001, 0.)), dict(before.tags))
+    ramp = road('80', x=12., tags={'highway': 'motorway_link'})
+    fix = replace(self.fix, latitude=.0001, accuracy=15.)
+    self.assertAlmostEqual(osm.match_road((after, ramp), fix, before).speed, 110 / 3.6)
+    unrelated = road('110', x=30., tags={'highway': 'motorway'})
+    self.assertIsNone(osm.match_road((after, ramp), fix, unrelated))
+
+  def test_continuity_releases_after_taking_ramp(self):
+    main = road('110', tags={'highway': 'motorway'})
+    ramp = osm.Road(((0., 0.), (.001, .0004)), {'highway': 'motorway_link', 'maxspeed': '80'})
+    at_split = replace(self.fix, accuracy=15.)
+    self.assertIsNone(osm.match_road((main, ramp), at_split, main))
+    on_ramp = replace(at_split, latitude=.0009, longitude=.00036, bearing=math.degrees(math.atan2(.4, 1.)))
+    self.assertAlmostEqual(osm.match_road((main, ramp), on_ramp, main).speed, 80 / 3.6)
 
   def test_bounded_fetch_and_incomplete_responses(self):
     element = {"type": "way", "tags": {"highway": "residential", "maxspeed": "40"},
@@ -156,7 +244,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
       modules = {'openpilot.common.realtime': SimpleNamespace(drop_realtime=lambda: None),
                  'openpilot.common.swaglog': SimpleNamespace(cloudlog=Mock())}
       with patch.dict(sys.modules, modules), patch.object(osm, 'ThreadPoolExecutor') as pool, \
-           patch.object(osm.time, 'monotonic', side_effect=lambda clock=clock: clock[0]), patch.object(osm.time, 'sleep', side_effect=sleep):
+           patch.object(osm.time, 'monotonic', side_effect=lambda clock=clock: clock[0]), patch.object(service._wake, 'wait', side_effect=sleep):
         pool.return_value.__enter__.return_value = executor
         with self.assertRaises(StopWorker):
           service._run()

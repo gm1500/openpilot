@@ -173,7 +173,7 @@ qualify a new target. `mapCruiseState` records selection status at 5 Hz. If `map
 stops, map selection becomes unavailable while ordinary manual cruise remains
 available; existing required-process checks are unchanged for every other process.
 
-Validation: 27 offline regression tests cover parsing, road matching, GPS validity,
+Validation: 36 offline regression tests cover parsing, road matching, GPS validity,
 cache expiry, message freshness, qualification, SET/RES, long presses, gas and
 standstill behavior, mph conversion, and stock/lateral-only platform isolation.
 A further 60,000 synthetic frames matched the preceding cruise helper exactly
@@ -186,3 +186,22 @@ alert-interruption behavior checked. Lint and whitespace checks pass.
 
 These checks do not validate a full device boot, closed-loop vehicle behavior or
 map accuracy. No new route coordinates were sent to OSM during this validation.
+
+### Coast100 display-stability port
+
+The map-cruise branch includes the coast100 matcher wakeup, bounded road
+continuity near ramps, and advisory sign hold (at most two seconds / 60 m).
+Confirmed speed changes replace the sign immediately; turns, position jumps,
+invalid GPS and off-road transitions clear the hold.
+
+Display values and control samples have separate validity and original GPS
+timestamps in `mapSpeedLimit`. A held sign never becomes a fresh cruise target.
+During the short asynchronous handoff to a new GPS fix, the preceding confirmed
+sample may remain available for up to 0.3 seconds with its original timestamp,
+only within 60 m and 20 degrees. A current ambiguous result invalidates control
+data immediately. The existing two-second map qualification and SET/RES/manual
+button behavior remain unchanged. The UI also checks held-display expiry itself.
+
+The port passes 36 regressions, including display/control separation, expiry,
+ramp departure and button behavior, plus an isolated real-IPC check using 1 Hz
+synthetic GPS at highway speed. This is offline validation, not a driving test.

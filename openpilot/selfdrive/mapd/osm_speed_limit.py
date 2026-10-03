@@ -1,4 +1,4 @@
-"""Conservative OSM matching and bounded background fetching."""
+"""OSM matching with separate confirmed samples and bounded advisory display holds."""
 import json
 import math
 import re
@@ -15,6 +15,8 @@ QUERY_RADIUS = 1500.0  # metres; prefetch again after travelling 700 m
 QUERY_INTERVAL = 30.0
 CACHE_TTL = 600.0
 GPS_MAX_AGE = 3.0
+DISPLAY_HOLD_SECONDS = 2.0  # Advisory display only; never a fresh control target
+DISPLAY_HOLD_METRES = 60.0
 QCOM_UNKNOWN_ACCURACY = 15.0  # Matching allowance, not a measured GPS uncertainty
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ROAD_TYPES = ("motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street", "service", "road",
@@ -40,6 +42,14 @@ class Road:
   def __post_init__(self):
     latitudes, longitudes = zip(*self.geometry, strict=True)
     object.__setattr__(self, "bounds", (min(latitudes), max(latitudes), min(longitudes), max(longitudes)))
+
+
+@dataclass(frozen=True)
+class RoadMatch:
+  road: Road
+  distance: float
+  speed: float | None
+  heading_error: float | None
 
 
 def gps_fix(sm, started_frame: int, now: float) -> GpsFix | None:
@@ -96,6 +106,11 @@ def road_speed(tags: dict[str, str], forward: bool | None) -> float | None:
 
 
 def match_speed(roads: tuple[Road, ...], fix: GpsFix) -> float | None:
+  match = match_road(roads, fix)
+  return match.speed if match is not None else None
+
+
+def match_road(roads: tuple[Road, ...], fix: GpsFix, previous: Road | None = None) -> RoadMatch | None:
   candidates = []
   latitude_margin = math.degrees(25 / EARTH_RADIUS)
   longitude_margin = latitude_margin / math.cos(math.radians(fix.latitude))
@@ -118,26 +133,37 @@ def match_speed(roads: tuple[Road, ...], fix: GpsFix) -> float | None:
       if distance > 25:
         continue
       forward = None
+      heading_error = None
       if fix.bearing is not None:
         heading = math.degrees(math.atan2(dx, dy)) % 360
         delta = abs((heading - fix.bearing + 180) % 360 - 180)
+        heading_error = min(delta, 180 - delta)
         forward = delta <= 90
         oneway = road.tags.get("oneway", "yes" if road.tags.get("junction") == "roundabout" else "no")
         if min(delta, 180 - delta) > 40 or (oneway in ("yes", "1", "true") and not forward) or (oneway == "-1" and forward):
           continue
-      if nearest is None or distance < nearest[0]:
-        nearest = (distance, road_speed(road.tags, forward))
+      if nearest is None or distance < nearest.distance:
+        nearest = RoadMatch(road, distance, road_speed(road.tags, forward), heading_error)
     if nearest is not None:
       candidates.append(nearest)
   if not candidates:
     return None
-  candidates.sort(key=lambda candidate: candidate[0])
-  distance, speed = candidates[0]
+  candidates.sort(key=lambda candidate: candidate.distance)
+  best = candidates[0]
   # Include untagged roads: never borrow a nearby road's limit when ours is unknown.
   ambiguity_margin = max(6., fix.accuracy * 2)
-  if any(other_speed != speed and other_distance <= distance + ambiguity_margin for other_distance, other_speed in candidates[1:]):
-    return None
-  return speed
+  conflicts = [c for c in candidates[1:] if c.speed != best.speed and c.distance <= best.distance + ambiguity_margin]
+  if conflicts:
+    # A nearby ramp must not blank a well-aligned, established main-road match.
+    # Permit directly connected pieces of the same road class, since OSM ways
+    # commonly split at junctions. Do not prefer highway class alone.
+    continuous = previous is not None and (best.road == previous or (
+      best.road.tags.get('highway') == previous.tags.get('highway') and
+      any(point in (previous.geometry[0], previous.geometry[-1]) for point in (best.road.geometry[0], best.road.geometry[-1]))))
+    if not (continuous and best.speed is not None and best.distance <= 8 and best.heading_error is not None and best.heading_error <= 15 and
+            all(c.distance >= best.distance + 3 for c in conflicts)):
+      return None
+  return best
 
 
 def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
@@ -179,24 +205,59 @@ class OSMSpeedLimit:
     self._fix: GpsFix | None = None
     self._result: tuple[GpsFix, float | None] | None = None
     self._thread: threading.Thread | None = None
+    self._wake = threading.Event()
+    self._display: tuple[GpsFix, float] | None = None
+    self.control_sample: tuple[GpsFix, float | None] | None = None
+    self._fix_received_at = 0.
 
-  def update(self, fix: GpsFix | None, now: float) -> tuple[GpsFix, float | None] | None:
+  @property
+  def display_timestamp(self) -> float:
+    return self._display[0].timestamp if self._display is not None else 0.
+
+  def update(self, fix: GpsFix | None, now: float) -> float | None:
     with self._lock:
+      changed = fix != self._fix
       self._fix = fix
       if fix is None:
         self._result = None
       result = self._result
-    # Start only after the process has forked, with a valid fix.
+    if changed:
+      self._fix_received_at = now
+      self._wake.set()
+    self.control_sample = None
+    # Start only after the process has forked, on-road with a valid fix.
     if fix is not None and (self._thread is None or not self._thread.is_alive()):
       self._thread = threading.Thread(target=self._run, name="osm-speed-limit", daemon=True)
       self._thread.start()
-    if fix is None or result is None or not 0 <= now - result[0].timestamp <= GPS_MAX_AGE:
+    if fix is None or not 0 <= now - fix.timestamp <= GPS_MAX_AGE:
+      self._display = None
       return None
-    if math.hypot(*offset_metres(fix.latitude, fix.longitude, result[0])) > 20:
-      return None
-    if fix.bearing is not None and result[0].bearing is not None and abs((fix.bearing - result[0].bearing + 180) % 360 - 180) > 40:
-      return None
-    return result
+    if result is not None and result[0] == fix:
+      self.control_sample = result
+    elif result is not None and 0 <= now - self._fix_received_at <= 0.3 and 0 <= now - result[0].timestamp <= GPS_MAX_AGE:
+      # A short asynchronous handoff may retain the PREVIOUS confirmed sample,
+      # with its original GPS timestamp. A current ambiguous result never qualifies.
+      last_fix = result[0]
+      if (fix.bearing is not None and last_fix.bearing is not None and
+          abs((fix.bearing - last_fix.bearing + 180) % 360 - 180) <= 20 and
+          math.hypot(*offset_metres(fix.latitude, fix.longitude, last_fix)) <= DISPLAY_HOLD_METRES):
+        self.control_sample = result
+    if result is not None and result[1] is not None and result[0] == fix:
+      self._display = result
+      return result[1]
+    # New 1 Hz GPS fixes can be 30 m apart at highway speed. Retain the previous
+    # confirmed sign while matching catches up or briefly becomes ambiguous.
+    # Keep its original GPS timestamp: polling must never extend the hold.
+    if self._display is not None:
+      last_fix, speed = self._display
+      distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, last_fix))
+      same_heading = (fix.bearing is not None and last_fix.bearing is not None and
+                      abs((fix.bearing - last_fix.bearing + 180) % 360 - 180) <= 20)
+      stationary = fix.bearing is None and last_fix.bearing is None and distance <= 5
+      if 0 <= now - last_fix.timestamp <= DISPLAY_HOLD_SECONDS and distance <= DISPLAY_HOLD_METRES and (same_heading or stationary):
+        return speed
+    self._display = None
+    return None
 
   def _run(self):
     from openpilot.common.realtime import drop_realtime
@@ -209,6 +270,8 @@ class OSMSpeedLimit:
     retry_interval = QUERY_INTERVAL
     pending = None
     query_fix = None
+    previous_road = None
+    previous_time = -math.inf
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="osm-fetch") as executor:
       while True:
         now = time.monotonic()
@@ -228,11 +291,19 @@ class OSMSpeedLimit:
         if fix is not None and 0 <= now - fix.timestamp <= GPS_MAX_AGE:
           distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, centre)) if centre is not None else math.inf
           cache_fresh = now - fetched_at < CACHE_TTL
-          speed = match_speed(roads, fix) if cache_fresh and distance < QUERY_RADIUS - 50 else None
+          if not 0 <= fix.timestamp - previous_time <= GPS_MAX_AGE:
+            previous_road = None
+          match = match_road(roads, fix, previous_road) if cache_fresh and distance < QUERY_RADIUS - 50 else None
+          speed = match.speed if match is not None else None
+          if speed is not None:
+            previous_road, previous_time = match.road, fix.timestamp
           with self._lock:
             self._result = (fix, speed)
           if pending is None and now >= next_query and (distance >= 700 or not cache_fresh):
             query_fix = fix
             pending = executor.submit(fetch_roads, fix)
             next_query = now + QUERY_INTERVAL
-        time.sleep(0.2)
+        else:
+          previous_road = None
+        self._wake.wait(0.2)
+        self._wake.clear()

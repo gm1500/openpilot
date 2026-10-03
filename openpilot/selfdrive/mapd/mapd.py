@@ -14,7 +14,8 @@ def main():
   while True:
     sm.update(0)
     now = time.monotonic()
-    sample = provider.update(gps_fix(sm, 1, now), now)
+    display_limit = provider.update(gps_fix(sm, 1, now), now)
+    sample = provider.control_sample
     msg = messaging.new_message('mapSpeedLimit')
     msg.valid = sample is not None and sample[1] is not None
     if sample is not None:
@@ -22,6 +23,9 @@ def main():
       msg.mapSpeedLimit.speedLimit = limit or 0.
       msg.mapSpeedLimit.gpsMonoTime = int(fix.timestamp * 1e9)
       msg.mapSpeedLimit.headingValid = fix.bearing is not None
+    msg.mapSpeedLimit.displayValid = display_limit is not None
+    msg.mapSpeedLimit.displaySpeedLimit = display_limit or 0.
+    msg.mapSpeedLimit.displayGpsMonoTime = int(provider.display_timestamp * 1e9)
     pm.send('mapSpeedLimit', msg)
     rk.keep_time()
 

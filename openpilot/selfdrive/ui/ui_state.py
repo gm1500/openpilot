@@ -10,7 +10,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import drop_realtime
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.lib.prime_state import PrimeState
-from openpilot.selfdrive.car.map_cruise import map_cruise_supported, read_map_speed, MAP_MESSAGE_MAX_AGE
+from openpilot.selfdrive.car.map_cruise import map_cruise_supported, read_map_display, MAP_MESSAGE_MAX_AGE
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.hardware import HARDWARE, PC
 from openpilot.common.hardware.usb import cable_connected, get_usb_state, is_chestnut_usb_id
@@ -161,7 +161,7 @@ class UIState:
     self.sm.update(0)
     self._update_state()
     now = time.monotonic()
-    self.speed_limit, _ = read_map_speed(self.sm, now, require_heading=False)
+    self.speed_limit = read_map_display(self.sm, now)
     if not self.started or self.sm.recv_frame['mapSpeedLimit'] < self.started_frame:
       self.speed_limit = None
     self.map_cruise_state = "waiting"
