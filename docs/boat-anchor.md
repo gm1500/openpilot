@@ -104,5 +104,37 @@ controller's actuator outputs and CAN messages on 6,048 GM grid cases.
 Native parameter registration, selector toggles, shared status colors and
 invalid lane-input fallback are checked separately.
 
-These are offline checks. A full device boot, comma 4 display rendering and
-closed-loop road behavior have not been validated here.
+These are offline checks. A full device boot and closed-loop road behavior
+have not been validated here.
+
+## OSM speed-limit display
+
+The coast100 branch shows an OpenStreetMap speed-limit sign in the cruise HUD,
+with the actual `SET` cruise speed directly below the sign. Both comma 3/3X and
+comma 4 layouts support km/h and mph. On comma 4 the driver-monitoring icon
+sits beside the sign, and alerts take priority over it.
+
+This is display-only: it does not set cruise speed, modify planner policy or
+change the coast100 torque tune, Ki, lead handling or lane policy.
+
+An internet connection is needed to fetch nearby road geometry and speed tags
+from `https://overpass-api.de/api/interpreter`. Queries send the current GPS
+coordinates, without device identifiers or route history. Requests run in the
+background, at most once every 30 seconds, with backoff on failure. A small
+in-memory map cache covers 1.5 km around each query and expires after 10 minutes.
+There is no offline map download or route upload.
+
+The sign shows a dash when GPS is stale or inaccurate, the cached area is no
+longer usable, the road match is ambiguous, or the road has no supported numeric
+limit. Directional limits are supported. Conditional, variable, lane-specific
+and vehicle-specific limits are left unknown rather than guessing. Road signs
+and temporary restrictions can differ from the map; the display is advisory.
+
+Map data: (c) [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
+available under the [Open Database License](https://opendatacommons.org/licenses/odbl/).
+
+Validation: 10 offline tests cover parsing, road matching, GPS validity,
+cache expiry and failure handling. The shared raylib widget was rendered at
+both device sizes with metric, imperial, three-digit and missing values.
+A public-location query verified the live Overpass response format. This
+does not validate road-limit accuracy or a full on-device UI session.

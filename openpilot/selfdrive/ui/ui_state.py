@@ -10,6 +10,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import drop_realtime
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.lib.prime_state import PrimeState
+from openpilot.selfdrive.ui.lib.osm_speed_limit import OSMSpeedLimit, gps_fix
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.hardware import HARDWARE, PC
 from openpilot.common.hardware.usb import cable_connected, get_usb_state, is_chestnut_usb_id
@@ -76,6 +77,7 @@ class UIState:
         "selfdriveState",
         "longitudinalPlan",
         "gpsLocationExternal",
+        "gpsLocation",
         "carOutput",
         "carControl",
         "vehicleParameters",
@@ -85,6 +87,8 @@ class UIState:
     )
 
     self.prime_state = PrimeState()
+    self._osm_speed_limit = OSMSpeedLimit()
+    self.speed_limit: float | None = None  # OSM m/s, for display only
 
     # UI Status tracking
     self.status: UIStatus = UIStatus.DISENGAGED
@@ -155,6 +159,9 @@ class UIState:
 
     self.sm.update(0)
     self._update_state()
+    now = time.monotonic()
+    fix = gps_fix(self.sm, self.started_frame, now) if self.started else None
+    self.speed_limit = self._osm_speed_limit.update(fix, now)
     self._update_status()
     self._update_chestnut_state()
     device.update()
