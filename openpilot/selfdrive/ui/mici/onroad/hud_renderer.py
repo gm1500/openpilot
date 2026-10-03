@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.mici.onroad.torque_bar import TorqueBar
 from openpilot.selfdrive.ui.onroad.lane_policy_icon import LanePolicyIcon
-from openpilot.selfdrive.ui.onroad.speed_limit import draw_speed_limit
+from openpilot.selfdrive.ui.onroad.speed_limit import SpeedLimitButton
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus, ChestnutState
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -114,6 +114,7 @@ class HudRenderer(Widget):
 
     self._turn_intent = TurnIntent()
     self._torque_bar = TorqueBar()
+    self._speed_limit_button = self._child(SpeedLimitButton())
     self._lane_policy_icon = self._child(LanePolicyIcon(46))
 
     self._txt_wheel: rl.Texture = gui_app.texture('icons_mici/wheel.png', 50, 50)
@@ -135,6 +136,7 @@ class HudRenderer(Widget):
   def set_can_draw_top_icons(self, can_draw_top_icons: bool):
     """Set whether to draw the top part of the HUD."""
     self._can_draw_top_icons = can_draw_top_icons
+    self._speed_limit_button.show_sign = can_draw_top_icons
 
   def drawing_top_icons(self) -> bool:
     return self._can_draw_top_icons
@@ -173,8 +175,7 @@ class HudRenderer(Widget):
 
     self._torque_bar.render(rect)
 
-    if self._can_draw_top_icons:
-      self._draw_set_speed(rect)
+    self._draw_set_speed(rect)
 
     self._draw_model_source(rect)
 
@@ -182,7 +183,7 @@ class HudRenderer(Widget):
     self._lane_policy_icon.render(rl.Rectangle(rect.x + rect.width - 94, rect.y + rect.height - 174, 82, 82))
 
   def user_interacting(self) -> bool:
-    return self._lane_policy_icon.is_pressed
+    return self._lane_policy_icon.is_pressed or self._speed_limit_button.is_pressed
 
   def _draw_model_source(self, rect: rl.Rectangle) -> None:
     if ui_state.sm.recv_frame['selfdriveState'] < ui_state.started_frame:
@@ -259,7 +260,9 @@ class HudRenderer(Widget):
     set_speed = self.set_speed * (1. if ui_state.is_metric else KM_TO_MILE) if self.is_cruise_set else None
     set_color = rl.Color(128, 216, 166, 255) if ui_state.status == UIStatus.ENGAGED else rl.WHITE
     sign = rl.Rectangle(rect.x + 16, rect.y + 12, 96, 204 * 96 / 180)
-    draw_speed_limit(sign, ui_state.speed_limit, set_speed, ui_state.is_metric, set_color)
+    self._speed_limit_button.set_speed = set_speed
+    self._speed_limit_button.set_color = set_color
+    self._speed_limit_button.render(sign)
 
   def _draw_current_speed(self, rect: rl.Rectangle) -> None:
     """Draw the current vehicle speed and unit."""

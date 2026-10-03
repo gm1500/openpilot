@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
 from openpilot.selfdrive.ui.onroad.lane_policy_icon import LanePolicyIcon
-from openpilot.selfdrive.ui.onroad.speed_limit import draw_speed_limit
+from openpilot.selfdrive.ui.onroad.speed_limit import SpeedLimitButton
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -59,6 +59,7 @@ class HudRenderer(Widget):
     self._font_medium: rl.Font = gui_app.font(FontWeight.MEDIUM)
 
     self._exp_button: ExpButton = ExpButton(UI_CONFIG.button_size, UI_CONFIG.wheel_icon_size)
+    self._speed_limit_button = self._child(SpeedLimitButton())
     self._lane_policy_icon: LanePolicyIcon = self._child(LanePolicyIcon(92))
 
   def _update_state(self) -> None:
@@ -113,14 +114,16 @@ class HudRenderer(Widget):
     self._lane_policy_icon.render(rl.Rectangle(lane_icon_x, lane_icon_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
 
   def user_interacting(self) -> bool:
-    return self._exp_button.is_pressed or self._lane_policy_icon.is_pressed
+    return self._exp_button.is_pressed or self._lane_policy_icon.is_pressed or self._speed_limit_button.is_pressed
 
   def _draw_set_speed(self, rect: rl.Rectangle) -> None:
     set_color = COLORS.GREY
     if self.is_cruise_set:
       set_color = COLORS.ENGAGED if ui_state.status == UIStatus.ENGAGED else COLORS.WHITE
     sign = rl.Rectangle(rect.x + 56, rect.y + 45, UI_CONFIG.set_speed_width, UI_CONFIG.set_speed_height)
-    draw_speed_limit(sign, ui_state.speed_limit, self.set_speed if self.is_cruise_set else None, ui_state.is_metric, set_color)
+    self._speed_limit_button.set_speed = self.set_speed if self.is_cruise_set else None
+    self._speed_limit_button.set_color = set_color
+    self._speed_limit_button.render(sign)
 
   def _draw_current_speed(self, rect: rl.Rectangle) -> None:
     """Draw the current vehicle speed and unit."""

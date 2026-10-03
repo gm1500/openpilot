@@ -10,10 +10,23 @@ $Cxx.namespace("cereal");
 # DO rename the structs
 # DON'T change the identifier (e.g. @0x81c2f05a394cf4af)
 
-struct CustomReserved0 @0x81c2f05a394cf4af {
+struct MapSpeedLimit @0x81c2f05a394cf4af {
+  speedLimit @0 :Float32;  # m/s, valid only with Event.valid
+  gpsMonoTime @1 :UInt64; # timestamp of the matched GPS fix, nanoseconds
+  headingValid @2 :Bool;
 }
 
-struct CustomReserved1 @0xaedffd8f31e7b55d {
+struct MapCruiseState @0xaedffd8f31e7b55d {
+  state @0 :State;
+  targetSpeed @1 :Float32; # qualified map target in m/s, zero if unavailable
+  enum State {
+    off @0;
+    armed @1;
+    active @2;
+    paused @3;
+    waiting @4;
+    unsupported @5;
+  }
 }
 
 struct CustomReserved2 @0xf35cc4560bbf6ec2 {

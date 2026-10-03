@@ -1,4 +1,4 @@
-"""Display-only OSM limits. Nothing in this module supplies a control target."""
+"""Conservative OSM matching and bounded background fetching."""
 import json
 import math
 import re
@@ -54,7 +54,7 @@ def gps_fix(sm, started_frame: int, now: float) -> GpsFix | None:
     accuracy = gps.horizontalAccuracy
     # qcomgpsd does not populate horizontalAccuracy. Zero means unavailable for
     # this source, not an invalid fix (or perfect accuracy). Keep the workaround
-    # local to this advisory display and use a conservative ambiguity allowance.
+    # local to this map matcher and use a conservative ambiguity allowance.
     if accuracy == 0 and source == "gpsLocation" and str(gps.source) == "qcomdiag":
       accuracy = QCOM_UNKNOWN_ACCURACY
     if not math.isfinite(accuracy) or not 0 < accuracy <= 15:
@@ -173,20 +173,20 @@ def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
 
 
 class OSMSpeedLimit:
-  """UI supplies fresh fixes; background threads handle matching and network I/O."""
+  """Caller supplies fresh fixes; background threads handle matching and network I/O."""
   def __init__(self):
     self._lock = threading.Lock()
     self._fix: GpsFix | None = None
     self._result: tuple[GpsFix, float | None] | None = None
     self._thread: threading.Thread | None = None
 
-  def update(self, fix: GpsFix | None, now: float) -> float | None:
+  def update(self, fix: GpsFix | None, now: float) -> tuple[GpsFix, float | None] | None:
     with self._lock:
       self._fix = fix
       if fix is None:
         self._result = None
       result = self._result
-    # Start only after the UI has forked, on-road with a valid fix.
+    # Start only after the process has forked, with a valid fix.
     if fix is not None and (self._thread is None or not self._thread.is_alive()):
       self._thread = threading.Thread(target=self._run, name="osm-speed-limit", daemon=True)
       self._thread.start()
@@ -196,7 +196,7 @@ class OSMSpeedLimit:
       return None
     if fix.bearing is not None and result[0].bearing is not None and abs((fix.bearing - result[0].bearing + 180) % 360 - 180) > 40:
       return None
-    return result[1]
+    return result
 
   def _run(self):
     from openpilot.common.realtime import drop_realtime

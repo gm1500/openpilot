@@ -7,7 +7,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from openpilot.selfdrive.ui.lib import osm_speed_limit as osm
+from openpilot.selfdrive.mapd import osm_speed_limit as osm
 
 
 def road(speed="40", x=0., tags=None):
@@ -90,11 +90,13 @@ class TestOSMSpeedLimit(unittest.TestCase):
     internal.horizontalAccuracy = 25.
     self.assertIsNone(osm.gps_fix(sm, 10, 101.))
 
-  def test_display_clears_stale_distant_and_offroad_results(self):
+  def test_matched_fix_and_stale_distant_offroad_results(self):
     service = osm.OSMSpeedLimit()
     service._thread = Mock()
     service._result = (self.fix, 40 / 3.6)
-    self.assertAlmostEqual(service.update(self.fix, 101.), 40 / 3.6)
+    matched_fix, speed = service.update(replace(self.fix, timestamp=101.), 101.)
+    self.assertAlmostEqual(speed, 40 / 3.6)
+    self.assertEqual(matched_fix.timestamp, 100.)  # retain the matched fix's age, not the newest input's age
     self.assertIsNone(service.update(self.fix, 104.))
     self.assertIsNone(service.update(replace(self.fix, latitude=.001), 101.))
     self.assertIsNone(service.update(replace(self.fix, bearing=180), 101.))

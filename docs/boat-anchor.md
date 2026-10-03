@@ -107,15 +107,41 @@ invalid lane-input fallback are checked separately.
 These are offline checks. A full device boot and closed-loop road behavior
 have not been validated here.
 
-## OSM speed-limit display
+## OSM speed-limit display and map cruise POC
 
 The coast100 branch shows an OpenStreetMap speed-limit sign in the cruise HUD,
 with the actual `SET` cruise speed directly below the sign. Both comma 3/3X and
 comma 4 layouts support km/h and mph. On comma 4 the driver-monitoring icon
 sits beside the sign, and alerts take priority over it.
 
-This is display-only: it does not set cruise speed, modify planner policy or
-change the coast100 torque tune, Ki, lead handling or lane policy.
+On `boat-anchor-map-cruise-poc`, tap the sign to toggle map cruise. It defaults
+on each drive, like the lane selector. The coast100 torque tune, Ki, lead handling,
+lane policy and longitudinal planner algorithms are unchanged. This feature
+changes the cruise set-speed input to the existing planner.
+
+| Action or state | Behavior |
+| --- | --- |
+| Map on / SET | Follow the current heading-matched map limit after it is stable for two seconds across fresh GPS fixes. This replaces the ordinary 40 km/h or experimental 105 km/h initialization when a qualified limit exists. Subsequent limit changes update SET automatically. |
+| RES re-engagement | Restore the previous set speed and hold it until SET is pressed again. |
+| RES/+ while already engaged | Normal speed increment, then hold that manual target until SET. Standstill RES keeps its existing launch behavior without a speed increment. |
+| Long +/- press | Keep the existing repeated 5 km/h steps (5 mph in imperial mode); pause map updates until SET. |
+| Tap off | Hold the current target and restore normal SET/RES button behavior. |
+| Tap back on | Resume automatic map selection when a qualified limit is available. |
+| Missing/stale GPS, no reliable heading or ambiguous map | Hold the existing set speed; show MAP WAIT. SET with no qualified limit arms tracking; ordinary engagement initialization remains the fallback. |
+| Accelerator override | Hold automatic target updates while pressed. SET with the accelerator pressed keeps the original current-speed floor and pauses map tracking. |
+
+Green MAP ON means tracking while engaged; MAP READY means a qualified limit is
+available before engagement. Amber MAP WAIT means no qualified target; MAP HOLD
+means the driver paused automatic updates. MAP OFF is manual cruise. The sign
+remains visible when off. Stock PCM cruise, lateral-only, passive and non-car
+platforms keep a display-only sign; this feature cannot engage cruise or launch
+the vehicle by itself.
+
+Heading compensation selects the applicable road direction and directional
+`maxspeed` tag. It is not road-grade compensation or anticipation of an upcoming
+speed zone. Limit changes are applied after matching the new zone, so this POC
+does not guarantee slowing to a lower limit before its sign. Map errors remain
+possible; the driver must monitor the actual set speed and posted restrictions.
 
 An internet connection is needed to fetch nearby road geometry and speed tags
 from `https://overpass-api.de/api/interpreter`. Queries send the current GPS
@@ -128,19 +154,35 @@ The sign shows a dash when GPS is stale or inaccurate, the cached area is no
 longer usable, the road match is ambiguous, or the road has no supported numeric
 limit. Directional limits are supported. Conditional, variable, lane-specific
 and vehicle-specific limits are left unknown rather than guessing. Road signs
-and temporary restrictions can differ from the map; the display is advisory.
+and temporary restrictions can differ from the map. Unsupported limits are not
+used as cruise targets.
 
 The internal Qualcomm GPS publisher leaves horizontal accuracy unset (zero).
-For those otherwise valid fixes only, the display uses a conservative 15 m
+For those otherwise valid fixes only, the matcher uses a conservative 15 m
 matching allowance, not a claimed accuracy measurement. Other receivers still
-require a positive reported accuracy. GPS publishing and control inputs are
-unchanged.
+require a positive reported accuracy. GPS publishing is unchanged. Active map
+selection additionally requires a valid heading and a stable limit within the existing 8–145 km/h cruise range.
 
 Map data: (c) [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
 available under the [Open Database License](https://opendatacommons.org/licenses/odbl/).
 
-Validation: 10 offline tests cover parsing, road matching, GPS validity,
-cache expiry and failure handling. The shared raylib widget was rendered at
-both device sizes with metric, imperial, three-digit and missing values.
-A public-location query verified the live Overpass response format. This
-does not validate road-limit accuracy or a full on-device UI session.
+A separate optional `mapd` process handles matching and network access, publishing
+`mapSpeedLimit` at 5 Hz. The control loop performs no network operations. It checks
+both the packet age (0.8 s) and original matched GPS age (3 s). A frozen fix cannot
+qualify a new target. `mapCruiseState` records selection status at 5 Hz. If `mapd`
+stops, map selection becomes unavailable while ordinary manual cruise remains
+available; existing required-process checks are unchanged for every other process.
+
+Validation: 27 offline regression tests cover parsing, road matching, GPS validity,
+cache expiry, message freshness, qualification, SET/RES, long presses, gas and
+standstill behavior, mph conversion, and stock/lateral-only platform isolation.
+A further 60,000 synthetic frames matched the preceding cruise helper exactly
+with map mode off or unsupported (PCM/lateral-only), in both unit systems.
+Native messaging, C++ schema generation and parameter default/reset checks pass.
+A real mapd/IPC test with synthetic GPS and a local map fixture selects 50 km/h;
+stopping mapd holds that target and reports waiting. The production raylib widget
+was rendered at both device sizes and its tap, drag-out, unsupported-platform and
+alert-interruption behavior checked. Lint and whitespace checks pass.
+
+These checks do not validate a full device boot, closed-loop vehicle behavior or
+map accuracy. No new route coordinates were sent to OSM during this validation.
