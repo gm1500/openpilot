@@ -139,8 +139,24 @@ unchanged.
 Map data: (c) [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
 available under the [Open Database License](https://opendatacommons.org/licenses/odbl/).
 
-Validation: 10 offline tests cover parsing, road matching, GPS validity,
-cache expiry and failure handling. The shared raylib widget was rendered at
+The display now bridges brief matching gaps for at most two seconds and 60 m
+from the last confirmed GPS fix. Repeated UI polling does not extend that hold.
+It clears on invalid/stale GPS, larger heading changes, large position jumps or
+off-road transitions. A confirmed new limit replaces the previous value
+immediately. New GPS fixes wake the matcher instead of waiting for its next poll.
+
+Near ramps, the matcher may retain a recently established road only when it is
+still the nearest candidate, within 8 m, aligned within 15 degrees, and at least
+3 m closer than conflicting candidates. Directly connected pieces of the same
+road class can continue the match across an OSM way split. Road class alone
+does not select the main road, and the preference expires when confirmations
+stop. Taking a ramp can still show a dash while the branch is ambiguous.
+These rules and the brief hold are advisory display behavior, not cruise targets.
+
+Validation: 16 offline tests cover parsing, GPS validity, cache expiry, failure
+handling, display handoff/expiry and ramp continuity, including actual ramp
+selection in synthetic geometry. Timing replay checks the 1 Hz GPS/20 Hz UI
+handoff with a fixed synthetic limit; it does not validate real ramp map tags. The shared raylib widget was rendered at
 both device sizes with metric, imperial, three-digit and missing values.
 A public-location query verified the live Overpass response format. This
 does not validate road-limit accuracy or a full on-device UI session.
