@@ -46,6 +46,7 @@ class MapCruise:
     self._since = 0.
     self._first_fix = 0.
     self._last_fix = 0.
+    self._last_qualified: float | None = None
 
   def update(self, enabled: bool, speed_ms: float | None, gps_time: float, now: float):
     enabled = enabled and self.supported
@@ -66,6 +67,11 @@ class MapCruise:
     # A single frozen GPS fix cannot qualify a new target merely by waiting.
     if candidate is not None and now - self._since >= MAP_STABLE_TIME and gps_time > self._first_fix:
       self.target_kph = candidate
+      if self.enabled and candidate != self._last_qualified:
+        self.tracking = True
+      # Keep this across missing/ambiguous data: recovering the SAME limit is
+      # not a new speed zone and must not undo RES or a manual adjustment.
+      self._last_qualified = candidate
 
   def state(self, engaged: bool) -> str:
     if not self.supported:

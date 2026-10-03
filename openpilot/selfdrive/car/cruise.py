@@ -89,6 +89,8 @@ class VCruiseHelper:
     for b in CS.buttonEvents:
       if b.type.raw in self.button_timers and not b.pressed:
         if self.button_timers[b.type.raw] > CRUISE_LONG_PRESS:
+          if self.map_cruise.enabled:
+            self.map_cruise.tracking = False  # the completed manual hold wins over a concurrent map change
           return  # end long press
         button_type = b.type.raw
         break
@@ -113,7 +115,7 @@ class VCruiseHelper:
 
     if self.map_cruise.enabled:
       # Short SET selects the map. RES/+ and long +/- preserve manual adjustment
-      # and hold that target until SET or an explicit off/on toggle.
+      # and hold that target until the next qualified limit change or SET.
       self.map_cruise.tracking = button_type == ButtonType.decelCruise and not long_press and not CS.gasPressed
       if self.map_cruise.tracking:
         return

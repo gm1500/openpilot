@@ -117,6 +117,54 @@ class TestMapCruise(unittest.TestCase):
     self.tick(ticks=210)
     self.assertEqual(self.helper.v_cruise_kph, 30)
 
+  def test_limit_change_updates_manual_target_up_and_down(self):
+    self.tick(ticks=210)
+    self.tap(ButtonType.accelCruise)
+    self.assertEqual(self.helper.v_cruise_kph, 51)
+    self.limit = 60
+    self.tick(ticks=150)
+    self.assertEqual(self.helper.v_cruise_kph, 51)
+    self.tick(ticks=60)
+    self.assertEqual(self.helper.v_cruise_kph, 60)
+    self.assertEqual(self.helper.v_cruise_cluster_kph, 60)
+    self.limit = 40
+    self.tick(ticks=210)
+    self.assertEqual(self.helper.v_cruise_kph, 40)
+
+  def test_same_limit_recovery_preserves_resume_hold(self):
+    self.tick(ticks=210)
+    self.enabled = False
+    self.tick(ButtonType.accelCruise, True)
+    previous = car.CarState(**self.cs.to_dict()).as_reader()
+    self.enabled = True
+    self.tick()
+    self.helper.initialize_v_cruise(previous, True)
+    self.tick(ButtonType.accelCruise, False)
+    self.assertEqual(self.helper.map_cruise.state(True), 'paused')
+    self.limit = None
+    self.tick(ticks=210)
+    self.limit = 50
+    self.tick(ticks=210)
+    self.assertEqual(self.helper.v_cruise_kph, 50)
+    self.assertEqual(self.helper.map_cruise.state(True), 'paused')
+    self.limit = 80
+    self.tick(ticks=210)
+    self.assertEqual(self.helper.v_cruise_kph, 80)
+
+  def test_limit_change_during_long_hold_does_not_undo_manual_release(self):
+    self.tick(ticks=210)
+    self.tick(ButtonType.accelCruise, True)
+    self.tick(ticks=15)
+    self.limit = 60
+    self.tick(ticks=220)
+    self.tick(ButtonType.accelCruise, False)
+    manual = self.helper.v_cruise_kph
+    self.tick(ticks=210)
+    self.assertEqual(self.helper.v_cruise_kph, manual)
+    self.limit = 80
+    self.tick(ticks=210)
+    self.assertEqual(self.helper.v_cruise_kph, 80)
+
   def test_toggle_does_not_jump_to_old_target(self):
     self.tick(ticks=210)
     self.toggle = False

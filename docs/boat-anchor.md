@@ -122,9 +122,9 @@ changes the cruise set-speed input to the existing planner.
 | Action or state | Behavior |
 | --- | --- |
 | Map on / SET | Follow the current heading-matched map limit after it is stable for two seconds across fresh GPS fixes. This replaces the ordinary 40 km/h or experimental 105 km/h initialization when a qualified limit exists. Subsequent limit changes update SET automatically. |
-| RES re-engagement | Restore the previous set speed and hold it until SET is pressed again. |
-| RES/+ while already engaged | Normal speed increment, then hold that manual target until SET. Standstill RES keeps its existing launch behavior without a speed increment. |
-| Long +/- press | Keep the existing repeated 5 km/h steps (5 mph in imperial mode); pause map updates until SET. |
+| RES re-engagement | Restore the previous set speed and hold it until the next confirmed map-limit change or SET. |
+| RES/+ while already engaged | Normal speed increment, then hold that manual target until the next confirmed map-limit change or SET. Standstill RES keeps its existing launch behavior without a speed increment. |
+| Long +/- press | Keep the existing repeated 5 km/h steps (5 mph in imperial mode); hold the manual target until the next confirmed map-limit change or SET. |
 | Tap off | Hold the current target and restore normal SET/RES button behavior. |
 | Tap back on | Resume automatic map selection when a qualified limit is available. |
 | Missing/stale GPS, no reliable heading or ambiguous map | Hold the existing set speed; show MAP WAIT. SET with no qualified limit arms tracking; ordinary engagement initialization remains the fallback. |
@@ -132,7 +132,7 @@ changes the cruise set-speed input to the existing planner.
 
 Green MAP ON means tracking while engaged; MAP READY means a qualified limit is
 available before engagement. Amber MAP WAIT means no qualified target; MAP HOLD
-means the driver paused automatic updates. MAP OFF is manual cruise. The sign
+means a manual target is held until the next confirmed limit change or SET. MAP OFF is manual cruise. The sign
 remains visible when off. Stock PCM cruise, lateral-only, passive and non-car
 platforms keep a display-only sign; this feature cannot engage cruise or launch
 the vehicle by itself.
@@ -173,7 +173,7 @@ qualify a new target. `mapCruiseState` records selection status at 5 Hz. If `map
 stops, map selection becomes unavailable while ordinary manual cruise remains
 available; existing required-process checks are unchanged for every other process.
 
-Validation: 36 offline regression tests cover parsing, road matching, GPS validity,
+Validation: 39 offline regression tests cover parsing, road matching, GPS validity,
 cache expiry, message freshness, qualification, SET/RES, long presses, gas and
 standstill behavior, mph conversion, and stock/lateral-only platform isolation.
 A further 60,000 synthetic frames matched the preceding cruise helper exactly
@@ -202,6 +202,14 @@ only within 60 m and 20 degrees. A current ambiguous result invalidates control
 data immediately. The existing two-second map qualification and SET/RES/manual
 button behavior remain unchanged. The UI also checks held-display expiry itself.
 
-The port passes 36 regressions, including display/control separation, expiry,
+The port passes 39 regressions, including display/control separation, expiry,
 ramp departure and button behavior, plus an isolated real-IPC check using 1 Hz
 synthetic GPS at highway speed. This is offline validation, not a driving test.
+
+With map cruise enabled, a newly qualified speed-limit change automatically
+updates the current SET speed, including after RES or manual +/- adjustment.
+RES still restores the previous set speed immediately. A missing-data interval
+followed by the same limit does not cancel that manual hold. Changes retain the
+two-second qualification; a long press in progress keeps priority, and releasing
+it preserves the manual target until a subsequent limit change. Turning map
+cruise off prevents automatic speed changes.
