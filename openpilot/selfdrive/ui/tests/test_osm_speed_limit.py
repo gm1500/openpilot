@@ -60,7 +60,8 @@ class TestOSMSpeedLimit(unittest.TestCase):
   def test_gps_freshness_and_internal_receiver_fallback(self):
     class SubMaster(dict):
       pass
-    gps = SimpleNamespace(latitude=53., longitude=-113., speed=10., bearingDeg=0., bearingAccuracyDeg=5., horizontalAccuracy=3., hasFix=True)
+    gps = SimpleNamespace(latitude=53., longitude=-113., speed=10., bearingDeg=0., bearingAccuracyDeg=5., horizontalAccuracy=3.,
+                          hasFix=True, source='ublox')
     sources = ("gpsLocationExternal", "gpsLocation")
     sm = SubMaster({source: SimpleNamespace(**vars(gps)) for source in sources})
     sm.valid = dict.fromkeys(sources, True)
@@ -77,6 +78,17 @@ class TestOSMSpeedLimit(unittest.TestCase):
     for accuracy in (0., 16., math.nan):
       sm["gpsLocation"].horizontalAccuracy = accuracy
       self.assertIsNone(osm.gps_fix(sm, 10, 101.))
+
+    # Internal Qualcomm fixes omit this field; external receivers still need it.
+    internal = sm["gpsLocation"]
+    internal.source, internal.horizontalAccuracy = 'qcomdiag', 0.
+    self.assertEqual(osm.gps_fix(sm, 10, 101.).accuracy, osm.QCOM_UNKNOWN_ACCURACY)
+    internal.hasFix = False
+    self.assertIsNone(osm.gps_fix(sm, 10, 101.))
+    internal.hasFix = True
+    self.assertIsNone(osm.gps_fix(sm, 10, 104.))
+    internal.horizontalAccuracy = 25.
+    self.assertIsNone(osm.gps_fix(sm, 10, 101.))
 
   def test_display_clears_stale_distant_and_offroad_results(self):
     service = osm.OSMSpeedLimit()

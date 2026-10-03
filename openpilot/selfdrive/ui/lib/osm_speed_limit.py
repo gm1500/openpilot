@@ -15,6 +15,7 @@ QUERY_RADIUS = 1500.0  # metres; prefetch again after travelling 700 m
 QUERY_INTERVAL = 30.0
 CACHE_TTL = 600.0
 GPS_MAX_AGE = 3.0
+QCOM_UNKNOWN_ACCURACY = 15.0  # Matching allowance, not a measured GPS uncertainty
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ROAD_TYPES = ("motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street", "service", "road",
               "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link")
@@ -50,12 +51,18 @@ def gps_fix(sm, started_frame: int, now: float) -> GpsFix | None:
       continue
     if not (math.isfinite(gps.latitude) and math.isfinite(gps.longitude) and -85 < gps.latitude < 85 and -180 <= gps.longitude <= 180):
       continue
-    if not math.isfinite(gps.horizontalAccuracy) or not 0 < gps.horizontalAccuracy <= 15:
+    accuracy = gps.horizontalAccuracy
+    # qcomgpsd does not populate horizontalAccuracy. Zero means unavailable for
+    # this source, not an invalid fix (or perfect accuracy). Keep the workaround
+    # local to this advisory display and use a conservative ambiguity allowance.
+    if accuracy == 0 and source == "gpsLocation" and str(gps.source) == "qcomdiag":
+      accuracy = QCOM_UNKNOWN_ACCURACY
+    if not math.isfinite(accuracy) or not 0 < accuracy <= 15:
       continue
     bearing = None
     if gps.speed >= 2 and math.isfinite(gps.bearingDeg) and 0 <= gps.bearingDeg < 360 and 0 <= gps.bearingAccuracyDeg <= 30:
       bearing = gps.bearingDeg
-    fixes.append(GpsFix(gps.latitude, gps.longitude, bearing, gps.horizontalAccuracy, timestamp))
+    fixes.append(GpsFix(gps.latitude, gps.longitude, bearing, accuracy, timestamp))
   return min(fixes, key=lambda fix: fix.accuracy) if fixes else None
 
 

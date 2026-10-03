@@ -130,6 +130,12 @@ limit. Directional limits are supported. Conditional, variable, lane-specific
 and vehicle-specific limits are left unknown rather than guessing. Road signs
 and temporary restrictions can differ from the map; the display is advisory.
 
+The internal Qualcomm GPS publisher leaves horizontal accuracy unset (zero).
+For those otherwise valid fixes only, the display uses a conservative 15 m
+matching allowance, not a claimed accuracy measurement. Other receivers still
+require a positive reported accuracy. GPS publishing and control inputs are
+unchanged.
+
 Map data: (c) [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
 available under the [Open Database License](https://opendatacommons.org/licenses/odbl/).
 
