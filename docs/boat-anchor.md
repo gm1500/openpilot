@@ -3,7 +3,7 @@
 Based on upstream openpilot master `c8fb906815530460ed156f14e09e1f312bb0f851`,
 the same base as the working boat-anchor map-cruise build. Custom history is
 grouped into five feature commits: **Sierra Tune**, **Nudgeless**, **Lead velocity fix**,
-**Lane policy**, and **Map speed limit**, with a follow-up for advisory signs and
+**Lane policy**, and **Map speed limit**, with follow-ups for advisory speeds and
 ramp reacquisition.
 
 ## Vehicle tuning
@@ -59,14 +59,14 @@ a display-only sign.
 
 | Action or event | Behavior |
 | --- | --- |
-| Short SET or SET engagement | Immediately select the current fresh, heading-matched numeric limit. Explicit SET does not wait for the automatic two-second debounce. |
-| SET with no usable legal limit | Arm tracking and retain ordinary engagement initialization as the fallback. A held sign or advisory speed cannot supply a target. |
+| Short SET or SET engagement | Immediately select the current fresh, heading-matched legal limit, or advisory if no usable legal limit exists. Explicit SET does not wait for the automatic two-second debounce. |
+| SET with neither legal nor advisory data | Arm tracking and retain ordinary engagement initialization as the fallback. A held sign cannot supply a target. |
 | RES engagement | Restore the previous cruise speed. |
 | RES/+ while engaged | Adjust normally and hold the manual target until the next confirmed different limit or SET. |
 | Long +/- | Retain repeated 5 km/h or 5 mph steps. Manual hold/release keeps priority over a concurrent map change. |
 | New limit while map mode is on | Automatically update after two seconds of stable, fresh data with advancing GPS timestamps. |
 | Missing or ambiguous map data | Keep the existing cruise target. The sign may briefly hold its last confirmed value, then show a dash. |
-| Advisory speed on the matched road | Display the recommendation on yellow with no MAXIMUM/SPEED LIMIT heading. Cruise selection continues to use the legal limit only. |
+| Advisory speed on the matched road | Display the recommendation on yellow with no MAXIMUM/SPEED LIMIT heading. Cruise uses it only when no usable legal limit is available on that road. |
 | Toggle off | Hold the existing cruise target and restore ordinary SET/RES behavior. |
 | Accelerator pressed | Defer automatic target updates; SET retains the existing current-speed floor. |
 
@@ -86,8 +86,13 @@ The feedback state is observational and does not change planner or actuator outp
 Numeric `maxspeed:advisory` tags, including forward/backward variants and mph,
 are read separately from legal `maxspeed` tags. An advisory no longer invalidates
 an otherwise usable legal limit. A lower advisory takes display priority; if
-the legal limit is equal or lower, the legal sign remains. Advisory-only roads
-can show a recommendation without inventing a legal limit. Unsupported conditional,
+the legal limit is equal or lower, the legal sign remains. For cruise targets,
+a usable legal limit always wins, even when the displayed advisory is lower.
+Advisory-only roads use the fresh matched recommendation as a fallback target,
+with the same two-second automatic qualification, immediate explicit SET,
+manual override and RES behavior as legal limits. The sign stays yellow.
+The fallback never reads a held display value or borrows a neighbouring road's limit.
+Unsupported conditional,
 variable or lane-specific qualifiers remain unavailable within their own tag family.
 The yellow background stays steady while an advisory is shown, even if a separate
 legal-limit adjustment is in progress. The actual set speed remains below the sign.
@@ -142,19 +147,19 @@ Device attribution is under Settings > Software > Map Data.
 
 ## Validation
 
-- 69 map/cruise regressions cover immediate SET, unchanged RES and long holds,
+- 70 map/cruise regressions cover immediate SET, unchanged RES and long holds,
   speed-convergence feedback, intervention cancellation, message serialization,
   curved-road continuity, connected/internal junctions, ramp departure, unknown
   roads, one-way/directional limits, cache replacement and stale/frozen GPS,
   independent legal/advisory parsing, fork reacquisition, on-ramp merges,
-  fast GPS feeds and advisory/control separation.
+  fast GPS feeds, legal-priority advisory fallback and held-display/control separation.
 - In a synthetic curved-road case with lagging GPS bearing and a nearby different
   limit, confirmed matches improve from 4/17 to 17/17 and visible-sign samples
   from 6/17 to 17/17. Neither version selects the wrong limit in that fixture.
   These figures describe the synthetic test, not a measured driving improvement.
-- A real mapd/messaging test with synthetic 1 Hz GPS and a local road fixture
-  selects a legal 50 km/h target while publishing a separate 30 km/h yellow advisory.
-  Stopping mapd holds the target and reports MAP WAIT.
+- Real mapd/messaging tests with synthetic 1 Hz GPS and local road fixtures select
+  a legal 50 km/h target over a 30 km/h advisory, then separately select 30 km/h
+  when only the advisory exists. Stopping mapd holds the target and reports MAP WAIT.
 - Isolated production UI tests check pulse lifecycle, stale status and touch/alert
   cancellation, yellow advisory signs without a heading, metric/imperial display
   and both screen sizes. Software layouts, schema generation, lint and whitespace pass.

@@ -243,7 +243,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
     match = tracker.update(roads, osm.GpsFix(*point(12, 10), 0., 15., 100.5))
     self.assertAlmostEqual(match.advisory_speed, 50 / 3.6)
 
-  def test_advisory_display_never_becomes_a_cruise_target(self):
+  def test_fresh_advisory_is_separate_from_held_display(self):
     service = osm.OSMSpeedLimit()
     service._thread = Mock()
     service._result = (self.fix, 100 / 3.6, 50 / 3.6)
@@ -254,10 +254,12 @@ class TestOSMSpeedLimit(unittest.TestCase):
     service._result = (moved, None, 50 / 3.6)
     self.assertAlmostEqual(service.update(moved, 101.), 50 / 3.6)
     self.assertIsNone(service.control_sample[1])
+    self.assertAlmostEqual(service.control_sample[2], 50 / 3.6)
     service._result = (replace(moved, timestamp=102.), None, None)
     self.assertAlmostEqual(service.update(service._result[0], 102.), 50 / 3.6)
     self.assertTrue(service.display_is_advisory)
     self.assertEqual(service.display_timestamp, 101.)
+    self.assertEqual(service.control_sample[1:], (None, None))  # held yellow sign cannot supply a fresh target
     self.assertIsNone(service.update(service._result[0], 103.1))
     self.assertFalse(service.display_is_advisory)
     service._result = (replace(moved, timestamp=104.), 40 / 3.6, 50 / 3.6)

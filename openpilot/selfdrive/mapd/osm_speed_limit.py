@@ -380,7 +380,7 @@ class OSMSpeedLimit:
     self._thread: threading.Thread | None = None
     self._wake = threading.Event()
     self._display: tuple[GpsFix, float, bool] | None = None
-    self.control_sample: tuple[GpsFix, float | None] | None = None
+    self.control_sample: tuple[GpsFix, float | None, float | None] | None = None
     self._fix_received_at = 0.
 
   @property
@@ -410,7 +410,7 @@ class OSMSpeedLimit:
       self._display = None
       return None
     if result is not None and result[0] == fix:
-      self.control_sample = result[:2]
+      self.control_sample = result
     elif result is not None and 0 <= now - self._fix_received_at <= 0.3 and 0 <= now - result[0].timestamp <= GPS_MAX_AGE:
       # A short asynchronous handoff may retain the PREVIOUS confirmed sample,
       # with its original GPS timestamp. A current ambiguous result never qualifies.
@@ -418,10 +418,10 @@ class OSMSpeedLimit:
       if (fix.bearing is not None and last_fix.bearing is not None and
           abs((fix.bearing - last_fix.bearing + 180) % 360 - 180) <= 20 and
           math.hypot(*offset_metres(fix.latitude, fix.longitude, last_fix)) <= DISPLAY_HOLD_METRES):
-        self.control_sample = result[:2]
+        self.control_sample = result
     if result is not None and result[0] == fix:
       _, legal, advisory = result
-      # A lower advisory takes display priority, but never enters control_sample.
+      # A lower advisory takes display priority; cruise independently prefers legal.
       is_advisory = advisory is not None and (legal is None or advisory < legal)
       speed = advisory if is_advisory else legal
       if speed is not None:

@@ -17,10 +17,11 @@ def main():
     display_limit = provider.update(gps_fix(sm, 1, now), now)
     sample = provider.control_sample
     msg = messaging.new_message('mapSpeedLimit')
-    msg.valid = sample is not None and sample[1] is not None
+    msg.valid = sample is not None and any(speed is not None for speed in sample[1:])
     if sample is not None:
-      fix, limit = sample
+      fix, limit, advisory = sample
       msg.mapSpeedLimit.speedLimit = limit or 0.
+      msg.mapSpeedLimit.advisorySpeed = advisory or 0.
       msg.mapSpeedLimit.gpsMonoTime = int(fix.timestamp * 1e9)
       msg.mapSpeedLimit.headingValid = fix.bearing is not None
     msg.mapSpeedLimit.displayValid = display_limit is not None

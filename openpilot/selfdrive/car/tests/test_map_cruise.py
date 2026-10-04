@@ -531,6 +531,46 @@ class TestMapCruise(unittest.TestCase):
         else:
           self.assertIsNone(read_map_speed(sm, 100.)[0])
 
+  def test_fresh_advisory_fallback_preserves_legal_priority_and_validity(self):
+    from openpilot.cereal import log
+    class SM(dict):
+      pass
+    event = log.Event.new_message(valid=True, logMonoTime=int(100e9))
+    msg = event.init('mapSpeedLimit')
+    msg.gpsMonoTime = int(100e9)
+    msg.headingValid = True
+    msg.advisorySpeed = 50 / 3.6
+    msg.displayValid = True
+    msg.displaySpeedLimit = 30 / 3.6  # display selection/hold is never the fallback source
+    msg.displayGpsMonoTime = int(100e9)
+    for legal, expected in ((0., 50.), (100., 100.), (40., 40.)):
+      msg.speedLimit = legal / 3.6
+      event.clear_write_flag()
+      with log.Event.from_bytes(event.to_bytes()) as decoded:
+        sm = SM(mapSpeedLimit=decoded.mapSpeedLimit)
+        sm.valid = {'mapSpeedLimit': decoded.valid}
+        sm.logMonoTime = {'mapSpeedLimit': decoded.logMonoTime}
+        sm.recv_time = {'mapSpeedLimit': 100.}
+        self.assertAlmostEqual(read_map_speed(sm, 100.)[0] * 3.6, expected, places=4)
+    sm['mapSpeedLimit'] = msg
+    msg.speedLimit = 0.
+    self.assertIsNone(read_map_speed(sm, 101.)[0])  # stale publisher
+    sm.logMonoTime['mapSpeedLimit'] = int(104e9)
+    sm.recv_time['mapSpeedLimit'] = 104.
+    self.assertIsNone(read_map_speed(sm, 104.)[0])  # fresh publisher, stale GPS
+    msg.gpsMonoTime = int(104e9)
+    msg.headingValid = False
+    self.assertIsNone(read_map_speed(sm, 104.)[0])
+    msg.headingValid = True
+    sm.valid['mapSpeedLimit'] = False
+    self.assertIsNone(read_map_speed(sm, 104.)[0])
+    sm.valid['mapSpeedLimit'] = True
+    for legal in (-1., math.nan, math.inf):
+      msg.speedLimit = legal
+      self.assertIsNone(read_map_speed(sm, 104.)[0])  # malformed legal data is not absence
+    msg.speedLimit = msg.advisorySpeed = 0.
+    self.assertIsNone(read_map_speed(sm, 104.)[0])  # held display alone is insufficient
+
 
 if __name__ == '__main__':
   unittest.main()

@@ -16,13 +16,16 @@ def read_map_speed(sm, now: float, require_heading: bool = True, replay: bool = 
   """Reject stale publishers even if a receiver has only just seen their packet."""
   msg = sm['mapSpeedLimit']
   stamp = msg.gpsMonoTime * 1e-9
+  # Only the fresh, matched advisory can replace an absent legal limit. The held
+  # display value is never a target, and malformed legal values cannot fall back.
+  speed = msg.advisorySpeed if msg.speedLimit == 0 else msg.speedLimit
   valid = (sm.valid['mapSpeedLimit'] and 0 < stamp <= now and
            0 <= now - sm.logMonoTime['mapSpeedLimit'] * 1e-9 <= MAP_MESSAGE_MAX_AGE and
            # Replay compares recorded CAN/GPS/publisher times, not host receive time.
            (replay or 0 <= now - sm.recv_time['mapSpeedLimit'] <= MAP_MESSAGE_MAX_AGE) and
            now - stamp <= MAP_GPS_MAX_AGE and (msg.headingValid or not require_heading) and
-           math.isfinite(msg.speedLimit) and 0 < msg.speedLimit <= 300 / 3.6)
-  return (msg.speedLimit if valid else None), stamp
+           math.isfinite(speed) and 0 < speed <= 300 / 3.6)
+  return (speed if valid else None), stamp
 
 
 def read_map_display(sm, now: float) -> float | None:
