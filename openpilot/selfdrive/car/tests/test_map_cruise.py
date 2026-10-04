@@ -504,6 +504,33 @@ class TestMapCruise(unittest.TestCase):
       sm.recv_time['mapSpeedLimit'] = 102.1
       self.assertIsNone(read_map_display(sm, 102.1))  # a new packet cannot prolong old display data
 
+  def test_advisory_sign_serialization_does_not_override_legal_target(self):
+    from openpilot.cereal import log
+    class SM(dict):
+      pass
+    for legal in (0., 100 / 3.6):
+      event = log.Event.new_message(valid=legal > 0, logMonoTime=int(100e9))
+      msg = event.init('mapSpeedLimit')
+      self.assertFalse(msg.displayIsAdvisory)  # older recordings decode as legal signs
+      msg.speedLimit = legal
+      msg.gpsMonoTime = int(100e9)
+      msg.headingValid = True
+      msg.displayValid = True
+      msg.displaySpeedLimit = 50 / 3.6
+      msg.displayGpsMonoTime = int(100e9)
+      msg.displayIsAdvisory = True
+      with log.Event.from_bytes(event.to_bytes()) as decoded:
+        sm = SM(mapSpeedLimit=decoded.mapSpeedLimit)
+        sm.valid = {'mapSpeedLimit': decoded.valid}
+        sm.logMonoTime = {'mapSpeedLimit': decoded.logMonoTime}
+        sm.recv_time = {'mapSpeedLimit': 100.}
+        self.assertTrue(decoded.mapSpeedLimit.displayIsAdvisory)
+        self.assertAlmostEqual(read_map_display(sm, 100.), 50 / 3.6, places=5)
+        if legal:
+          self.assertAlmostEqual(read_map_speed(sm, 100.)[0], legal, places=5)
+        else:
+          self.assertIsNone(read_map_speed(sm, 100.)[0])
+
 
 if __name__ == '__main__':
   unittest.main()

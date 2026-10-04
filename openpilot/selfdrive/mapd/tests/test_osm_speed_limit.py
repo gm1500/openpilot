@@ -158,6 +158,112 @@ class TestOSMSpeedLimit(unittest.TestCase):
     for key in ("maxspeed:conditional", "maxspeed:forward:conditional", "maxspeed:lanes", "maxspeed:variable", "maxspeed:motorcar"):
       self.assertIsNone(osm.match_speed((road(tags={key: "30"}),), self.fix), key)
 
+  def test_advisory_and_legal_limits_are_independent(self):
+    tags = {'maxspeed': '100', 'maxspeed:advisory': '50'}
+    self.assertAlmostEqual(osm.road_speed(tags, True), 100 / 3.6)
+    self.assertAlmostEqual(osm.road_speed(tags, True, advisory=True), 50 / 3.6)
+    tags['maxspeed:advisory:conditional'] = '30 @ wet'
+    self.assertAlmostEqual(osm.road_speed(tags, True), 100 / 3.6)
+    self.assertIsNone(osm.road_speed(tags, True, advisory=True))
+    del tags['maxspeed:advisory:conditional']
+    tags['maxspeed:conditional'] = '80 @ wet'
+    self.assertIsNone(osm.road_speed(tags, True))
+    self.assertAlmostEqual(osm.road_speed(tags, True, advisory=True), 50 / 3.6)
+
+  def test_advisory_units_direction_and_unsupported_values(self):
+    tags = {'maxspeed:advisory:forward': '30 mph', 'maxspeed:advisory:backward': '40'}
+    self.assertAlmostEqual(osm.road_speed(tags, True, advisory=True), 30 * .44704)
+    self.assertAlmostEqual(osm.road_speed(tags, False, advisory=True), 40 / 3.6)
+    self.assertIsNone(osm.road_speed(tags, None, advisory=True))
+    self.assertIsNone(osm.road_speed(tags, True))
+    for value in ('signals', '50;60', '30 @ wet', 'none', 'nan'):
+      self.assertIsNone(osm.road_speed({'maxspeed:advisory': value}, True, advisory=True))
+
+  def test_advisory_ramp_cannot_leak_onto_equal_limit_mainline(self):
+    main = polyline([(0, -100), (0, 0), (0, 150)], '100', way_id=1, oneway='yes')
+    ramp = polyline([(0, 0), (50, 100)], '100', way_id=2, oneway='yes',
+                    highway='motorway_link', **{'maxspeed:advisory': '50'})
+    roads = (main, ramp)
+    tracker = osm.RoadTracker()
+    tracker.update(roads, osm.GpsFix(*point(0, -30), 0., 15., 100.))
+    self.assertIsNone(tracker.update(roads, replace(self.fix, accuracy=15, timestamp=101.)))
+    # Same legal limit does not make the ramp advisory applicable to the mainline.
+    match = tracker.update(roads, osm.GpsFix(*point(0, 30), 0., 15., 102.))
+    self.assertEqual(match.road.way_id, 1)
+    self.assertIsNone(match.advisory_speed)
+    tracker.reset()
+    tracker.update(roads, osm.GpsFix(*point(0, -30), 0., 15., 100.))
+    tracker.update(roads, replace(self.fix, accuracy=15, timestamp=101.))
+    match = tracker.update(roads, osm.GpsFix(*point(15, 30), 26.565, 15., 102.))
+    self.assertAlmostEqual(match.advisory_speed, 50 / 3.6)
+
+  def test_reacquire_ramp_after_fork_outlives_confirmed_history(self):
+    main = polyline([(0, -100), (0, 0), (0, 200)], '100', way_id=1, oneway='yes')
+    ramp = polyline([(0, 0), (20, 200)], None, way_id=2, oneway='yes',
+                    highway='motorway_link', **{'maxspeed:advisory': '50'})
+    roads = (main, ramp)
+    tracker = osm.RoadTracker()
+    tracker.update(roads, osm.GpsFix(*point(0, -30), 0., 15., 100.))
+    for t, y in ((101., 0), (102., 10), (103., 20), (104., 30), (105., 70)):
+      self.assertIsNone(tracker.update(roads, osm.GpsFix(*point(y / 10, y), 5.71, 15., t)))
+    self.assertIsNone(tracker.match)
+    # Only the second clear, moving fix re-establishes the road after expiry.
+    match = tracker.update(roads, osm.GpsFix(*point(9, 90), 5.71, 15., 106.))
+    self.assertEqual(match.road.way_id, 2)
+    self.assertIsNone(match.speed)
+    self.assertAlmostEqual(match.advisory_speed, 50 / 3.6)
+
+  def test_tentative_ramp_match_requires_motion_freshness_and_connectivity(self):
+    roads = (road('100'), road(None, x=12, tags={'highway': 'motorway_link', 'maxspeed:advisory': '50'}))
+    first = osm.GpsFix(*point(12, 0), 0., 15., 100.)
+    for second in (first, replace(first, timestamp=101.), replace(first, latitude=point(12, 2)[0], timestamp=101.),
+                   replace(first, latitude=point(12, 10)[0], timestamp=104.),
+                   osm.GpsFix(*point(0, 10), 0., 15., 101.), osm.GpsFix(*point(6, 10), 0., 15., 101.)):
+      tracker = osm.RoadTracker()
+      self.assertIsNone(tracker.update(roads, first))
+      self.assertIsNone(tracker.update(roads, second))
+
+  def test_onramp_advisory_clears_when_merging_to_mainline(self):
+    main = polyline([(0, -100), (0, 0), (0, 100)], '100', way_id=1, oneway='yes')
+    ramp = polyline([(50, -100), (0, 0)], None, way_id=2, oneway='yes',
+                    highway='motorway_link', **{'maxspeed:advisory': '50'})
+    roads = (main, ramp)
+    tracker = osm.RoadTracker()
+    first = tracker.update(roads, osm.GpsFix(*point(40, -80), 333.435, 15., 100.))
+    self.assertAlmostEqual(first.advisory_speed, 50 / 3.6)
+    merged = tracker.update(roads, osm.GpsFix(*point(0, 40), 0., 15., 102.))
+    self.assertEqual(merged.road.way_id, 1)
+    self.assertIsNone(merged.advisory_speed)
+
+  def test_ramp_reacquisition_accumulates_motion_with_fast_gps(self):
+    roads = (road('100'), road(None, x=12, tags={'maxspeed:advisory': '50'}))
+    tracker = osm.RoadTracker()
+    for i in range(5):
+      self.assertIsNone(tracker.update(roads, osm.GpsFix(*point(12, i * 2), 0., 15., 100. + i / 10)))
+    match = tracker.update(roads, osm.GpsFix(*point(12, 10), 0., 15., 100.5))
+    self.assertAlmostEqual(match.advisory_speed, 50 / 3.6)
+
+  def test_advisory_display_never_becomes_a_cruise_target(self):
+    service = osm.OSMSpeedLimit()
+    service._thread = Mock()
+    service._result = (self.fix, 100 / 3.6, 50 / 3.6)
+    self.assertAlmostEqual(service.update(self.fix, 100.), 50 / 3.6)
+    self.assertTrue(service.display_is_advisory)
+    self.assertAlmostEqual(service.control_sample[1], 100 / 3.6)
+    moved = replace(self.fix, timestamp=101.)
+    service._result = (moved, None, 50 / 3.6)
+    self.assertAlmostEqual(service.update(moved, 101.), 50 / 3.6)
+    self.assertIsNone(service.control_sample[1])
+    service._result = (replace(moved, timestamp=102.), None, None)
+    self.assertAlmostEqual(service.update(service._result[0], 102.), 50 / 3.6)
+    self.assertTrue(service.display_is_advisory)
+    self.assertEqual(service.display_timestamp, 101.)
+    self.assertIsNone(service.update(service._result[0], 103.1))
+    self.assertFalse(service.display_is_advisory)
+    service._result = (replace(moved, timestamp=104.), 40 / 3.6, 50 / 3.6)
+    self.assertAlmostEqual(service.update(service._result[0], 104.), 40 / 3.6)
+    self.assertFalse(service.display_is_advisory)  # legal limit lower than advisory wins
+
   def test_oneway_heading_and_roundabouts(self):
     for tags in ({"oneway": "yes"}, {"junction": "roundabout"}):
       self.assertIsNone(osm.match_speed((road(tags=tags),), replace(self.fix, bearing=180)))
@@ -216,7 +322,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
   def test_display_clears_stale_distant_and_offroad_results(self):
     service = osm.OSMSpeedLimit()
     service._thread = Mock()
-    service._result = (self.fix, 40 / 3.6)
+    service._result = (self.fix, 40 / 3.6, None)
     self.assertAlmostEqual(service.update(self.fix, 101.), 40 / 3.6)
     self.assertIsNone(service.update(self.fix, 104.))
     self.assertIsNone(service.update(replace(self.fix, latitude=.001), 101.))
@@ -232,36 +338,36 @@ class TestOSMSpeedLimit(unittest.TestCase):
   def test_highway_gps_step_holds_until_new_match_without_extending_age(self):
     service = osm.OSMSpeedLimit()
     service._thread = Mock()
-    service._result = (self.fix, 110 / 3.6)
+    service._result = (self.fix, 110 / 3.6, None)
     self.assertAlmostEqual(service.update(self.fix, 100.), 110 / 3.6)
     service._wake.clear()
     moved = replace(self.fix, latitude=math.degrees(31 / osm.EARTH_RADIUS), timestamp=101.)
     self.assertAlmostEqual(service.update(moved, 101.), 110 / 3.6)
     self.assertTrue(service._wake.is_set())  # new fix wakes the matcher immediately
-    service._result = (moved, None)
+    service._result = (moved, None, None)
     self.assertAlmostEqual(service.update(moved, 101.8), 110 / 3.6)
     self.assertIsNone(service.update(replace(moved, timestamp=102.1), 102.1))
 
   def test_confirmed_limit_change_is_immediate(self):
     service = osm.OSMSpeedLimit()
     service._thread = Mock()
-    service._result = (self.fix, 110 / 3.6)
+    service._result = (self.fix, 110 / 3.6, None)
     service.update(self.fix, 100.)
     moved = replace(self.fix, timestamp=101.)
-    service._result = (moved, 60 / 3.6)
+    service._result = (moved, 60 / 3.6, None)
     self.assertAlmostEqual(service.update(moved, 101.), 60 / 3.6)
 
   def test_display_hold_is_not_a_confirmed_control_sample(self):
     service = osm.OSMSpeedLimit()
     service._thread = Mock()
-    service._result = (self.fix, 110 / 3.6)
+    service._result = (self.fix, 110 / 3.6, None)
     service.update(self.fix, 100.)
     moved = replace(self.fix, latitude=math.degrees(31 / osm.EARTH_RADIUS), timestamp=101.)
     self.assertAlmostEqual(service.update(moved, 101.), 110 / 3.6)
     self.assertEqual(service.control_sample[0].timestamp, 100.)  # never restamp an older match
     self.assertAlmostEqual(service.update(moved, 101.4), 110 / 3.6)
     self.assertIsNone(service.control_sample)  # 0.3 s processing grace has expired
-    service._result = (moved, None)  # fresh but ambiguous match, with sign still held
+    service._result = (moved, None, None)  # fresh but ambiguous match, with sign still held
     self.assertAlmostEqual(service.update(moved, 101.5), 110 / 3.6)
     self.assertIsNone(service.control_sample[1])
     self.assertEqual(service.display_timestamp, 100.)
@@ -272,7 +378,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
     for moved in (replace(self.fix, bearing=21, timestamp=101.), replace(self.fix, latitude=.001, timestamp=101.)):
       service = osm.OSMSpeedLimit()
       service._thread = Mock()
-      service._result = (self.fix, 110 / 3.6)
+      service._result = (self.fix, 110 / 3.6, None)
       service.update(self.fix, 100.)
       service.update(moved, 101.)
       self.assertIsNone(service.control_sample)
@@ -283,7 +389,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
                      (self.fix, 104.), (None, 101.)):
       service = osm.OSMSpeedLimit()
       service._thread = Mock()
-      service._result = (self.fix, 110 / 3.6)
+      service._result = (self.fix, 110 / 3.6, None)
       service.update(self.fix, 100.)
       self.assertIsNone(service.update(fix, now))
       self.assertIsNone(service._display)

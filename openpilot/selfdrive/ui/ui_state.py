@@ -88,6 +88,7 @@ class UIState:
 
     self.prime_state = PrimeState()
     self.speed_limit: float | None = None  # OSM m/s
+    self.speed_limit_is_advisory = False
     self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
     self.map_cruise_state = "waiting"
     self.map_cruise_pulsing = False
@@ -165,6 +166,7 @@ class UIState:
     self.speed_limit = read_map_display(self.sm, now)
     if not self.started or self.sm.recv_frame['mapSpeedLimit'] < self.started_frame:
       self.speed_limit = None
+    self.speed_limit_is_advisory = self.speed_limit is not None and self.sm['mapSpeedLimit'].displayIsAdvisory
     self.map_cruise_state = "waiting"
     self.map_cruise_pulsing = False
     if (self.started and self.sm.valid['mapCruiseState'] and self.sm.recv_frame['mapCruiseState'] >= self.started_frame and

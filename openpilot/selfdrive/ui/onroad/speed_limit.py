@@ -9,7 +9,7 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 
 
 def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: float | None, is_metric: bool, set_color: rl.Color,
-                     state: str = 'unsupported', pulse_elapsed: float | None = None) -> None:
+                     state: str = 'unsupported', pulse_elapsed: float | None = None, advisory: bool = False) -> None:
   """North American-style map sign, with the cruise target outside underneath."""
   font = gui_app.font(FontWeight.BOLD)
   medium = gui_app.font(FontWeight.MEDIUM)
@@ -17,8 +17,8 @@ def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: f
   black = rl.Color(20, 22, 24, 255)
   # Pulse from a pending automatic change until vehicle speed settles. The
   # controller latches completion/cancellation; None restores white immediately.
-  pulse = 0. if pulse_elapsed is None else 0.90 * (1 - math.cos(2 * math.pi * pulse_elapsed)) / 2
-  background = rl.Color(round(250 - 180 * pulse), 250, round(247 - 140 * pulse), 255)
+  pulse = 0. if pulse_elapsed is None or advisory else 0.90 * (1 - math.cos(2 * math.pi * pulse_elapsed)) / 2
+  background = rl.Color(255, 205, 40, 255) if advisory else rl.Color(round(250 - 180 * pulse), 250, round(247 - 140 * pulse), 255)
   rl.draw_rectangle_rounded(rect, 0.12, 8, background)
   inset = 3 * scale
   border = rl.Rectangle(rect.x + inset, rect.y + inset, rect.width - 2 * inset, rect.height - 2 * inset)
@@ -33,10 +33,11 @@ def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: f
     pos = rl.Vector2(rect.x + (rect.width - bounds.x) / 2, rect.y + y * scale + (height * scale - bounds.y) / 2)
     rl.draw_text_ex(face, value, pos, size, 0, color)
 
-  text("MAXIMUM" if is_metric else "SPEED LIMIT", 14, 34, 27, black)
+  if not advisory:
+    text("MAXIMUM" if is_metric else "SPEED LIMIT", 14, 34, 27, black)
   conversion = CV.MS_TO_KPH if is_metric else CV.MS_TO_MPH
   value = "–" if speed_limit is None else str(round(speed_limit * conversion))
-  text(value, 48, 108, 104, black)
+  text(value, 30 if advisory else 48, 126 if advisory else 108, 104, black)
   text("km/h" if is_metric else "mph", 158, 34, 30, black, bold=False)
 
   # A separate dark strip keeps the actual cruise target readable against the camera.
@@ -72,11 +73,13 @@ class SpeedLimitButton(Widget):
     state = ui_state.map_cruise_state if ui_state.map_cruise_enabled else 'off'
     if not ui_state.map_cruise_supported:
       state = 'unsupported'
-    pulsing = ui_state.map_cruise_pulsing and ui_state.map_cruise_enabled and ui_state.map_cruise_supported
+    pulsing = (ui_state.map_cruise_pulsing and ui_state.map_cruise_enabled and ui_state.map_cruise_supported and
+               not ui_state.speed_limit_is_advisory)
     now = rl.get_time()
     if not pulsing:
       self._pulse_since = None
     elif self._pulse_since is None:
       self._pulse_since = now
     elapsed = None if self._pulse_since is None else now - self._pulse_since
-    draw_speed_limit(rect, ui_state.speed_limit, self.set_speed, ui_state.is_metric, self.set_color, state, elapsed)
+    draw_speed_limit(rect, ui_state.speed_limit, self.set_speed, ui_state.is_metric, self.set_color, state, elapsed,
+                     advisory=ui_state.speed_limit_is_advisory)

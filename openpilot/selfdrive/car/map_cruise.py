@@ -26,7 +26,7 @@ def read_map_speed(sm, now: float, require_heading: bool = True, replay: bool = 
 
 
 def read_map_display(sm, now: float) -> float | None:
-  """Advisory display has independent validity; Event.valid is for control only."""
+  """Legal/advisory display has independent validity; Event.valid is for control only."""
   msg = sm['mapSpeedLimit']
   valid = (msg.displayValid and 0 < msg.displayGpsMonoTime * 1e-9 <= now and
            now - msg.displayGpsMonoTime * 1e-9 <= 2.0 and

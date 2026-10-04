@@ -26,6 +26,7 @@ def main():
     msg.mapSpeedLimit.displayValid = display_limit is not None
     msg.mapSpeedLimit.displaySpeedLimit = display_limit or 0.
     msg.mapSpeedLimit.displayGpsMonoTime = int(provider.display_timestamp * 1e9)
+    msg.mapSpeedLimit.displayIsAdvisory = provider.display_is_advisory
     pm.send('mapSpeedLimit', msg)
     rk.keep_time()
 
