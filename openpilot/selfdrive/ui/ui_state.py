@@ -166,7 +166,7 @@ class UIState:
     self.speed_limit = read_map_display(self.sm, now)
     if not self.started or self.sm.recv_frame['mapSpeedLimit'] < self.started_frame:
       self.speed_limit = None
-    self.speed_limit_is_advisory = self.speed_limit is not None and self.sm['mapSpeedLimit'].displayIsAdvisory
+    self.speed_limit_is_advisory = self.speed_limit is not None and self.sm['mapSpeedLimit'].speedLimit == 0
     self.map_cruise_state = "waiting"
     self.map_cruise_pulsing = False
     if (self.started and self.sm.valid['mapCruiseState'] and self.sm.recv_frame['mapCruiseState'] >= self.started_frame and

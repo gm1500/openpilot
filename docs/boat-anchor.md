@@ -3,8 +3,8 @@
 Based on upstream openpilot master `c8fb906815530460ed156f14e09e1f312bb0f851`,
 the same base as the working boat-anchor map-cruise build. Custom history is
 grouped into five feature commits: **Sierra Tune**, **Nudgeless**, **Lead velocity fix**,
-**Lane policy**, and **Map speed limit**, with follow-ups for advisory speeds and
-ramp reacquisition.
+**Lane policy**, and **Map speed limit**, with follow-ups for advisory speeds,
+road tracking and SET behavior.
 
 ## Vehicle tuning
 
@@ -59,16 +59,17 @@ a display-only sign.
 
 | Action or event | Behavior |
 | --- | --- |
-| Short SET or SET engagement | Immediately select the current fresh, heading-matched legal limit, or advisory if no usable legal limit exists. Explicit SET does not wait for the automatic two-second debounce. |
+| Short SET or SET engagement | Immediately select the higher of the fresh, heading-matched map limit and rounded current driving speed, within cruise bounds. A legal limit takes priority; advisory is the fallback when no legal limit exists. Like the ordinary 105 km/h experimental-mode default, the map provides the initialization floor. Explicit SET does not wait for the automatic two-second debounce. |
+| SET while driving above the map limit | Hold the selected driving speed until the next confirmed different map limit or another SET. Qualification of the same limit cannot immediately undo that selection. |
 | SET with neither legal nor advisory data | Arm tracking and retain ordinary engagement initialization as the fallback. A held sign cannot supply a target. |
 | RES engagement | Restore the previous cruise speed. |
 | RES/+ while engaged | Adjust normally and hold the manual target until the next confirmed different limit or SET. |
 | Long +/- | Retain repeated 5 km/h or 5 mph steps. Manual hold/release keeps priority over a concurrent map change. |
 | New limit while map mode is on | Automatically update after two seconds of stable, fresh data with advancing GPS timestamps. |
-| Missing or ambiguous map data | Keep the existing cruise target. The sign may briefly hold its last confirmed value, then show a dash. |
-| Advisory speed on the matched road | Display the recommendation on yellow with no MAXIMUM/SPEED LIMIT heading. Cruise uses it only when no usable legal limit is available on that road. |
+| Missing or ambiguous map data | Keep the existing cruise target. Hide the sign's number when it is not usable by explicit SET. |
+| Advisory speed on the matched road | If no legal limit exists, display the fresh recommendation on yellow with no MAXIMUM/SPEED LIMIT heading and use it as the map input to SET. |
 | Toggle off | Hold the existing cruise target and restore ordinary SET/RES behavior. |
-| Accelerator pressed | Defer automatic target updates; SET retains the existing current-speed floor. |
+| Accelerator pressed | Defer automatic target updates. Explicit SET still selects the higher of the map limit and current driving speed. |
 
 The larger units, numeric cruise target, thicker green active/ready border and
 pronounced 1 Hz green pulse are shared by both screen sizes. MAP ON/READY indicates
@@ -85,13 +86,13 @@ The feedback state is observational and does not change planner or actuator outp
 
 Numeric `maxspeed:advisory` tags, including forward/backward variants and mph,
 are read separately from legal `maxspeed` tags. An advisory no longer invalidates
-an otherwise usable legal limit. A lower advisory takes display priority; if
-the legal limit is equal or lower, the legal sign remains. For cruise targets,
-a usable legal limit always wins, even when the displayed advisory is lower.
+an otherwise usable legal limit. The sign and SET share the same selection:
+a usable legal limit always wins. An advisory is shown only when the legal limit
+is absent, so the sign does not advertise a different map input from SET.
 Advisory-only roads use the fresh matched recommendation as a fallback target,
 with the same two-second automatic qualification, immediate explicit SET,
 manual override and RES behavior as legal limits. The sign stays yellow.
-The fallback never reads a held display value or borrows a neighbouring road's limit.
+The fallback never reads a legacy display value or borrows a neighbouring road's limit.
 Unsupported conditional,
 variable or lane-specific qualifiers remain unavailable within their own tag family.
 The yellow background stays steady while an advisory is shown, even if a separate
@@ -104,7 +105,23 @@ Fresh position changes are checked against the mapped curve. At connected ways,
 bounded forward traversal follows shared OSM node IDs, including junctions inside
 a way and short intervening segments. Coordinate coincidence alone cannot connect
 a bridge to a road beneath it. The obsolete compass-only continuity exception is
-removed. Model-path curvature is not needed for this implementation.
+removed. Model-path curvature is not used.
+
+Fresh CAN standstill retains the last approach heading and confirmed road through
+a stop. GPS must continue to supply fresh positions; drift is bounded to 12 m from
+a fixed stop anchor, with the accepted road within 15 m. Turning the wheel or noisy
+GPS course at rest cannot choose a new road. Movement resumes normal ambiguity checks.
+
+Measured `controlsState.curvature` supplies steering evidence using the calibrated
+vehicle model, including steering ratio, offset, stiffness, wheelbase and roll.
+It is not commanded steering and does not require a wheel-radius parameter.
+Integrated motion supplements fresh GPS course; disagreement above 25 degrees
+discards the steering estimate. A low-speed heading fallback is bounded to 20 m,
+45 degrees of turn and ten accumulated moving seconds. Time stopped does not consume
+the departure allowance. Standstill retention can continue
+with fresh GPS and bounded drift. Invalid CAN, stale inputs, reverse gear or missing
+GPS clear the fallback; missing calibration while moving leaves ordinary GPS matching.
+GPS positions and timestamps are never extrapolated or refreshed by steering.
 
 A nearby different-limit road still requires geometric separation. The tracked
 road cannot win merely because it was selected previously: a closer competing road,
@@ -116,7 +133,11 @@ When a shallow ramp fork outlives confirmed history, two fresh, moving fixes can
 reacquire the same or a connected road. Both must favour it by at least 6 m over
 conflicting alternatives, be within 8 m of its geometry and within 25 degrees of
 its direction. Confirmation requires at least 5 m of movement over 0.5–3 seconds;
-faster GPS feeds accumulate evidence from the initial tentative fix. Equal forks,
+faster GPS feeds accumulate evidence from the initial tentative fix. When steering
+agrees within 12 degrees and separates every conflicting direction by at least
+another 15 degrees, the reacquisition margin can fall from 6 to 3 m. During confirmed
+tracking it can fall from 3 to 1.5 m after at least 5 m of GPS movement. The closest
+road must still win, with directed motion and shared-node connectivity. Equal forks,
 stationary/frozen fixes and disconnected jumps do not qualify. Advisory differences
 also count as conflicts, even when the two roads have the same legal limit. This
 prevents a ramp recommendation from appearing merely because the adjacent motorway
@@ -131,11 +152,13 @@ database or route archive is written. Requests contain coordinates but no device
 identifier or route history. Matching and network access remain outside the
 control loop.
 
-Control samples and display holds have separate validity and timestamps.
-The existing 0.8 s publisher/receiver freshness, 3 s GPS freshness and bounded
-2 s/60 m display hold remain. A short processing handoff retains only the
-preceding sample's original timestamp; an ambiguous result cannot become fresh
-control data. Missing map data cannot engage cruise or launch the vehicle.
+The sign and SET share control validity, heading checks, 8–145 km/h bounds,
+0.8 s publisher/receiver freshness and 3 s GPS freshness. There is no display-only
+hold after control eligibility is lost. A bounded 0.3 s/60 m processing handoff
+retains only the preceding sample's original timestamp; an ambiguous result clears
+both the sign and the available map target. Explicit SET can use a fresh match
+before the two-second automatic qualification finishes. Missing map data cannot
+engage cruise or launch the vehicle.
 
 This is road matching, not advance planning for future speed zones. A lower
 limit is applied after matching the new zone; the branch does not guarantee
@@ -147,26 +170,31 @@ Device attribution is under Settings > Software > Map Data.
 
 ## Validation
 
-- 70 map/cruise regressions cover immediate SET, unchanged RES and long holds,
+- 78 map/cruise regressions cover immediate SET, unchanged RES and long holds,
   speed-convergence feedback, intervention cancellation, message serialization,
   curved-road continuity, connected/internal junctions, ramp departure, unknown
   roads, one-way/directional limits, cache replacement and stale/frozen GPS,
   independent legal/advisory parsing, fork reacquisition, on-ramp merges,
-  fast GPS feeds, legal-priority advisory fallback and held-display/control separation.
-- In a synthetic curved-road case with lagging GPS bearing and a nearby different
-  limit, confirmed matches improve from 4/17 to 17/17 and visible-sign samples
-  from 6/17 to 17/17. Neither version selects the wrong limit in that fixture.
-  These figures describe the synthetic test, not a measured driving improvement.
-- Real mapd/messaging tests with synthetic 1 Hz GPS and local road fixtures select
-  a legal 50 km/h target over a 30 km/h advisory, then separately select 30 km/h
-  when only the advisory exists. Stopping mapd holds the target and reports MAP WAIT.
-- Isolated production UI tests check pulse lifecycle, stale status and touch/alert
-  cancellation, yellow advisory signs without a heading, metric/imperial display
-  and both screen sizes. Software layouts, schema generation, lint and whitespace pass.
+  fast GPS feeds, legal-priority advisory fallback, ready-only display, accelerator
+  override, the current-speed floor, stopped-road retention and steering evidence.
+- Recorded-input replay of route `000002b0--29d880bc44`, segment 1, reproduces all
+  5,977 recorded cruise values with the preceding helper. The first SET changes
+  from 40 to 60 km/h with this patch; the next two remain 60. The map was already
+  ready: accelerator override at engagement caused the old 40 km/h initialization.
+  This replay holds recorded vehicle inputs fixed; it does not predict acceleration.
+- At 5 Hz, heading replay retains direction for all 225 stopped samples in route
+  `000002af--2171aedb58`, segment 3, and all 85 in `000002b0--29d880bc44`, segment 1.
+  The preceding GPS-only input has no heading for those samples. This establishes
+  heading availability, not route-level map matching or correct ramp selection.
+- Production UI and mapd functions pass isolated checks with real serialized
+  messages, synthetic road fixtures and mocked transport. They cover legal/advisory
+  agreement between display and SET, stale/invalid inputs, and moving-to-stopped
+  retention with small negative filtered ego speeds. Lint and whitespace pass.
 - Five upstream cruise-helper cases pass with hardware/manager bootstrap isolated.
   The full upstream maneuver suite was not run; its environment dependencies are
   unavailable here.
 
-Ramp validation uses synthetic geometry and tags. The raw OSM tags at the
-bookmarked offramp in route 2ad remain unverified because the live lookup failed.
-Native device appearance and real-road performance still require verification.
+Ramp validation uses synthetic geometry and tags. Raw OSM geometry for the latest
+route locations was unavailable because live lookups failed, so end-to-end road
+matching there remains unverified. Native device appearance, transport and
+real-road performance were not revalidated for this follow-up.

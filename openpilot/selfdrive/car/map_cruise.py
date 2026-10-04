@@ -16,8 +16,8 @@ def read_map_speed(sm, now: float, require_heading: bool = True, replay: bool = 
   """Reject stale publishers even if a receiver has only just seen their packet."""
   msg = sm['mapSpeedLimit']
   stamp = msg.gpsMonoTime * 1e-9
-  # Only the fresh, matched advisory can replace an absent legal limit. The held
-  # display value is never a target, and malformed legal values cannot fall back.
+  # Only the fresh, matched advisory can replace an absent legal limit. Legacy
+  # display fields are never targets, and malformed legal values cannot fall back.
   speed = msg.advisorySpeed if msg.speedLimit == 0 else msg.speedLimit
   valid = (sm.valid['mapSpeedLimit'] and 0 < stamp <= now and
            0 <= now - sm.logMonoTime['mapSpeedLimit'] * 1e-9 <= MAP_MESSAGE_MAX_AGE and
@@ -29,14 +29,9 @@ def read_map_speed(sm, now: float, require_heading: bool = True, replay: bool = 
 
 
 def read_map_display(sm, now: float) -> float | None:
-  """Legal/advisory display has independent validity; Event.valid is for control only."""
-  msg = sm['mapSpeedLimit']
-  valid = (msg.displayValid and 0 < msg.displayGpsMonoTime * 1e-9 <= now and
-           now - msg.displayGpsMonoTime * 1e-9 <= 2.0 and
-           0 <= now - sm.logMonoTime['mapSpeedLimit'] * 1e-9 <= MAP_MESSAGE_MAX_AGE and
-           0 <= now - sm.recv_time['mapSpeedLimit'] <= MAP_MESSAGE_MAX_AGE and
-           math.isfinite(msg.displaySpeedLimit) and 0 < msg.displaySpeedLimit <= 300 / 3.6)
-  return msg.displaySpeedLimit if valid else None
+  """Show the fresh map input to SET, before its current-driving-speed floor."""
+  speed, _ = read_map_speed(sm, now)
+  return speed if speed is not None and 8 <= round(speed * CV.MS_TO_KPH, 3) <= 145 else None
 
 
 class MapCruise:

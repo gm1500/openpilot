@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from openpilot.selfdrive.mapd import osm_speed_limit as osm
+from openpilot.selfdrive.mapd.heading import MapHeading, VehicleMotion, vehicle_motion
 
 
 def road(speed="40", x=0., tags=None):
@@ -42,6 +43,123 @@ class TestOSMSpeedLimit(unittest.TestCase):
     self.assertAlmostEqual(osm.parse_speed("60 mph"), 60 * .44704)
     for value in ("", "none", "signals", "walk", "CA-AB:urban", "40;60", "40 @ wet", "0", "-5", "nan", "99999"):
       self.assertIsNone(osm.parse_speed(value), value)
+
+  def test_stop_retains_approach_heading_without_turning_from_steering_at_rest(self):
+    h = MapHeading()
+    h.update(self.fix, VehicleMotion(3., False, 0.), 100.)
+    for i in range(1, 301):
+      now = 100. + i * .2
+      # Even a noisy GPS course and turned wheels must not rotate a stopped car.
+      fix = replace(self.fix, latitude=point(0, 1)[0], bearing=180 if i % 2 else None, timestamp=now)
+      result = h.update(fix, VehicleMotion(0., True, .2), now)
+      self.assertEqual(result.bearing, 0.)
+      self.assertTrue(result.stationary)
+      self.assertIsNone(result.motion_bearing)
+      self.assertEqual((result.latitude, result.longitude, result.timestamp), (fix.latitude, fix.longitude, fix.timestamp))
+    # Pulling away after a long stop retains direction until GPS course returns.
+    for i in range(1, 6):
+      now = 160. + i * .2
+      fix = replace(self.fix, latitude=point(0, 1 + i * .2)[0], bearing=None, timestamp=now)
+      result = h.update(fix, VehicleMotion(1., False, 0.), now)
+      self.assertEqual(result.bearing, 0.)
+      self.assertEqual(result.motion_bearing, 0.)
+    self.assertIsNone(h.update(None, VehicleMotion(0., True, 0.), 162.))
+    self.assertIsNone(h.update(replace(self.fix, bearing=None, timestamp=163.), VehicleMotion(0., True, 0.), 163.).bearing)
+
+  def test_heading_integrates_calibrated_turn_and_keeps_gps_as_reference(self):
+    h = MapHeading()
+    motion = VehicleMotion(10., False, math.radians(3) / 10)
+    fix = replace(self.fix, bearing=359.)
+    for i in range(5):
+      h.update(fix, motion, 100. + i * .2)
+    moved = osm.GpsFix(*point(0, 10), .5, 3., 101.)
+    result = h.update(moved, motion, 101.)
+    self.assertAlmostEqual(result.motion_bearing, 2.)
+    self.assertEqual(result.bearing, .5)
+    for i in range(1, 5):
+      h.update(moved, motion, 101. + i * .2)
+    inconsistent = h.update(replace(moved, bearing=120., timestamp=102.), motion, 102.)
+    self.assertEqual(inconsistent.bearing, 120.)
+    self.assertIsNone(inconsistent.motion_bearing)
+
+  def test_heading_hold_rejects_drift_missing_sensors_stale_fixes_and_creep_distance(self):
+    for issue in ('drift', 'sensors', 'stale', 'gap'):
+      h = MapHeading()
+      h.update(self.fix, VehicleMotion(3., False, 0.), 100.)
+      fix = replace(self.fix, bearing=None, timestamp=100.2)
+      motion = VehicleMotion(0., True, 0.)
+      now = 100.2
+      if issue == 'drift':
+        fix = replace(fix, latitude=point(0, 21)[0])
+      elif issue == 'sensors':
+        motion = None
+      elif issue == 'stale':
+        now = 104.
+      else:
+        fix, now = replace(fix, timestamp=102.), 102.
+      result = h.update(fix, motion, now)
+      self.assertTrue(result is None or result.bearing is None, issue)
+    h = MapHeading()
+    h.update(self.fix, VehicleMotion(1.9, False, 0.), 100.)
+    for i in range(1, 61):
+      now = 100. + i * .2
+      result = h.update(replace(self.fix, bearing=None, timestamp=now), VehicleMotion(1.9, False, 0.), now)
+    self.assertIsNone(result.bearing)  # stale direction cannot survive indefinite creeping
+
+  def test_vehicle_motion_checks_validity_and_uses_measured_curvature(self):
+    class SM(dict):
+      pass
+    sm = SM(carState=SimpleNamespace(canValid=True, vEgo=10., standstill=False, gearShifter='drive'),
+            controlsState=SimpleNamespace(curvature=.003), vehicleParameters=SimpleNamespace(valid=True, sensorValid=True))
+    sm.valid = dict.fromkeys(sm, True)
+    sm.recv_time = dict.fromkeys(sm, 100.)
+    sm.logMonoTime = dict.fromkeys(sm, int(100e9))
+    self.assertEqual(vehicle_motion(sm, 100.), VehicleMotion(10., False, .003))
+    sm['vehicleParameters'].valid = False
+    self.assertIsNone(vehicle_motion(sm, 100.).curvature)
+    sm['vehicleParameters'].valid = True
+    sm['controlsState'].curvature = math.nan
+    self.assertIsNone(vehicle_motion(sm, 100.).curvature)
+    sm['carState'].gearShifter = 'reverse'
+    self.assertIsNone(vehicle_motion(sm, 100.))
+    sm['carState'].gearShifter = 'drive'
+    sm['carState'].standstill = True
+    sm['carState'].vEgo = -1e-20
+    self.assertEqual(vehicle_motion(sm, 100.), VehicleMotion(0., True, None))
+    self.assertIsNone(vehicle_motion(sm, 101.))
+
+  def test_stopped_road_retention_is_bounded_and_releases_on_movement(self):
+    main = road('60')
+    parallel = road('40', x=12)
+    roads = (main, parallel)
+    tracker = osm.RoadTracker()
+    tracker.update((main,), self.fix)
+    for i in range(1, 61):
+      fix = osm.GpsFix(*point(7, 0), 0., 15., 100. + i, stationary=True)
+      self.assertEqual(tracker.update(roads, fix).speed, 60 / 3.6)
+    # Driving toward the other road resumes ordinary ambiguity checks immediately.
+    self.assertIsNone(tracker.update(roads, replace(fix, stationary=False, timestamp=161.)))
+    tracker = osm.RoadTracker()
+    tracker.update((main,), self.fix)
+    self.assertIsNone(tracker.update(roads, osm.GpsFix(*point(13, 0), 0., 15., 101., stationary=True)))
+
+  def test_steering_supports_connected_ramp_but_not_equal_fork_or_wrong_turn(self):
+    main = polyline([(0, -100), (0, 0), (0, 100)], '100', way_id=1)
+    ramp = polyline([(0, 0), (40, 100)], '60', way_id=2)
+    first = osm.GpsFix(*point(0, -10), 0., 15., 100.)
+    departed = osm.GpsFix(*point(2, 5), 10., 15., 101.)
+    for steering, expected in ((None, None), (0., None), (21.8, 60 / 3.6)):
+      tracker = osm.RoadTracker()
+      tracker.update((main,), first)
+      result = tracker.update((main, ramp), replace(departed, motion_bearing=steering))
+      self.assertEqual(result.speed if result else None, expected)
+    tracker = osm.RoadTracker()
+    tracker.update((main,), first)
+    self.assertIsNone(tracker.update((main, ramp), osm.GpsFix(*point(0, 0), 10., 15., 101., motion_bearing=21.8)))
+    unconnected = replace(ramp, node_ids=(90001, 90002))
+    tracker = osm.RoadTracker()
+    tracker.update((main,), first)
+    self.assertIsNone(tracker.update((main, unconnected), replace(departed, motion_bearing=21.8)))
 
   def test_tracker_keeps_curved_road_with_lagged_heading_near_other_limit(self):
     radius = 100
@@ -243,12 +361,12 @@ class TestOSMSpeedLimit(unittest.TestCase):
     match = tracker.update(roads, osm.GpsFix(*point(12, 10), 0., 15., 100.5))
     self.assertAlmostEqual(match.advisory_speed, 50 / 3.6)
 
-  def test_fresh_advisory_is_separate_from_held_display(self):
+  def test_display_shares_legal_priority_and_freshness_with_control(self):
     service = osm.OSMSpeedLimit()
     service._thread = Mock()
     service._result = (self.fix, 100 / 3.6, 50 / 3.6)
-    self.assertAlmostEqual(service.update(self.fix, 100.), 50 / 3.6)
-    self.assertTrue(service.display_is_advisory)
+    self.assertAlmostEqual(service.update(self.fix, 100.), 100 / 3.6)
+    self.assertFalse(service.display_is_advisory)
     self.assertAlmostEqual(service.control_sample[1], 100 / 3.6)
     moved = replace(self.fix, timestamp=101.)
     service._result = (moved, None, 50 / 3.6)
@@ -256,10 +374,10 @@ class TestOSMSpeedLimit(unittest.TestCase):
     self.assertIsNone(service.control_sample[1])
     self.assertAlmostEqual(service.control_sample[2], 50 / 3.6)
     service._result = (replace(moved, timestamp=102.), None, None)
-    self.assertAlmostEqual(service.update(service._result[0], 102.), 50 / 3.6)
-    self.assertTrue(service.display_is_advisory)
-    self.assertEqual(service.display_timestamp, 101.)
-    self.assertEqual(service.control_sample[1:], (None, None))  # held yellow sign cannot supply a fresh target
+    self.assertIsNone(service.update(service._result[0], 102.))
+    self.assertFalse(service.display_is_advisory)
+    self.assertEqual(service.display_timestamp, 0.)
+    self.assertEqual(service.control_sample[1:], (None, None))  # no sign or target from the previous advisory
     self.assertIsNone(service.update(service._result[0], 103.1))
     self.assertFalse(service.display_is_advisory)
     service._result = (replace(moved, timestamp=104.), 40 / 3.6, 50 / 3.6)
@@ -337,7 +455,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
     fix = replace(self.fix, longitude=180., bearing=90.)
     self.assertAlmostEqual(osm.match_speed((r,), fix), 40 / 3.6)
 
-  def test_highway_gps_step_holds_until_new_match_without_extending_age(self):
+  def test_highway_gps_step_handoff_clears_on_ambiguous_match(self):
     service = osm.OSMSpeedLimit()
     service._thread = Mock()
     service._result = (self.fix, 110 / 3.6, None)
@@ -347,7 +465,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
     self.assertAlmostEqual(service.update(moved, 101.), 110 / 3.6)
     self.assertTrue(service._wake.is_set())  # new fix wakes the matcher immediately
     service._result = (moved, None, None)
-    self.assertAlmostEqual(service.update(moved, 101.8), 110 / 3.6)
+    self.assertIsNone(service.update(moved, 101.8))
     self.assertIsNone(service.update(replace(moved, timestamp=102.1), 102.1))
 
   def test_confirmed_limit_change_is_immediate(self):
@@ -359,7 +477,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
     service._result = (moved, 60 / 3.6, None)
     self.assertAlmostEqual(service.update(moved, 101.), 60 / 3.6)
 
-  def test_display_hold_is_not_a_confirmed_control_sample(self):
+  def test_display_and_control_expire_together(self):
     service = osm.OSMSpeedLimit()
     service._thread = Mock()
     service._result = (self.fix, 110 / 3.6, None)
@@ -367,12 +485,12 @@ class TestOSMSpeedLimit(unittest.TestCase):
     moved = replace(self.fix, latitude=math.degrees(31 / osm.EARTH_RADIUS), timestamp=101.)
     self.assertAlmostEqual(service.update(moved, 101.), 110 / 3.6)
     self.assertEqual(service.control_sample[0].timestamp, 100.)  # never restamp an older match
-    self.assertAlmostEqual(service.update(moved, 101.4), 110 / 3.6)
+    self.assertIsNone(service.update(moved, 101.4))
     self.assertIsNone(service.control_sample)  # 0.3 s processing grace has expired
-    service._result = (moved, None, None)  # fresh but ambiguous match, with sign still held
-    self.assertAlmostEqual(service.update(moved, 101.5), 110 / 3.6)
+    service._result = (moved, None, None)  # fresh but ambiguous match also clears the sign
+    self.assertIsNone(service.update(moved, 101.5))
     self.assertIsNone(service.control_sample[1])
-    self.assertEqual(service.display_timestamp, 100.)
+    self.assertEqual(service.display_timestamp, 0.)
     self.assertIsNone(service.update(None, 101.6))
     self.assertIsNone(service.control_sample)
 

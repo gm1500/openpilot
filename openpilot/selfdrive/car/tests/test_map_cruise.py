@@ -50,6 +50,7 @@ class TestMapCruise(unittest.TestCase):
 
   def test_engagement_set_uses_fresh_map_but_resume_keeps_previous(self):
     self.enabled = False
+    self.cs.vEgo = 20 / 3.6
     self.limit = 30
     self.tick(ButtonType.decelCruise, True)
     self.assertIsNone(self.helper.map_cruise.target_kph)
@@ -294,6 +295,7 @@ class TestMapCruise(unittest.TestCase):
 
   def test_set_engages_at_map_limit_instead_of_initial_minimum(self):
     self.enabled = False
+    self.cs.vEgo = 20 / 3.6
     self.limit = 30
     self.tick(ticks=210)
     self.tick(ButtonType.decelCruise, False)
@@ -413,7 +415,7 @@ class TestMapCruise(unittest.TestCase):
       self.assertEqual(self.helper.v_cruise_kph, 50 + sign * 25)
       self.assertEqual(self.helper.map_cruise.state(True), 'paused')
 
-  def test_gas_override_holds_auto_target_and_keeps_legacy_set_floor(self):
+  def test_gas_defers_auto_but_explicit_set_uses_higher_of_map_and_driving_speed(self):
     self.tick(ticks=210)
     self.cs.gasPressed = True
     self.cs.vEgo = 70 / 3.6
@@ -421,10 +423,37 @@ class TestMapCruise(unittest.TestCase):
     self.tick(ticks=210)
     self.assertEqual(self.helper.v_cruise_kph, 50)
     self.tap(ButtonType.decelCruise)
+    self.assertEqual(self.helper.v_cruise_kph, 80)
+    self.limit = 60
+    self.tick()
+    self.tap(ButtonType.decelCruise)
     self.assertEqual(self.helper.v_cruise_kph, 70)
     self.cs.gasPressed = False
     self.tick(ticks=210)
     self.assertEqual(self.helper.v_cruise_kph, 70)
+
+  def test_map_set_initialization_matches_default_speed_floor_with_or_without_gas(self):
+    for gas in (False, True):
+      for driving, expected in ((20, 60), (70, 70)):
+        self.setUp()
+        self.enabled = False
+        self.cs.vEgo = driving / 3.6
+        self.cs.gasPressed = gas
+        self.limit = 60
+        self.tick(ButtonType.decelCruise, True)
+        self.helper.initialize_v_cruise(self.cs, True)
+        self.assertEqual(self.helper.v_cruise_kph, expected)
+        self.enabled = True
+        self.cs.gasPressed = False
+        self.tick(ticks=220)
+        self.assertEqual(self.helper.v_cruise_kph, expected)
+
+  def test_dedicated_set_with_gas_selects_map_immediately(self):
+    self.limit = 60
+    self.cs.gasPressed = True
+    self.tick()
+    self.tap(ButtonType.setCruise)
+    self.assertEqual(self.helper.v_cruise_kph, 60)
 
   def test_imperial_map_limit_and_manual_increment(self):
     self.metric = False
@@ -481,7 +510,7 @@ class TestMapCruise(unittest.TestCase):
     self.assertAlmostEqual(read_map_speed(sm, 104., replay=True)[0], 50 / 3.6)
     self.assertIsNone(read_map_speed(sm, 105., replay=True)[0])
 
-  def test_held_sign_is_display_only_and_expires(self):
+  def test_held_sign_is_hidden_when_not_selectable(self):
     from openpilot.cereal import log
     class SM(dict):
       pass
@@ -498,7 +527,7 @@ class TestMapCruise(unittest.TestCase):
       sm.valid = {'mapSpeedLimit': decoded.valid}
       sm.logMonoTime = {'mapSpeedLimit': decoded.logMonoTime}
       sm.recv_time = {'mapSpeedLimit': 101.}
-      self.assertAlmostEqual(read_map_display(sm, 101.), 110 / 3.6, places=5)
+      self.assertIsNone(read_map_display(sm, 101.))
       self.assertIsNone(read_map_speed(sm, 101.)[0])
       sm.logMonoTime['mapSpeedLimit'] = int(102.1e9)
       sm.recv_time['mapSpeedLimit'] = 102.1
@@ -525,10 +554,11 @@ class TestMapCruise(unittest.TestCase):
         sm.logMonoTime = {'mapSpeedLimit': decoded.logMonoTime}
         sm.recv_time = {'mapSpeedLimit': 100.}
         self.assertTrue(decoded.mapSpeedLimit.displayIsAdvisory)
-        self.assertAlmostEqual(read_map_display(sm, 100.), 50 / 3.6, places=5)
         if legal:
+          self.assertAlmostEqual(read_map_display(sm, 100.), legal, places=5)
           self.assertAlmostEqual(read_map_speed(sm, 100.)[0], legal, places=5)
         else:
+          self.assertIsNone(read_map_display(sm, 100.))
           self.assertIsNone(read_map_speed(sm, 100.)[0])
 
   def test_fresh_advisory_fallback_preserves_legal_priority_and_validity(self):
@@ -552,6 +582,7 @@ class TestMapCruise(unittest.TestCase):
         sm.logMonoTime = {'mapSpeedLimit': decoded.logMonoTime}
         sm.recv_time = {'mapSpeedLimit': 100.}
         self.assertAlmostEqual(read_map_speed(sm, 100.)[0] * 3.6, expected, places=4)
+        self.assertAlmostEqual(read_map_display(sm, 100.) * 3.6, expected, places=4)
     sm['mapSpeedLimit'] = msg
     msg.speedLimit = 0.
     self.assertIsNone(read_map_speed(sm, 101.)[0])  # stale publisher

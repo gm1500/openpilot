@@ -14,7 +14,8 @@ struct MapSpeedLimit @0x81c2f05a394cf4af {
   speedLimit @0 :Float32;  # legal limit in m/s; zero if unavailable, requires Event.valid
   gpsMonoTime @1 :UInt64; # timestamp of the matched GPS fix, nanoseconds
   headingValid @2 :Bool;
-  # Display can briefly outlive a confirmed match. NEVER use for control.
+  # Compatibility display fields mirror the fresh legal/advisory selection.
+  # Consumers use speedLimit/advisorySpeed with Event.valid and headingValid.
   displaySpeedLimit @3 :Float32;
   displayValid @4 :Bool;
   displayGpsMonoTime @5 :UInt64;

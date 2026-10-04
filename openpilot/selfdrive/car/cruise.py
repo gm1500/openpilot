@@ -91,9 +91,7 @@ class VCruiseHelper:
         if b.type in (ButtonType.resumeCruise, ButtonType.cancel):
           self.map_cruise.tracking = False
         elif b.type == ButtonType.setCruise and not b.pressed:
-          self.map_cruise.tracking = not CS.gasPressed
-          if self.map_cruise.tracking:
-            self.map_cruise.select_current()
+          self._select_map_speed(CS)
 
     long_press = False
     button_type = None
@@ -130,9 +128,9 @@ class VCruiseHelper:
     if self.map_cruise.enabled:
       # Short SET selects the map. RES/+ and long +/- preserve manual adjustment
       # and hold that target until the next qualified limit change or SET.
-      self.map_cruise.tracking = button_type == ButtonType.decelCruise and not long_press and not CS.gasPressed
+      self.map_cruise.tracking = button_type == ButtonType.decelCruise and not long_press
       if self.map_cruise.tracking:
-        self.map_cruise.select_current()
+        self._select_map_speed(CS)
         return
 
     v_cruise_delta = v_cruise_delta * (5 if long_press else 1)
@@ -174,10 +172,9 @@ class VCruiseHelper:
       self.v_cruise_kph = int(round(np.clip(CS.vEgo * CV.MS_TO_KPH, initial, V_CRUISE_MAX)))
 
     if self.map_cruise.enabled:
-      self.map_cruise.tracking = not resume and not CS.gasPressed
+      self.map_cruise.tracking = not resume
       if self.map_cruise.tracking:
-        self.map_cruise.select_current()
-      self._apply_map_speed()
+        self._select_map_speed(CS)
 
     self.v_cruise_cluster_kph = self.v_cruise_kph
 
@@ -195,3 +192,13 @@ class VCruiseHelper:
       self.v_cruise_kph = self.map_cruise.target_kph
       return changed
     return False
+
+  def _select_map_speed(self, CS):
+    """Explicit SET uses the map as its minimum, including during pedal override."""
+    self.map_cruise.select_current()
+    target = self.map_cruise.target_kph
+    if target is not None:
+      self.v_cruise_kph = max(target, round(float(np.clip(CS.vEgo * CV.MS_TO_KPH, V_CRUISE_MIN, V_CRUISE_MAX))))
+      # Like a manual selection, a higher driving speed must not be immediately
+      # undone by the same map limit after the pedal is released.
+      self.map_cruise.tracking = self.v_cruise_kph == target

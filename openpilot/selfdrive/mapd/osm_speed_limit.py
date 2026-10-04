@@ -1,4 +1,4 @@
-"""OSM road matching with separate legal/advisory speeds and bounded display holds."""
+"""OSM road matching with fresh legal/advisory speeds shared by display and SET."""
 import json
 import math
 import re
@@ -15,8 +15,7 @@ QUERY_RADIUS = 1500.0  # metres; prefetch again after travelling 700 m
 QUERY_INTERVAL = 30.0
 CACHE_TTL = 600.0
 GPS_MAX_AGE = 3.0
-DISPLAY_HOLD_SECONDS = 2.0  # Display only; never a fresh control target
-DISPLAY_HOLD_METRES = 60.0
+HANDOFF_METRES = 60.0
 QCOM_UNKNOWN_ACCURACY = 15.0  # Matching allowance, not a measured GPS uncertainty
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ROAD_TYPES = ("motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street", "service", "road",
@@ -32,6 +31,8 @@ class GpsFix:
   bearing: float | None
   accuracy: float
   timestamp: float
+  stationary: bool = False
+  motion_bearing: float | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class RoadMatch:
   length: float
   forward: bool | None
   position: tuple[float, float]
+  bearing: float | None = None
 
   @property
   def advisory_speed(self) -> float | None:
@@ -167,7 +169,8 @@ def road_candidates(roads: tuple[Road, ...], fix: GpsFix) -> list[RoadMatch]:
         position = (fix.latitude + math.degrees(y / EARTH_RADIUS),
                     (fix.longitude + math.degrees(x / (EARTH_RADIUS * math.cos(math.radians(fix.latitude)))) + 180) % 360 - 180)
         nearest = RoadMatch(road, distance, road_speed(road.tags, forward), heading_error,
-                            segment_start + projection * length, 0., forward, position)
+                            segment_start + projection * length, 0., forward, position,
+                            (heading if forward else (heading + 180) % 360) if forward is not None else None)
     if nearest is not None:
       candidates.append(replace(nearest, length=along))
   return sorted(candidates, key=lambda candidate: candidate.distance)
@@ -214,6 +217,7 @@ class RoadTracker:
     self._processed: GpsFix | None = None
     self._result: RoadMatch | None = None
     self._candidate: tuple[RoadMatch, GpsFix] | None = None
+    self._stop_anchor: GpsFix | None = None
 
   def _set_roads(self, roads: tuple[Road, ...]):
     self._roads = roads
@@ -237,6 +241,7 @@ class RoadTracker:
         self.match = projected[0]
       else:
         self.match = self.fix = None
+        self._stop_anchor = None
 
   def _progress(self, previous: RoadMatch, current: RoadMatch, maximum: float) -> float | None:
     if previous.forward is None or current.forward is None:
@@ -301,17 +306,42 @@ class RoadTracker:
       travelled = math.hypot(*offset_metres(fix.latitude, fix.longitude, self.fix))
       if not 0 <= dt <= GPS_MAX_AGE or travelled > 75 * dt + 10:
         self.match = self.fix = None
+        self._stop_anchor = None
     candidates = road_candidates(roads, fix)
     result = None
+    if not fix.stationary:
+      self._stop_anchor = None
+    elif self.match is not None and fix.bearing is not None:
+      # A fresh CAN standstill and bounded GPS drift preserve the established
+      # road/direction through a stop. Never walk the anchor along noisy fixes.
+      if self._stop_anchor is None:
+        self._stop_anchor = self.fix
+      stopped = next((c for c in candidates if c.road == self.match.road and c.forward == self.match.forward), None)
+      drift = math.hypot(*offset_metres(fix.latitude, fix.longitude, self._stop_anchor))
+      if stopped is not None and stopped.distance <= 15 and drift <= 12:
+        self.match, self.fix, self._result = stopped, fix, stopped
+        self._candidate = None
+        return stopped
+      self.match = self.fix = self._stop_anchor = None
+      self._candidate = None
+      self._result = None
+      return None
     if candidates:
       best = candidates[0]
       conflicts = conflicting_roads(candidates, fix)
+      # Steering is a second direction estimate, used only once GPS favours a
+      # path and directed motion/connectivity agrees. No turn prediction at rest.
+      steering_support = False
+      if not fix.stationary and fix.motion_bearing is not None and best.bearing is not None and conflicts:
+        error = abs((best.bearing - fix.motion_bearing + 180) % 360 - 180)
+        steering_support = error <= 12 and all(c.bearing is not None and
+          abs((c.bearing - fix.motion_bearing + 180) % 360 - 180) >= error + 15 for c in conflicts)
       follows = (self.match is not None and self.fix is not None and self._follows_geometry(self.match, self.fix, best, fix))
       # A long, shallow fork can outlive confirmed history. Reacquire only after
       # two fresh moving fixes favour the same/connected road by a clear margin.
       # Tentative fixes never publish speeds or extend confirmed history.
       separated = (best.distance <= 8 and best.heading_error is not None and best.heading_error <= 25 and
-                   all(c.distance >= best.distance + 6 for c in conflicts))
+                   all(c.distance >= best.distance + (3 if steering_support else 6) for c in conflicts))
       if self.match is None and separated and self._candidate is not None:
         previous, previous_fix = self._candidate
         dt = fix.timestamp - previous_fix.timestamp
@@ -321,7 +351,9 @@ class RoadTracker:
         follows = connected and dt >= 0.5 and travelled >= 5
         if not connected:
           self._candidate = None
-      if not conflicts or (follows and all(c.distance >= best.distance + 3 for c in conflicts)):
+      moving = self.fix is not None and math.hypot(*offset_metres(fix.latitude, fix.longitude, self.fix)) >= 5
+      margin = 1.5 if steering_support and moving else 3
+      if not conflicts or (follows and all(c.distance >= best.distance + margin for c in conflicts)):
         result = best
       if self.match is None and separated and result is None:
         # Retain the starting fix while motion accumulates on faster GPS feeds.
@@ -402,12 +434,12 @@ class OSMSpeedLimit:
       self._fix_received_at = now
       self._wake.set()
     self.control_sample = None
+    self._display = None
     # Start only after the process has forked, on-road with a valid fix.
     if fix is not None and (self._thread is None or not self._thread.is_alive()):
       self._thread = threading.Thread(target=self._run, name="osm-speed-limit", daemon=True)
       self._thread.start()
     if fix is None or not 0 <= now - fix.timestamp <= GPS_MAX_AGE:
-      self._display = None
       return None
     if result is not None and result[0] == fix:
       self.control_sample = result
@@ -417,28 +449,15 @@ class OSMSpeedLimit:
       last_fix = result[0]
       if (fix.bearing is not None and last_fix.bearing is not None and
           abs((fix.bearing - last_fix.bearing + 180) % 360 - 180) <= 20 and
-          math.hypot(*offset_metres(fix.latitude, fix.longitude, last_fix)) <= DISPLAY_HOLD_METRES):
+          math.hypot(*offset_metres(fix.latitude, fix.longitude, last_fix)) <= HANDOFF_METRES):
         self.control_sample = result
-    if result is not None and result[0] == fix:
-      _, legal, advisory = result
-      # A lower advisory takes display priority; cruise independently prefers legal.
-      is_advisory = advisory is not None and (legal is None or advisory < legal)
+    if self.control_sample is not None and self.control_sample[0].bearing is not None:
+      sample_fix, legal, advisory = self.control_sample
+      is_advisory = legal is None and advisory is not None
       speed = advisory if is_advisory else legal
       if speed is not None:
-        self._display = (fix, speed, is_advisory)
+        self._display = (sample_fix, speed, is_advisory)
         return speed
-    # New 1 Hz GPS fixes can be 30 m apart at highway speed. Retain the previous
-    # confirmed sign while matching catches up or briefly becomes ambiguous.
-    # Keep its original GPS timestamp: polling must never extend the hold.
-    if self._display is not None:
-      last_fix, speed, _ = self._display
-      distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, last_fix))
-      same_heading = (fix.bearing is not None and last_fix.bearing is not None and
-                      abs((fix.bearing - last_fix.bearing + 180) % 360 - 180) <= 20)
-      stationary = fix.bearing is None and last_fix.bearing is None and distance <= 5
-      if 0 <= now - last_fix.timestamp <= DISPLAY_HOLD_SECONDS and distance <= DISPLAY_HOLD_METRES and (same_heading or stationary):
-        return speed
-    self._display = None
     return None
 
   def _run(self):
