@@ -213,3 +213,27 @@ followed by the same limit does not cancel that manual hold. Changes retain the
 two-second qualification; a long press in progress keeps priority, and releasing
 it preserves the manual target until a subsequent limit change. Turning map
 cruise off prevents automatic speed changes.
+
+### Speed-sign UI polish
+
+The shared comma 3/3X and comma 4 sign uses larger units and shows only the
+numeric cruise target underneath (without the SET prefix). OpenStreetMap credit
+and licence information are under Settings > Software > Map Data, replacing the
+tiny line below the onroad MAP status.
+
+A gentle 1 Hz green background pulse previews an automatic target change during
+the existing two-second qualification. The sign returns to white when the cruise
+target changes or the pending change is cancelled. It does not wait for vehicle
+speed to reach the target. The UI-only `mapCruiseState.pendingSpeed` field comes
+from the actual selector; a held advisory sign or same-limit recovery during a
+manual hold cannot start the pulse. Disengagement, map-off, unsupported platforms,
+gas override, held +/- buttons and stale status suppress the preview. This is not
+look-ahead to a future road sign and adds no delay to speed selection.
+
+Validation: all 45 map/cruise regressions pass, including pending-state clearing,
+manual priority, read-only preview behavior and message serialization. Isolated
+production UI checks cover stale status, immediate target-change clearing, pulse
+reset and touch/alert cancellation. A software drawing backend was inspected at
+both screen sizes; native raylib preview was unavailable due to display-socket
+permissions, so on-device appearance still needs confirmation. C++ schema
+generation, lint and whitespace checks pass. Planner and torque tuning are unchanged.

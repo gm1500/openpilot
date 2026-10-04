@@ -30,6 +30,93 @@ class TestMapCruise(unittest.TestCase):
     self.tick(button, True)
     self.tick(button, False)
 
+  def pending(self):
+    return self.helper.pending_map_speed(self.cs, self.enabled)
+
+  def test_pending_preview_clears_when_target_changes(self):
+    for limit in (50, 30, 145):
+      self.limit = limit
+      self.tick(ticks=150)
+      self.assertEqual(self.pending(), limit)
+      self.assertNotEqual(self.helper.v_cruise_kph, limit)
+      self.tick(ticks=60)
+      self.assertEqual(self.helper.v_cruise_kph, limit)
+      self.assertIsNone(self.pending())
+
+  def test_pending_preview_is_read_only(self):
+    self.tick(ticks=100)
+    before = (self.helper.v_cruise_kph, vars(self.helper.map_cruise).copy())
+    for _ in range(100):
+      self.assertEqual(self.pending(), 50)
+    self.assertEqual((self.helper.v_cruise_kph, vars(self.helper.map_cruise)), before)
+
+  def test_pending_preview_requires_an_actual_change(self):
+    self.limit = 40
+    self.tick(ticks=100)
+    self.assertIsNone(self.pending())
+    self.tick(ticks=110)
+    self.tap(ButtonType.accelCruise)
+    self.limit = None
+    self.tick()
+    self.assertIsNone(self.pending())
+    self.limit = 40  # same limit returning must preserve manual HOLD
+    self.tick(ticks=100)
+    self.assertIsNone(self.pending())
+    self.tick(ticks=110)
+    self.assertEqual(self.helper.v_cruise_kph, 41)
+    self.limit = 60  # a different zone will resume automatic tracking
+    self.tick(ticks=100)
+    self.assertEqual(self.pending(), 60)
+    self.tick(ticks=110)
+    self.assertIsNone(self.pending())
+    self.assertEqual(self.helper.v_cruise_kph, 60)
+
+  def test_pending_preview_suppressed_when_application_blocked(self):
+    self.tick(ticks=100)
+    self.enabled = False
+    self.assertIsNone(self.pending())
+    self.enabled = True
+    self.cs.gasPressed = True
+    self.assertIsNone(self.pending())
+    self.cs.gasPressed = False
+    self.cs.cruiseState.available = False
+    self.assertIsNone(self.pending())
+    self.cs.cruiseState.available = True
+    self.tick(ButtonType.accelCruise, True)
+    self.assertIsNone(self.pending())
+    self.tick(ticks=220)
+    self.assertIsNone(self.pending())
+    self.tick(ButtonType.accelCruise, False)
+    self.assertIsNone(self.pending())
+    self.limit = 80
+    self.tick()
+    self.assertEqual(self.pending(), 80)
+    self.toggle = False
+    self.tick()
+    self.assertIsNone(self.pending())
+
+  def test_pending_preview_cancels_on_missing_or_stale_data(self):
+    self.tick(ticks=100)
+    self.assertEqual(self.pending(), 50)
+    self.limit = None
+    self.tick()
+    self.assertIsNone(self.pending())
+    self.limit = 60
+    self.tick(fix_time=self.now - 4)
+    self.assertIsNone(self.pending())
+    self.tick()
+    self.assertEqual(self.pending(), 60)
+
+  def test_pending_preview_message_round_trip_and_default(self):
+    from openpilot.cereal import log
+    event = log.Event.new_message()
+    msg = event.init('mapCruiseState')
+    self.assertEqual(msg.pendingSpeed, 0.)  # old publishers/logs do not pulse
+    self.tick(ticks=100)
+    msg.pendingSpeed = self.pending() / 3.6
+    with log.Event.from_bytes(event.to_bytes()) as decoded:
+      self.assertAlmostEqual(decoded.mapCruiseState.pendingSpeed * 3.6, 50, places=4)
+
   def test_default_off_call_preserves_legacy(self):
     for button, expected in ((ButtonType.accelCruise, 41), (ButtonType.decelCruise, 40)):
       for pressed in (True, False):
@@ -241,6 +328,7 @@ class TestMapCruise(unittest.TestCase):
       self.tick(ticks=210)
       self.assertAlmostEqual(self.helper.v_cruise_kph, 40, places=4)
       self.assertEqual(self.helper.map_cruise.state(True), 'unsupported')
+      self.assertIsNone(self.pending())
 
   def test_disengaged_and_unavailable_never_auto_engage(self):
     self.enabled = False
@@ -250,6 +338,7 @@ class TestMapCruise(unittest.TestCase):
     self.enabled = True
     self.tick(ticks=210)
     self.assertEqual(self.helper.v_cruise_kph, 255)
+    self.assertIsNone(self.pending())
 
   def test_transport_staleness_and_heading(self):
     class SM(dict):

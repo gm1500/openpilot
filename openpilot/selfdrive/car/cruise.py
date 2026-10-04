@@ -163,6 +163,14 @@ class VCruiseHelper:
 
     self.v_cruise_cluster_kph = self.v_cruise_kph
 
+  def pending_map_speed(self, CS, enabled: bool) -> float | None:
+    """UI-only preview; suppress it whenever automatic application is blocked."""
+    pending = self.map_cruise.pending_kph
+    if (enabled and CS.cruiseState.available and self.v_cruise_initialized and not CS.gasPressed and
+        not any(self.button_timers.values()) and pending is not None and abs(pending - self.v_cruise_kph) > 0.01):
+      return pending
+    return None
+
   def _apply_map_speed(self):
     if self.map_cruise.enabled and self.map_cruise.tracking and self.map_cruise.target_kph is not None and self.v_cruise_initialized:
       self.v_cruise_kph = self.map_cruise.target_kph

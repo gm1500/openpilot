@@ -90,6 +90,7 @@ class UIState:
     self.speed_limit: float | None = None  # OSM m/s
     self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
     self.map_cruise_state = "waiting"
+    self.map_cruise_pending = False
 
     # UI Status tracking
     self.status: UIStatus = UIStatus.DISENGAGED
@@ -165,9 +166,18 @@ class UIState:
     if not self.started or self.sm.recv_frame['mapSpeedLimit'] < self.started_frame:
       self.speed_limit = None
     self.map_cruise_state = "waiting"
-    if (self.sm.valid['mapCruiseState'] and self.sm.recv_frame['mapCruiseState'] >= self.started_frame and
-        0 <= now - self.sm.logMonoTime['mapCruiseState'] * 1e-9 <= MAP_MESSAGE_MAX_AGE):
+    self.map_cruise_pending = False
+    if (self.started and self.sm.valid['mapCruiseState'] and self.sm.recv_frame['mapCruiseState'] >= self.started_frame and
+        0 <= now - self.sm.logMonoTime['mapCruiseState'] * 1e-9 <= MAP_MESSAGE_MAX_AGE and
+        0 <= now - self.sm.recv_time['mapCruiseState'] <= MAP_MESSAGE_MAX_AGE):
       self.map_cruise_state = str(self.sm['mapCruiseState'].state)
+      pending_kph = round(self.sm['mapCruiseState'].pendingSpeed * 3.6, 3)
+      cs = self.sm['carState']
+      # carState arrives faster than mapCruiseState: clear on the actual target
+      # change, without waiting for the next 5 Hz status packet.
+      self.map_cruise_pending = (self.map_cruise_enabled and self.map_cruise_supported and self.engaged and
+                                 cs.cruiseState.available and not cs.gasPressed and 8 <= pending_kph <= 145 and
+                                 8 <= cs.vCruise <= 145 and abs(pending_kph - cs.vCruise) > 0.01)
     self._update_status()
     self._update_chestnut_state()
     device.update()
@@ -267,6 +277,7 @@ class UIState:
     self.params.put_bool("MapCruiseEnabled", enabled)
     self.map_cruise_enabled = enabled
     self.map_cruise_state = "waiting" if enabled else "off"
+    self.map_cruise_pending = False
 
   def set_lane_policy_enabled(self, enabled: bool) -> None:
     """Persist the HUD selector and update its in-memory state immediately."""

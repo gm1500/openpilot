@@ -227,6 +227,7 @@ class Car:
       selector = self.v_cruise_helper.map_cruise
       map_msg.mapCruiseState.state = selector.state(self.sm['carControl'].enabled and CS.cruiseState.available)
       map_msg.mapCruiseState.targetSpeed = (selector.target_kph or 0.) / 3.6
+      map_msg.mapCruiseState.pendingSpeed = (self.v_cruise_helper.pending_map_speed(CS, self.sm['carControl'].enabled) or 0.) / 3.6
       self.pm.send('mapCruiseState', map_msg)
 
     if RD is not None:

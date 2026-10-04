@@ -23,6 +23,7 @@ struct MapSpeedLimit @0x81c2f05a394cf4af {
 struct MapCruiseState @0xaedffd8f31e7b55d {
   state @0 :State;
   targetSpeed @1 :Float32; # qualified map target in m/s, zero if unavailable
+  pendingSpeed @2 :Float32; # UI only: candidate automatic change in m/s, zero if none
   enum State {
     off @0;
     armed @1;

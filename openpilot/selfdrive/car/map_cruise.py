@@ -73,6 +73,13 @@ class MapCruise:
       # not a new speed zone and must not undo RES or a manual adjustment.
       self._last_qualified = candidate
 
+  @property
+  def pending_kph(self) -> float | None:
+    """Preview qualification without changing tracking or the cruise target."""
+    if self.enabled and self.target_kph is None and (self.tracking or self._candidate != self._last_qualified):
+      return self._candidate
+    return None
+
   def state(self, engaged: bool) -> str:
     if not self.supported:
       return 'unsupported'
