@@ -67,6 +67,8 @@ class _DistanceTrack:
   STOPPED_LEAD_MODEL_ACCEL = 0.25
   STOPPED_LEAD_TTC = 6.0
   STOPPED_LEAD_CONFIRM_TIME = 0.30
+  HANDOFF_SPEED_MARGIN = 5.0  # m/s; substantial range/model disagreement only
+  HANDOFF_CONFIRM_TIME = 0.25
 
   def __init__(self, observation: VisionLeadObservation, timestamp: float, ego: float):
     self.x = np.array([observation.distance, ego], dtype=float)
@@ -89,6 +91,7 @@ class _DistanceTrack:
     self.pre_closing_offset = 0.0
     self.closing_response_offset = 0.0
     self.stopped_lead_time = 0.0
+    self.handoff_time = 0.0
 
   def reset_output(self) -> None:
     # Unsupported or missing output must not leave a stale range/transition
@@ -101,6 +104,37 @@ class _DistanceTrack:
     self.pre_closing_offset = 0.0
     self.closing_response_offset = 0.0
     self.stopped_lead_time = 0.0
+    self.handoff_time = 0.0
+
+  def range_motion(self) -> tuple[float, float, float]:
+    """Causal range slope, its standard error, and mean ego speed."""
+    times = np.array([point[0] - self.time for point in self.range_history], dtype=float)
+    distances = np.array([point[1] for point in self.range_history], dtype=float)
+    times -= times.mean()
+    distances -= distances.mean()
+    time_variance = float(times @ times)
+    rate = float(times @ distances) / time_variance
+    residual = distances - rate * times
+    rate_std = math.sqrt(max(float(residual @ residual), 0.0) / ((len(times) - 2) * time_variance))
+    return rate, rate_std, float(np.mean([point[3] for point in self.range_history]))
+
+  def reset_inconsistent_history(self, baseline: float, leads: list[dict], observation: VisionLeadObservation, ego: float) -> None:
+    # A gradual cut-in can pass the per-frame association gate while its range
+    # change implies a different car's velocity. Require sustained disagreement
+    # in both the private state and range slope; never relax close/urgent leads.
+    eligible = (observation.probability >= 0.9 and ego > 5.0 and
+                observation.distance > max(30.0, 1.5 * ego) and baseline > ego - 3.0 and
+                min(lead['aLeadK'] for lead in leads) >= -0.15)
+    inconsistent = False
+    if eligible and len(self.range_history) >= 7 and self.range_history[-1][0] - self.range_history[0][0] >= 0.6:
+      rate, rate_std, mean_ego = self.range_motion()
+      upper_speed = mean_ego + rate + 2.0 * rate_std
+      inconsistent = baseline - max(float(self.x[1]), upper_speed) > self.HANDOFF_SPEED_MARGIN
+    self.handoff_time = self.handoff_time + self.dt if inconsistent else 0.0
+    if self.handoff_time >= self.HANDOFF_CONFIRM_TIME:
+      # Re-anchor at the current distance with fresh covariance. No old speed
+      # bridge: publish current model velocity until the new history matures.
+      self.__init__(observation, self.time, ego)
 
   @property
   def ready(self) -> bool:
@@ -194,14 +228,7 @@ class _DistanceTrack:
       and 0.0 <= self.x[1] < baseline and self.P[1, 1] <= 36.0
       and self.time >= self.uncertain_handoff_until and self.transition >= 1.0
     ):
-      times = np.array([point[0] - self.time for point in history], dtype=float)
-      distances = np.array([point[1] for point in history], dtype=float)
-      times -= times.mean()
-      distances -= distances.mean()
-      time_variance = float(times @ times)
-      rate = float(times @ distances) / time_variance
-      residual = distances - rate * times
-      rate_std = math.sqrt(float(residual @ residual) / ((len(history) - 2) * time_variance))
+      rate, rate_std, _ = self.range_motion()
       closing = min(-rate - 2.0 * rate_std, ego - float(self.x[1]) - math.sqrt(self.P[1, 1]))
       if closing > observation.distance / self.PRE_CLOSING_TTC:
         offset = available_offset
@@ -224,22 +251,13 @@ class _DistanceTrack:
       and self.time >= self.uncertain_handoff_until and self.transition >= 1.0
       and baseline < target - self.CLOSING_RESPONSE_MARGIN
     ):
-      times = np.array([point[0] - self.time for point in history], dtype=float)
-      distances = np.array([point[1] for point in history], dtype=float)
-      egos = np.array([point[3] for point in history], dtype=float)
-      times -= times.mean()
-      distances -= distances.mean()
-      time_variance = float(times @ times)
-      if time_variance > 0.0:
-        rate = float(times @ distances) / time_variance
-        residual = distances - rate * times
-        rate_std = math.sqrt(max(float(residual @ residual), 0.0) / ((len(history) - 2) * time_variance))
-        # d(dRel)/dt = vLead - vEgo. Use the upper confidence bound so noisy
-        # range can only corroborate a slowdown conservatively.
-        range_speed_upper = float(np.mean(egos) + rate + 2.0 * rate_std)
-        if range_speed_upper < target - self.CLOSING_RESPONSE_MARGIN:
-          conservative_target = max(0.0, baseline, range_speed_upper)
-          desired_offset = min(self.CLOSING_RESPONSE_MAX_OFFSET, max(target - conservative_target, 0.0))
+      rate, rate_std, mean_ego = self.range_motion()
+      # d(dRel)/dt = vLead - vEgo. Use the upper confidence bound so noisy
+      # range can only corroborate a slowdown conservatively.
+      range_speed_upper = mean_ego + rate + 2.0 * rate_std
+      if range_speed_upper < target - self.CLOSING_RESPONSE_MARGIN:
+        conservative_target = max(0.0, baseline, range_speed_upper)
+        desired_offset = min(self.CLOSING_RESPONSE_MAX_OFFSET, max(target - conservative_target, 0.0))
 
     step = self.CLOSING_RESPONSE_RATE * self.dt
     self.closing_response_offset += float(np.clip(desired_offset - self.closing_response_offset, -step, step))
@@ -261,6 +279,7 @@ class _DistanceTrack:
 
   def speed(self, leads: list[dict], observation: VisionLeadObservation, ego: float) -> float:
     baseline = min(lead['vLead'] for lead in leads)
+    self.reset_inconsistent_history(baseline, leads, observation, ego)
     use_distance = self.ready and observation.probability >= 0.5 and 0.0 <= ego < 60.0 and 2.0 < observation.distance < 150.0
     target = float(self.x[1]) if use_distance else baseline
     mode = 'distance' if use_distance else 'fallback'

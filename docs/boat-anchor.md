@@ -100,6 +100,27 @@ pre-closing cue before the range-derived estimate takes over. Normal transitions
 blend; urgent braking bypasses the blend. Low-speed closing and stopped-lead
 handling retain their model-based constraints.
 
+A gradual cut-in can survive per-frame association and mix the old and new car's
+range history. A sustained mismatch now re-anchors that history at the current
+distance and immediately uses the current model velocity, without an old-speed
+bridge. This guard requires a gap above both 30 m and 1.5 s, confidence at least
+0.9, model closing below 3 m/s, and model acceleration at least -0.15 m/s².
+Both the private velocity and the range slope's upper two-sigma speed must be
+more than 5 m/s below the model for 0.25 s, using at least 0.6 s of range history.
+Close, stopped and model-braking leads retain their existing constraints.
+Fresh history follows the existing bounded pre-closing cue, 1.5 s minimum maturity,
+uncertainty check and one-second transition; these are not a delay in accepting
+the new distance or responding to model braking.
+
+An 18,000-frame estimator replay covered route `000002a9--f6fcae3435` segment 85,
+route `000002b1--e670ceec8d` segments 1–12 and route `000002b0--29d880bc44`
+segments 1 and 5. The cut-in at 14.390 s publishes 99.2 km/h instead of 62.6 km/h,
+at 47.4 m instead of 47.6 m; the original model estimate there is 100.3 km/h.
+The other 14 segments' published lead velocities are unchanged. This verifies
+the estimator change on recorded inputs, not a changed braking or vehicle-speed
+trajectory. Shared range-slope calculations were consolidated without changing
+their existing results.
+
 The mild range correction and mature-track confidence shaping remain. Physical
 radar output and stock lead acceptance are unchanged. MPC costs, constraints and
 following-distance policy are retained. The POC assist above can further lower
