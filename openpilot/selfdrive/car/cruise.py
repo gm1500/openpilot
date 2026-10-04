@@ -3,6 +3,7 @@ import numpy as np
 
 from opendbc.car.structs import car
 from openpilot.common.constants import CV
+from openpilot.selfdrive.car.map_cruise import MapCruise, MapCruisePulse
 
 
 # WARNING: this value was determined based on the model's training distribution,
@@ -36,20 +37,26 @@ class VCruiseHelper:
     self.v_cruise_kph_last = 0
     self.button_timers = {ButtonType.decelCruise: 0, ButtonType.accelCruise: 0}
     self.button_change_states = {btn: {"standstill": False, "enabled": False} for btn in self.button_timers}
+    self.map_cruise = MapCruise(CP)
+    self.map_pulse = MapCruisePulse()
 
   @property
   def v_cruise_initialized(self):
     return self.v_cruise_kph != V_CRUISE_UNSET
 
-  def update_v_cruise(self, CS, enabled, is_metric):
+  def update_v_cruise(self, CS, enabled, is_metric, *, map_enabled=False, map_speed=None, map_gps_time=0., now=0.):
     self.v_cruise_kph_last = self.v_cruise_kph
+    self.map_cruise.update(map_enabled, map_speed, map_gps_time, now)
+    map_applied = False
 
     if CS.cruiseState.available:
       if not self.CP.pcmCruise:
         # if stock cruise is completely disabled, then we can use our own set speed logic
         self._update_v_cruise_non_pcm(CS, enabled, is_metric)
-        self.v_cruise_cluster_kph = self.v_cruise_kph
         self.update_button_timers(CS, enabled)
+        if enabled and not any(self.button_timers.values()) and not CS.gasPressed:
+          map_applied = self._apply_map_speed()
+        self.v_cruise_cluster_kph = self.v_cruise_kph
       else:
         self.v_cruise_kph = CS.cruiseState.speed * CV.MS_TO_KPH
         self.v_cruise_cluster_kph = CS.cruiseState.speedCluster * CV.MS_TO_KPH
@@ -63,11 +70,30 @@ class VCruiseHelper:
       self.v_cruise_kph = V_CRUISE_UNSET
       self.v_cruise_cluster_kph = V_CRUISE_UNSET
 
+    candidate = self.map_cruise.pending_kph
+    if candidate is None and self.map_cruise.tracking:
+      candidate = self.map_cruise.target_kph
+    intervention = CS.gasPressed or CS.brakePressed or any(self.button_timers.values()) or any(
+      b.type in (ButtonType.accelCruise, ButtonType.decelCruise, ButtonType.setCruise, ButtonType.resumeCruise, ButtonType.cancel)
+      for b in CS.buttonEvents)
+    self.map_pulse.update(candidate, self.v_cruise_kph, CS.vEgo * CV.MS_TO_KPH, now,
+                          enabled and CS.cruiseState.available and self.map_cruise.enabled,
+                          intervention, map_applied)
+
   def _update_v_cruise_non_pcm(self, CS, enabled, is_metric):
     # handle button presses. TODO: this should be in state_control, but a decelCruise press
     # would have the effect of both enabling and changing speed is checked after the state transition
     if not enabled:
       return
+
+    if self.map_cruise.enabled:
+      for b in CS.buttonEvents:
+        if b.type in (ButtonType.resumeCruise, ButtonType.cancel):
+          self.map_cruise.tracking = False
+        elif b.type == ButtonType.setCruise and not b.pressed:
+          self.map_cruise.tracking = not CS.gasPressed
+          if self.map_cruise.tracking:
+            self.map_cruise.select_current()
 
     long_press = False
     button_type = None
@@ -77,6 +103,8 @@ class VCruiseHelper:
     for b in CS.buttonEvents:
       if b.type.raw in self.button_timers and not b.pressed:
         if self.button_timers[b.type.raw] > CRUISE_LONG_PRESS:
+          if self.map_cruise.enabled:
+            self.map_cruise.tracking = False  # the completed manual hold wins over a concurrent map change
           return  # end long press
         button_type = b.type.raw
         break
@@ -98,6 +126,14 @@ class VCruiseHelper:
     # Don't adjust speed if we've enabled since the button was depressed (some ports enable on rising edge)
     if not self.button_change_states[button_type]["enabled"]:
       return
+
+    if self.map_cruise.enabled:
+      # Short SET selects the map. RES/+ and long +/- preserve manual adjustment
+      # and hold that target until the next qualified limit change or SET.
+      self.map_cruise.tracking = button_type == ButtonType.decelCruise and not long_press and not CS.gasPressed
+      if self.map_cruise.tracking:
+        self.map_cruise.select_current()
+        return
 
     v_cruise_delta = v_cruise_delta * (5 if long_press else 1)
     if long_press and self.v_cruise_kph % v_cruise_delta != 0:  # partial interval
@@ -124,15 +160,38 @@ class VCruiseHelper:
         self.button_change_states[b.type.raw] = {"standstill": CS.cruiseState.standstill, "enabled": enabled}
 
   def initialize_v_cruise(self, CS, experimental_mode: bool) -> None:
+    self.map_pulse.cancel()
     # initializing is handled by the PCM
     if self.CP.pcmCruise:
       return
 
     initial = V_CRUISE_INITIAL_EXPERIMENTAL_MODE if experimental_mode else V_CRUISE_INITIAL
 
-    if any(b.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for b in CS.buttonEvents) and self.v_cruise_initialized:
+    resume = any(b.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for b in CS.buttonEvents) and self.v_cruise_initialized
+    if resume:
       self.v_cruise_kph = self.v_cruise_kph_last
     else:
       self.v_cruise_kph = int(round(np.clip(CS.vEgo * CV.MS_TO_KPH, initial, V_CRUISE_MAX)))
 
+    if self.map_cruise.enabled:
+      self.map_cruise.tracking = not resume and not CS.gasPressed
+      if self.map_cruise.tracking:
+        self.map_cruise.select_current()
+      self._apply_map_speed()
+
     self.v_cruise_cluster_kph = self.v_cruise_kph
+
+  def pending_map_speed(self, CS, enabled: bool) -> float | None:
+    """UI-only preview; suppress it whenever automatic application is blocked."""
+    pending = self.map_cruise.pending_kph
+    if (enabled and CS.cruiseState.available and self.v_cruise_initialized and not CS.gasPressed and
+        not any(self.button_timers.values()) and pending is not None and abs(pending - self.v_cruise_kph) > 0.01):
+      return pending
+    return None
+
+  def _apply_map_speed(self):
+    if self.map_cruise.enabled and self.map_cruise.tracking and self.map_cruise.target_kph is not None and self.v_cruise_initialized:
+      changed = abs(self.v_cruise_kph - self.map_cruise.target_kph) > 0.01
+      self.v_cruise_kph = self.map_cruise.target_kph
+      return changed
+    return False

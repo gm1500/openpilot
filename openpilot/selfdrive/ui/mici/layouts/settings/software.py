@@ -263,5 +263,6 @@ class SoftwareLayoutMici(NavScroller):
       check_update_btn,
       InstallUpdateButton(),
       TargetBranchButton(check_update_btn),
+      InfoLayoutMici("map data", "© OpenStreetMap contributors", "ODbL licence", "openstreetmap.org/copyright"),
       uninstall_openpilot_btn,
     ])
