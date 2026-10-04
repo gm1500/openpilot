@@ -1,10 +1,73 @@
-# boat-anchor-slc
+# boat-anchor-e2e-assist-poc
+
+POC based on `boat-anchor-slc` at `bc08097535715ec1981ee1deafb575a04ad96d96`.
+The inherited features below remain, with one additional E2E slowing-assist commit.
 
 Based on upstream openpilot master `c8fb906815530460ed156f14e09e1f312bb0f851`,
 the same base as the working boat-anchor map-cruise build. Custom history is
 grouped into five feature commits: **Sierra Tune**, **Nudgeless**, **Lead velocity fix**,
 **Lane policy**, and **Map speed limit**, with follow-ups for advisory speeds,
 road tracking and SET behavior.
+
+## E2E slowing assist POC
+
+The assist is enabled in this branch when openpilot longitudinal control is active,
+Experimental Mode is off, a valid accepted lead is present, and planner input
+health checks pass. Gas/brake intervention, disengagement, lost lead or invalid
+input clear its state immediately. It does not enable Experimental Mode or change
+the cruise target, SLC selection, SET/RES, torque tune, lane policy or nudgeless.
+Stock ACC and lateral-only operation do not activate it.
+
+| Condition | POC behavior |
+| --- | --- |
+| Entry below 65 km/h | E2E requests at most -0.2 m/s² for three model cycles (0.15 s). |
+| Slowing assistance | Use the more restrictive of regular acceleration and the E2E slowing constraint. Stronger regular braking always wins. |
+| E2E wants to go | Above +0.1 m/s² with `shouldStop` false for four cycles (0.2 s) releases the latch. |
+| Handoff | Increase the constraint by at most 1.0 m/s³ toward regular acceleration. Stronger braking is applied immediately after entry. |
+| Crossing 65 km/h | Release through the same handoff; re-arm below 63 km/h to avoid boundary chatter. |
+| Standstill | Preserve all regular stop requests; add E2E `shouldStop` while latched. Existing stop-hold and resume logic remain in control. |
+
+During a latched episode, weak/brief positive model requests cannot immediately
+restore propulsion: the constraint approaches zero until go intent is confirmed.
+When released, regular acceleration resumes through the handoff. Positive E2E
+requests never limit ordinary catch-up when the assist has not been entered.
+These thresholds are provisional POC values, not calibrated stopping guarantees.
+The lead gate does not prove why E2E requests braking; it can also react to other
+scene features. No separate E2E lead detector or learned stop-intent flag is added.
+
+`longitudinalPlan.e2eAssistActive` reports when the constraint actually lowers
+`aTarget`; the selected source is then `e2e`. On both comma 3/3X and comma 4,
+the path is yellow/orange/red according to that selected negative acceleration,
+using the experimental hue scale. The path geometry and lane colours are unchanged.
+Regular control, positive handoff acceleration, stale data or override restore the
+ordinary path colours. This reports a deceleration request, not measured braking
+or friction-brake engagement. Full Experimental Mode retains its original behavior.
+
+### Offline validation
+
+Recorded-input selector replay of route `615b11d4c01d81ec/000002b0--29d880bc44`,
+segments 1 and 5 (2,400 planner frames), preserved every regular stop flag and
+never requested more acceleration than the regular recorded request.
+
+| Approach | Regular request below -0.5 m/s² | POC request below -0.5 m/s² | Earlier |
+| --- | --- | --- | --- |
+| Segment 1, completed stop | 32.437 s | 30.537 s | 1.900 s |
+| Segment 5, driver intervention | 27.743 s | 25.193 s | 2.550 s |
+
+Times are relative to each segment's first carState sample; crossings must persist
+for three samples. The segment 1 search starts at 28 s to exclude a separate
+earlier deceleration. Segment 5's recorded launch from 52–59 s was unchanged.
+The assist also added more than 0.2 m/s² of slowing for 7.9 s in segment 5's first
+25 s of following. Scene review and driving feedback are needed to judge whether
+that extra slowing is helpful; this is not evidence of reduced phantom braking.
+
+Validation also passed 14 focused assist/UI tests, 38 existing map-cruise tests,
+and 330 isolated production-planner comparisons across 11 exclusion conditions.
+Production publication/schema round-trip and both renderer draw paths were checked.
+The native MPC solver, messaging transport and graphics backend were isolated for
+the integration checks. A full native build, rendered-device check and closed-loop
+vehicle/model simulation were not performed. Replaying recorded inputs does not
+predict a changed stopping distance or establish that the intervened stop is fixed.
 
 ## Vehicle tuning
 
@@ -38,8 +101,9 @@ blend; urgent braking bypasses the blend. Low-speed closing and stopped-lead
 handling retain their model-based constraints.
 
 The mild range correction and mature-track confidence shaping remain. Physical
-radar output and stock lead acceptance are unchanged. Planner costs, constraints,
-following-distance policy and stopping policy are unchanged.
+radar output and stock lead acceptance are unchanged. MPC costs, constraints and
+following-distance policy are retained. The POC assist above can further lower
+the final acceleration request and add a stop request alongside the MPC.
 
 ## Lane policy
 

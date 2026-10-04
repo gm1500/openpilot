@@ -1,4 +1,5 @@
 import colorsys
+import time
 import numpy as np
 import pyray as rl
 from openpilot.cereal import messaging
@@ -8,6 +9,7 @@ from openpilot.common.params import Params
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
+from openpilot.selfdrive.ui.onroad.e2e_assist import slowing_assist_color
 from openpilot.selfdrive.ui.mici.onroad import blend_colors
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
@@ -337,7 +339,12 @@ class ModelRenderer(Widget):
 
     path_pts = self._path.projected_points + np.array([self._rect.x, self._rect.y], dtype=np.float32)
 
-    if self._experimental_mode:
+    assist_color = slowing_assist_color(sm, ui_state.started_frame, time.monotonic()) if self._longitudinal_control else None
+    if assist_color is not None:
+      gradient = Gradient(start=(0.0, 1.0), end=(0.0, 0.0),
+                          colors=[rl.Color(*assist_color, alpha) for alpha in (102, 89, 0)], stops=[0.0, 0.5, 1.0])
+      draw_polygon(self._rect, path_pts, gradient=gradient)
+    elif self._experimental_mode:
       # Draw with acceleration coloring
       if ui_state.status == UIStatus.DISENGAGED:
         draw_polygon(self._rect, path_pts, rl.Color(0, 0, 0, 90))
