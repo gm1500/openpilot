@@ -221,7 +221,7 @@ numeric cruise target underneath (without the SET prefix). OpenStreetMap credit
 and licence information are under Settings > Software > Map Data, replacing the
 tiny line below the onroad MAP status.
 
-A gentle 1 Hz green background pulse previews an automatic target change during
+A pronounced 1 Hz green background pulse previews an automatic target change during
 the existing two-second qualification. The sign returns to white when the cruise
 target changes or the pending change is cancelled. It does not wait for vehicle
 speed to reach the target. The UI-only `mapCruiseState.pendingSpeed` field comes
@@ -237,3 +237,9 @@ reset and touch/alert cancellation. A software drawing backend was inspected at
 both screen sizes; native raylib preview was unavailable due to display-socket
 permissions, so on-device appearance still needs confirmation. C++ schema
 generation, lint and whitespace checks pass. Planner and torque tuning are unchanged.
+
+The visibility refinement doubles the pulse's peak green tint, thickens the green
+active/ready border from 4 to 7 design pixels, and enlarges the cruise-target font
+from 35 to 46. The target strip grows to fit, with MAP status moved below it on
+both display sizes. This UI-only refinement does not change road matching; the
+reported sign dropout through bends remains a separate matcher issue.

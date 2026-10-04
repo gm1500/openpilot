@@ -15,12 +15,12 @@ def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: f
   medium = gui_app.font(FontWeight.MEDIUM)
   scale = rect.width / 180
   black = rl.Color(20, 22, 24, 255)
-  # A gentle 1 Hz green wash while qualifying an automatic change, never a
+  # A pronounced 1 Hz green pulse while qualifying an automatic change, never a
   # flashing number. Returning to None restores white immediately.
-  pulse = 0. if pending_elapsed is None else 0.45 * (1 - math.cos(2 * math.pi * pending_elapsed)) / 2
+  pulse = 0. if pending_elapsed is None else 0.90 * (1 - math.cos(2 * math.pi * pending_elapsed)) / 2
   background = rl.Color(round(250 - 180 * pulse), 250, round(247 - 140 * pulse), 255)
   rl.draw_rectangle_rounded(rect, 0.12, 8, background)
-  inset = 5 * scale
+  inset = 3 * scale
   border = rl.Rectangle(rect.x + inset, rect.y + inset, rect.width - 2 * inset, rect.height - 2 * inset)
   rl.draw_rectangle_rounded_lines_ex(border, 0.08, 8, 3 * scale, black)
 
@@ -40,16 +40,16 @@ def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: f
   text("km/h" if is_metric else "mph", 158, 34, 30, black, bold=False)
 
   # A separate dark strip keeps the actual cruise target readable against the camera.
-  subtext = rl.Rectangle(rect.x, rect.y + rect.height + 7 * scale, rect.width, 48 * scale)
+  subtext = rl.Rectangle(rect.x, rect.y + rect.height + 7 * scale, rect.width, 64 * scale)
   rl.draw_rectangle_rounded(subtext, 0.2, 8, rl.Color(0, 0, 0, 166))
-  text('–' if set_speed is None else str(round(set_speed)), 212, 45, 35, set_color)
+  text('–' if set_speed is None else str(round(set_speed)), 212, 61, 46, set_color)
   labels = {'active': 'MAP ON', 'armed': 'MAP READY', 'waiting': 'MAP WAIT', 'paused': 'MAP HOLD', 'off': 'MAP OFF'}
   if state in labels:
     color = rl.Color(13, 248, 122, 255) if state in ('active', 'armed') else rl.Color(255, 200, 96, 255) if state != 'off' else rl.LIGHTGRAY
-    rl.draw_rectangle_rounded_lines_ex(border, 0.08, 8, 4 * scale, color)
-    status = rl.Rectangle(rect.x, rect.y + 260 * scale, rect.width, 29 * scale)
+    rl.draw_rectangle_rounded_lines_ex(border, 0.08, 8, (7 if state in ('active', 'armed') else 4) * scale, color)
+    status = rl.Rectangle(rect.x, rect.y + 276 * scale, rect.width, 29 * scale)
     rl.draw_rectangle_rounded(status, 0.2, 8, rl.Color(0, 0, 0, 190))
-    text(labels[state], 261, 27, 21, color)
+    text(labels[state], 277, 27, 21, color)
 
 
 class SpeedLimitButton(Widget):
