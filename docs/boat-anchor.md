@@ -1,7 +1,8 @@
 # boat-anchor-e2e-assist-poc
 
 POC based on `boat-anchor-slc` at `bc08097535715ec1981ee1deafb575a04ad96d96`.
-The inherited features below remain, with one additional E2E slowing-assist commit.
+The inherited features below remain, with the E2E slowing-assist POC and focused
+follow-ups for cut-in velocity history and assistance/release behavior.
 
 Based on upstream openpilot master `c8fb906815530460ed156f14e09e1f312bb0f851`,
 the same base as the working boat-anchor map-cruise build. Custom history is
@@ -11,21 +12,33 @@ road tracking and SET behavior.
 
 ## E2E slowing assist POC
 
-The assist is enabled in this branch when openpilot longitudinal control is active,
+The assist can enter in this branch when openpilot longitudinal control is active,
 Experimental Mode is off, a valid accepted lead is present, and planner input
-health checks pass. Gas/brake intervention, disengagement, lost lead or invalid
-input clear its state immediately. It does not enable Experimental Mode or change
+health checks pass. Gas/brake intervention, disengagement or invalid input clear
+its state immediately. A healthy message reporting lead loss instead releases
+the previous constraint gradually. It does not enable Experimental Mode or change
 the cruise target, SLC selection, SET/RES, torque tune, lane policy or nudgeless.
 Stock ACC and lateral-only operation do not activate it.
 
 | Condition | POC behavior |
 | --- | --- |
-| Entry below 65 km/h | E2E requests at most -0.2 m/s² for three model cycles (0.15 s). |
-| Slowing assistance | Use the more restrictive of regular acceleration and the E2E slowing constraint. Stronger regular braking always wins. |
+| Entry below 65 km/h | E2E requests at most -0.2 m/s² for three model cycles (0.15 s), with a present lead and nonzero relevance. |
+| Slowing assistance | Scale E2E deceleration from zero to full influence according to gap and closing motion. Select the more restrictive of this constraint and regular acceleration. Stronger regular braking always wins. |
 | E2E wants to go | Above +0.1 m/s² with `shouldStop` false for four cycles (0.2 s) releases the latch. |
+| Lead pulls away | At speed above 2 m/s, require 0.5 s of continuous positive lead relative speed above 0.5 m/s, range growth above 0.25 m, and gap above 6 m + 1.5 s. E2E above -0.1 m/s², regular acceleration above +0.1 m/s² and no stop request allow the same 0.2 s release confirmation. Range jumps clear this evidence. |
+| Distant, no longer closing | Zero relevance plus E2E above -0.1 m/s² and no stop request permits confirmed release. Low relevance alone cannot restore propulsion during a latched strong E2E slowdown. |
 | Handoff | Increase the constraint by at most 1.0 m/s³ toward regular acceleration. Stronger braking is applied immediately after entry. |
+| Lead loss | Do not enter on absent leads or consume new E2E braking commands. Release an existing constraint through the same handoff; pedal intervention and disengagement still clear immediately. |
 | Crossing 65 km/h | Release through the same handoff; re-arm below 63 km/h to avoid boundary chatter. |
-| Standstill | Preserve all regular stop requests; add E2E `shouldStop` while latched. Existing stop-hold and resume logic remain in control. |
+| Standstill | Preserve all regular stop requests; add E2E `shouldStop` while latched. A fresh model stop request below 0.3 m/s retains an already latched stop through lead loss. Existing stop-hold and resume logic remain in control. |
+
+Proximity influence falls continuously from full at `6 + 2.0*vEgo` metres to
+zero at `6 + 3.5*vEgo`. Closing influence rises from zero at 0.2 m/s² to full at
+0.6 m/s² of `(vEgo² - vLead²) / (2 * max(dRel - 6, 1))`, clipped nonnegative.
+Use the larger influence; a fresh E2E stop request retains full influence.
+Increasing urgency takes effect immediately after entry, while influence falls
+by at most one per second. These weights do not modify MPC following distances.
+While latched, the weighted constraint remains nonpositive until release.
 
 During a latched episode, weak/brief positive model requests cannot immediately
 restore propulsion: the constraint approaches zero until go intent is confirmed.
@@ -61,9 +74,29 @@ The assist also added more than 0.2 m/s² of slowing for 7.9 s in segment 5's fi
 25 s of following. Scene review and driving feedback are needed to judge whether
 that extra slowing is helpful; this is not evidence of reduced phantom braking.
 
-Validation also passed 14 focused assist/UI tests, 38 existing map-cruise tests,
+The refinement replay also covered all 14,400 planner frames from route
+`000002b1--e670ceec8d` segments 1–12, comparing selectors on identical recorded
+regular-planner, model and lead inputs:
+
+| Case | Original POC → refined POC |
+| --- | --- |
+| Segment 10, first 11 s, far lead | Integrated added negative acceleration request falls 19.1%. This is not a measured reduction in friction-brake events. |
+| Segment 2, lead pulls away | Selected acceleration exceeds +0.1 m/s² at 37.039 s instead of 41.040 s: 4.001 s earlier. |
+| Segment 7, lead disappears at 15.607 s | Old selector jumps from -1.011 to +1.449 m/s². Refined selector changes from 0.000 to +0.050 m/s² and continues its bounded release until driver braking clears it. Earlier requests also differ because of relevance weighting. |
+| Completed stops, segments 1 and 8 | -0.5 m/s² onset unchanged. Segment 1's -1.0 m/s² crossing is one 50 ms cycle later; segment 8's is unchanged. Final five seconds of each tested stop window are identical. No assist stop flags are lost anywhere in the 12 segments. |
+
+The largest reductions in requested braking within those two stop windows were
+0.201 m/s² (one frame above 0.2) and 0.063 m/s². Their integrated added negative
+requests differ by less than 1%. A lead-loss handoff can temporarily retain more
+slowing than the original POC, which immediately returned to regular acceleration.
+All replayed selections remain at or below the regular request. The estimator
+replay described below confirms unchanged lead inputs throughout this 12-segment
+route. Both replays hold recorded vehicle/model feedback fixed.
+
+Validation also passed 29 focused assist/UI/lead-handoff tests, 38 existing map-cruise tests,
 and 330 isolated production-planner comparisons across 11 exclusion conditions.
 Production publication/schema round-trip and both renderer draw paths were checked.
+The production planner also passed a lead-loss release and immediate-override check.
 The native MPC solver, messaging transport and graphics backend were isolated for
 the integration checks. A full native build, rendered-device check and closed-loop
 vehicle/model simulation were not performed. Replaying recorded inputs does not

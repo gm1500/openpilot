@@ -12,6 +12,7 @@ class TestE2ESlowingAssist(unittest.TestCase):
 
   def step(self, **kwargs):
     args = {'eligible': True, 'v_ego': 40 / 3.6, 'regular_accel': 0.5, 'e2e_accel': -0.5, 'e2e_stop': False}
+    args['lead'] = SimpleNamespace(present=True, dRel=20., vLead=40 / 3.6, vRel=0.)
     args.update(kwargs)
     return self.assist.update(**args)
 
@@ -78,7 +79,8 @@ class TestE2ESlowingAssist(unittest.TestCase):
     self.assertEqual(self.step(eligible=False), (0.5, False, False))
 
   def test_override_or_invalid_input_discards_latch(self):
-    for invalid in ({'eligible': False}, {'v_ego': math.nan}, {'e2e_accel': math.nan}, {'e2e_accel': math.inf}):
+    invalid_lead = SimpleNamespace(present=True, dRel=math.nan, vLead=10., vRel=0.)
+    for invalid in ({'eligible': False}, {'v_ego': math.nan}, {'e2e_accel': math.nan}, {'e2e_accel': math.inf}, {'lead': invalid_lead}):
       self.enter()
       self.assertEqual(self.step(**invalid), (0.5, False, False))
       self.assertFalse(self.assist.braking)
@@ -94,6 +96,81 @@ class TestE2ESlowingAssist(unittest.TestCase):
       self.assertLessEqual(accel - previous, RELEASE_JERK * 0.05 + 1e-8)
       previous = accel
     self.assertEqual(self.step(v_ego=65 / 3.6), (0.5, False, False))
+
+  def test_far_paced_lead_does_not_inherit_scene_braking(self):
+    lead = SimpleNamespace(present=True, dRel=90., vLead=60 / 3.6, vRel=0.)
+    for _ in range(100):
+      self.assertEqual(self.step(lead=lead, v_ego=60 / 3.6, e2e_accel=-2), (0.5, False, False))
+
+  def test_far_stopped_lead_retains_full_assistance(self):
+    lead = SimpleNamespace(present=True, dRel=100., vLead=0., vRel=-60 / 3.6)
+    self.assertEqual(self.enter(lead=lead, v_ego=60 / 3.6, e2e_accel=-2), (-2., False, True))
+
+  def test_gap_weight_varies_continuously(self):
+    results = []
+    for gap in (35., 40., 44.):
+      self.assist.reset()
+      lead = SimpleNamespace(present=True, dRel=gap, vLead=40 / 3.6, vRel=0.)
+      results.append(self.enter(lead=lead)[0])
+    self.assertLess(results[0], results[1])
+    self.assertLess(results[1], results[2])
+    self.assertGreater(results[0], -0.5)
+    self.assertLess(results[2], 0.5)
+
+  def test_relevance_loss_releases_gradually(self):
+    previous, _, _ = self.enter(e2e_accel=-2)
+    lead = SimpleNamespace(present=True, dRel=90., vLead=40 / 3.6, vRel=0.)
+    for _ in range(100):
+      current, _, _ = self.step(lead=lead, e2e_accel=-2)
+      self.assertLessEqual(current - previous, RELEASE_JERK * .05 + 1e-8)
+      previous = current
+    self.assertEqual(current, 0.)  # no propulsion while the model still requests strong slowing
+    for _ in range(30):
+      current, _, _ = self.step(lead=lead, e2e_accel=-.05)
+    self.assertEqual(current, .5)
+
+  def test_confirmed_pull_away_releases_near_zero_e2e(self):
+    self.enter()
+    for i in range(25):
+      lead = SimpleNamespace(present=True, dRel=25. + .1 * i, vLead=40 / 3.6 + 2., vRel=2.)
+      self.step(lead=lead, e2e_accel=.05)
+    self.assertFalse(self.assist.braking)
+    self.assertGreater(self.step(lead=lead, e2e_accel=.05)[0], .1)
+
+  def test_no_early_release_from_velocity_alone_or_range_jump(self):
+    for jump in (False, True):
+      self.assist.reset()
+      self.enter()
+      for i in range(30):
+        lead = SimpleNamespace(present=True, dRel=25. + (8. if jump and i >= 15 else 0.), vLead=14., vRel=2.)
+        self.step(lead=lead, e2e_accel=.05)
+      self.assertTrue(self.assist.braking)
+
+  def test_lead_loss_handoff_and_immediate_override(self):
+    absent = SimpleNamespace(present=False)
+    previous, _, _ = self.enter(e2e_accel=-1.)
+    for _ in range(10):
+      current, stop, active = self.step(lead=absent, regular_accel=1.5, e2e_accel=-3.)
+      self.assertAlmostEqual(current - previous, RELEASE_JERK * .05)
+      self.assertFalse(stop)
+      self.assertTrue(active)
+      previous = current
+    self.assertEqual(self.step(eligible=False, lead=absent, regular_accel=1.5), (1.5, False, False))
+    self.assertEqual(self.step(lead=absent, regular_accel=1.5), (1.5, False, False))
+
+  def test_new_close_lead_interrupts_lead_loss_release(self):
+    self.enter(e2e_accel=-1.)
+    self.step(lead=SimpleNamespace(present=False), regular_accel=1.5)
+    self.assertEqual(self.enter(e2e_accel=-3.), (-3., False, True))
+    self.assertEqual(self.step(lead=SimpleNamespace(present=False), regular_accel=-3.5), (-3.5, False, False))
+
+  def test_lead_loss_at_rest_preserves_fresh_latched_stop(self):
+    self.enter(v_ego=0., e2e_stop=True)
+    for _ in range(20):
+      accel, stop, _ = self.step(lead=SimpleNamespace(present=False), v_ego=0., e2e_accel=.05, e2e_stop=True)
+      self.assertLessEqual(accel, 0.)
+      self.assertTrue(stop)
+    self.assertEqual(self.step(eligible=False, v_ego=0., e2e_stop=True), (.5, False, False))
 
 
 class TestE2EAssistColor(unittest.TestCase):

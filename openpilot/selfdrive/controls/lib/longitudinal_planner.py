@@ -148,9 +148,10 @@ class LongitudinalPlanner:
     assist_eligible = (self.CP.openpilotLongitudinalControl and not reset_state and sm['selfdriveState'].enabled and
                        not sm['selfdriveState'].experimentalMode and sm['carControl'].longActive and
                        not (sm['carState'].gasPressed or sm['carState'].brakePressed) and
-                       sm['radarState'].leadOne.present and math.isfinite(output_a_target_e2e) and sm.all_checks())
+                       math.isfinite(output_a_target_e2e) and sm.all_checks())
     output_a_target, assist_stop, self.e2e_assist_active = self.e2e_assist.update(
-      eligible=assist_eligible, v_ego=v_ego, regular_accel=float(np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)),
+      eligible=assist_eligible, lead=sm['radarState'].leadOne, v_ego=v_ego,
+      regular_accel=float(np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)),
       e2e_accel=float(np.clip(output_a_target_e2e, ACCEL_MIN, ACCEL_MAX)), e2e_stop=output_should_stop_e2e)
     self.output_should_stop |= assist_stop
     if self.e2e_assist_active:
