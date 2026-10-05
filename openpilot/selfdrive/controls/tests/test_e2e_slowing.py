@@ -88,21 +88,21 @@ class TestE2ESlowingAssist(unittest.TestCase):
       self.assertIsNone(self.assist.accel_limit)
 
   def test_gate_uses_model_lead_speed_instead_of_ego_or_derived_speed(self):
-    self.assertEqual(self.enter(v_ego=20 / 3.6, model_lead_speed=50 / 3.6), (0.5, False, False))
-    self.assertEqual(self.enter(model_lead_speed=40 / 3.6), (0.5, False, False))
-    self.assertEqual(self.enter(v_ego=80 / 3.6, model_lead_speed=39.9 / 3.6), (-0.5, False, True))
+    self.assertEqual(self.enter(v_ego=20 / 3.6, model_lead_speed=60 / 3.6), (0.5, False, False))
+    self.assertEqual(self.enter(model_lead_speed=55 / 3.6), (0.5, False, False))
+    self.assertEqual(self.enter(v_ego=80 / 3.6, model_lead_speed=54.9 / 3.6), (-0.5, False, True))
 
   def test_lead_speed_crossing_releases_gradually_and_reentry_is_confirmed(self):
-    self.enter(model_lead_speed=39.9 / 3.6)
+    self.enter(model_lead_speed=54.9 / 3.6)
     previous = -0.5
     for _ in range(30):
-      accel, _, _ = self.step(model_lead_speed=40 / 3.6)
+      accel, _, _ = self.step(model_lead_speed=55 / 3.6)
       self.assertLessEqual(accel - previous, RELEASE_JERK * 0.05 + 1e-8)
       previous = accel
-    self.assertEqual(self.step(model_lead_speed=40 / 3.6), (0.5, False, False))
-    self.assertEqual(self.step(model_lead_speed=39.9 / 3.6), (0.5, False, False))
-    self.assertEqual(self.step(model_lead_speed=40 / 3.6), (0.5, False, False))
-    self.assertEqual(self.enter(model_lead_speed=39.9 / 3.6), (-0.5, False, True))
+    self.assertEqual(self.step(model_lead_speed=55 / 3.6), (0.5, False, False))
+    self.assertEqual(self.step(model_lead_speed=54.9 / 3.6), (0.5, False, False))
+    self.assertEqual(self.step(model_lead_speed=55 / 3.6), (0.5, False, False))
+    self.assertEqual(self.enter(model_lead_speed=54.9 / 3.6), (-0.5, False, True))
 
   def test_missing_or_nonfinite_model_speed_cannot_enter_and_releases_existing_cap(self):
     for speed in (None, math.nan, math.inf, -math.inf):

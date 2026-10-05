@@ -22,14 +22,14 @@ Stock ACC and lateral-only operation do not activate it.
 
 | Condition | POC behavior |
 | --- | --- |
-| Model lead below 40 km/h | E2E requests at most -0.2 m/s² for three model cycles (0.15 s), with a present lead and nonzero relevance. The threshold uses the model lead velocity, corrected by CAN ego speed minus model ego speed, not range-derived velocity. Raw lead probability must exceed 0.5 and the velocity samples must be finite. Ego speed no longer limits entry. |
+| Model lead below 55 km/h | E2E requests at most -0.2 m/s² for three model cycles (0.15 s), with a present lead and nonzero relevance. The threshold uses the model lead velocity, corrected by CAN ego speed minus model ego speed, not range-derived velocity. Raw lead probability must exceed 0.5 and the velocity samples must be finite. Ego speed no longer limits entry. |
 | Slowing assistance | Scale E2E deceleration from zero to full influence according to gap and closing motion. Select the more restrictive of this constraint and regular acceleration. Stronger regular braking always wins. |
 | E2E wants to go | Above +0.1 m/s² with `shouldStop` false for four cycles (0.2 s) releases the latch. |
 | Lead pulls away | At speed above 2 m/s, require 0.5 s of continuous positive lead relative speed above 0.5 m/s, range growth above 0.25 m, and gap above 6 m + 1.5 s. E2E above -0.1 m/s², regular acceleration above +0.1 m/s² and no stop request allow the same 0.2 s release confirmation. Range jumps clear this evidence. |
 | Distant, no longer closing | Zero relevance plus E2E above -0.1 m/s² and no stop request permits confirmed release. Low relevance alone cannot restore propulsion during a latched strong E2E slowdown. |
 | Handoff | Increase the constraint by at most 1.0 m/s³ toward regular acceleration. Stronger braking is applied immediately after entry. |
 | Lead loss | Do not enter on absent leads or consume new E2E braking commands. Release an existing constraint through the same handoff; pedal intervention and disengagement still clear immediately. |
-| Lead reaches 40 km/h or model estimate is unavailable | Release through the same bounded handoff. Re-entry below 40 requires the usual three confirming cycles. Confirmed pull-away can still release sooner, below 40. |
+| Lead reaches 55 km/h or model estimate is unavailable | Release through the same bounded handoff. Re-entry below 55 requires the usual three confirming cycles. Confirmed pull-away can still release sooner, below 55. |
 | Standstill | Preserve all regular stop requests; add E2E `shouldStop` while latched. A fresh model stop request below 0.3 m/s retains an already latched stop through lead loss. Existing stop-hold and resume logic remain in control. |
 
 Proximity influence falls continuously from full at `6 + 2.0*vEgo` metres to
@@ -58,7 +58,26 @@ or friction-brake engagement. Full Experimental Mode retains its original behavi
 
 ### Offline validation
 
-#### Model lead-speed gate
+#### Current 55 km/h model lead-speed gate
+
+Raising the threshold from 40 to 55 restores most early stopping assistance in
+the same 21,521-frame replay. Comparisons below use the pre-gate POC `abee04b`:
+
+| Case | Effect of the below-55 gate |
+| --- | --- |
+| 2b2 segment 9, 23–28 s | Integrated E2E-added negative acceleration request falls 14.7%, versus 73.6% with the 40 gate. The later regular-policy coasting remains unchanged. |
+| 2b1 completed stops, segments 1 and 8 | The -0.5 m/s² onset is unchanged and 0.301 s later, respectively. The -1.0 m/s² onsets and peak requests are unchanged. |
+| 2b0 completed stop, segment 1 | Approach and stop-hold requests match `abee04b`. |
+| 2b0 intervened stop, segment 5 | The -0.5 m/s² onset is 0.050 s later than `abee04b`, about 2.500 s before regular control. The -1.0 m/s² onset and peak request are unchanged. |
+| 2b1 segment 2 pull-away; 2b0 segment 5 launch | Selected requests match `abee04b`. |
+
+All 70 focused tests and the isolated production-planner checks pass with the
+55 km/h boundary. No assist stop flags are lost; regular braking remains an
+upper bound on selected acceleration. Recorded-input replay does not predict
+stopping distance or establish that the intervened stop is fixed. Pull-away,
+override and handoff behavior are unchanged; this change only raises the gate.
+
+#### Previous 40 km/h model lead-speed gate
 
 The below-40 gate was compared with `abee04b` on 21,521 recorded planner frames:
 route `000002b2--0ab6ab897d` segments 0, 9, 13 and 14; `000002b1--e670ceec8d`

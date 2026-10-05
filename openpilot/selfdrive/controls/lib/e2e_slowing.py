@@ -5,7 +5,7 @@ import numpy as np
 
 from openpilot.common.constants import CV
 
-ASSIST_MAX_LEAD_SPEED = 40 / CV.MS_TO_KPH
+ASSIST_MAX_LEAD_SPEED = 55 / CV.MS_TO_KPH
 BRAKE_THRESHOLD = -0.2  # m/s^2; ignore near-zero model fluctuations before entry
 BRAKE_CONFIRM_TIME = 0.15
 GO_THRESHOLD = 0.1  # m/s^2
@@ -57,7 +57,7 @@ class E2ESlowingAssist:
     if not slow_lead or not lead.present:
       # A disappearing lead cannot create a new stop request, or cancel a
       # previously latched stop that the fresh model still requests at rest.
-      # A lead reaching 40 km/h also releases through the bounded handoff.
+      # A lead reaching 55 km/h also releases through the bounded handoff.
       self.braking = holding_stop
       self.brake_time = self.go_time = 0.0
       self.influence = 1.0 if holding_stop else 0.0
