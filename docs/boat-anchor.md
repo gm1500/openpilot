@@ -29,7 +29,8 @@ Stock ACC and lateral-only operation do not activate it.
 | Distant, no longer closing | Zero relevance plus E2E above -0.1 m/s² and no stop request permits confirmed release. Low relevance alone cannot restore propulsion during a latched strong E2E slowdown. |
 | Handoff | Increase the constraint by at most 1.0 m/s³ toward regular acceleration. Stronger braking is applied immediately after entry. |
 | Lead loss | Do not enter on absent leads or consume new E2E braking commands. Release an existing constraint through the same handoff; pedal intervention and disengagement still clear immediately. |
-| Lead reaches 55 km/h or model estimate is unavailable | Release through the same bounded handoff. Re-entry below 55 requires the usual three confirming cycles. Confirmed pull-away can still release sooner, below 55. |
+| Lead reaches 55 km/h while latched | Keep assistance latched; the speed threshold controls entry only. Existing confirmed go/pull-away conditions release it. After release, a new entry requires a lead below 55 and the usual three confirming cycles. |
+| Model estimate is unavailable | Release through the bounded handoff. Missing/invalid predictions cannot qualify a new entry. |
 | Standstill | Preserve all regular stop requests; add E2E `shouldStop` while latched. A fresh model stop request below 0.3 m/s retains an already latched stop through lead loss. Existing stop-hold and resume logic remain in control. |
 
 Proximity influence falls continuously from full at `6 + 2.0*vEgo` metres to
@@ -58,7 +59,24 @@ or friction-brake engagement. Full Experimental Mode retains its original behavi
 
 ### Offline validation
 
-#### Current 55 km/h model lead-speed gate
+#### Current entry-only 55 km/h gate
+
+The 55 km/h threshold now qualifies entry only. Crossing it during a latched
+episode does not clear assistance or its pull-away history. Confirmed go intent,
+pull-away, lead loss, unavailable model estimates and driver override retain
+their existing release behavior. Re-entry after release requires qualification.
+
+70 focused tests pass, including repeated threshold crossings, stronger regular
+braking while latched, pull-away above 55, and re-entry after confirmed release.
+The isolated production-planner checks also pass. Across 21,521 recorded frames,
+no assist stop flags are lost. Both 2b0 stop-approach windows now match `abee04b`;
+the 2b1 stopping onset timings remain those reported for the 55 gate below.
+The 2b1 pull-away and 2b0 launch windows are unchanged. Holding the latch also
+restores some scene braking: the 2b1 segment 10 far-lead window again matches
+`abee04b`. This is a continuity change, not proof of fewer brake events or an
+improved stopping distance; vehicle/model feedback remains fixed in replay.
+
+#### 55 km/h model lead-speed gate (before entry-only latching)
 
 Raising the threshold from 40 to 55 restores most early stopping assistance in
 the same 21,521-frame replay. Comparisons below use the pre-gate POC `abee04b`:

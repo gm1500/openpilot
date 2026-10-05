@@ -51,13 +51,14 @@ class E2ESlowingAssist:
       self.reset()
       return regular_accel, False, False
 
-    slow_lead = (model_lead_speed is not None and math.isfinite(model_lead_speed) and
-                 model_lead_speed < ASSIST_MAX_LEAD_SPEED)
+    valid_model_speed = model_lead_speed is not None and math.isfinite(model_lead_speed)
+    slow_lead = valid_model_speed and model_lead_speed < ASSIST_MAX_LEAD_SPEED
     holding_stop = self.braking and e2e_stop and v_ego < 0.3
-    if not slow_lead or not lead.present:
+    if not valid_model_speed or (not slow_lead and not self.braking) or not lead.present:
       # A disappearing lead cannot create a new stop request, or cancel a
       # previously latched stop that the fresh model still requests at rest.
-      # A lead reaching 55 km/h also releases through the bounded handoff.
+      # The speed threshold gates entry only. Once latched, use the existing
+      # go/pull-away release conditions even if the lead crosses 55 km/h.
       self.braking = holding_stop
       self.brake_time = self.go_time = 0.0
       self.influence = 1.0 if holding_stop else 0.0

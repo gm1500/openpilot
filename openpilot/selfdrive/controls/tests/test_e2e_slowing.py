@@ -92,13 +92,21 @@ class TestE2ESlowingAssist(unittest.TestCase):
     self.assertEqual(self.enter(model_lead_speed=55 / 3.6), (0.5, False, False))
     self.assertEqual(self.enter(v_ego=80 / 3.6, model_lead_speed=54.9 / 3.6), (-0.5, False, True))
 
-  def test_lead_speed_crossing_releases_gradually_and_reentry_is_confirmed(self):
+  def test_lead_speed_crossing_keeps_latch_until_go_then_requires_new_qualification(self):
     self.enter(model_lead_speed=54.9 / 3.6)
-    previous = -0.5
-    for _ in range(30):
-      accel, _, _ = self.step(model_lead_speed=55 / 3.6)
+    for speed in (55., 54., 60., 54., 70.):
+      self.assertEqual(self.step(model_lead_speed=speed / 3.6), (-0.5, False, True))
+      self.assertTrue(self.assist.braking)
+    self.assertEqual(self.step(model_lead_speed=60 / 3.6, regular_accel=-3.), (-3., False, False))
+    self.assertTrue(self.assist.braking)
+    previous = -3.
+    for _ in range(80):
+      accel, _, _ = self.step(model_lead_speed=60 / 3.6, e2e_accel=.3)
       self.assertLessEqual(accel - previous, RELEASE_JERK * 0.05 + 1e-8)
       previous = accel
+    self.assertFalse(self.assist.braking)
+    for _ in range(10):
+      self.assertEqual(self.step(model_lead_speed=60 / 3.6), (0.5, False, False))
     self.assertEqual(self.step(model_lead_speed=55 / 3.6), (0.5, False, False))
     self.assertEqual(self.step(model_lead_speed=54.9 / 3.6), (0.5, False, False))
     self.assertEqual(self.step(model_lead_speed=55 / 3.6), (0.5, False, False))
@@ -150,7 +158,7 @@ class TestE2ESlowingAssist(unittest.TestCase):
     self.enter()
     for i in range(25):
       lead = SimpleNamespace(present=True, dRel=25. + .1 * i, vLead=40 / 3.6 + 2., vRel=2.)
-      self.step(lead=lead, e2e_accel=.05)
+      self.step(lead=lead, model_lead_speed=60 / 3.6, e2e_accel=.05)
     self.assertFalse(self.assist.braking)
     self.assertGreater(self.step(lead=lead, e2e_accel=.05)[0], .1)
 
