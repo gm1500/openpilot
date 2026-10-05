@@ -1,11 +1,10 @@
 import numpy as np
 from opendbc.car.structs import car
+from opendbc.car.gm.values import CAR as GM_CAR
 from openpilot.common.realtime import DT_CTRL
-from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N
 from openpilot.common.pid import PIDController
-from openpilot.selfdrive.modeld.constants import ModelConstants
 
-CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
+LAUNCH_INTEGRATOR_MAX_SPEED = 1.0  # m/s; only suppress standstill/creep launch windup
 
 LongCtrlState = car.CarControl.Actuators.LongControlState
 
@@ -42,17 +41,31 @@ class LongControl:
     self.pid = PIDController(0.0, (CP.longitudinalTuning.kiBP, CP.longitudinalTuning.kiV),
                              rate=1 / DT_CTRL)
     self.last_output_accel = 0.0
+    self.launch_integrator_hold = 0.0
 
   def reset(self):
     self.pid.reset()
+    self.launch_integrator_hold = 0.0
 
   def update(self, active, CS, a_target, should_stop, accel_limits):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     self.pid.neg_limit = accel_limits[0]
     self.pid.pos_limit = accel_limits[1]
 
+    previous_state = self.long_control_state
     self.long_control_state = long_control_state_trans(active, self.long_control_state, should_stop,
                                                        CS.brakePressed, CS.cruiseState.standstill)
+    if (
+      previous_state == LongCtrlState.stopping and self.long_control_state == LongCtrlState.pid
+      and self.CP.carFingerprint == GM_CAR.CHEVROLET_SILVERADO
+      and CS.vEgo < LAUNCH_INTEGRATOR_MAX_SPEED and a_target > 0.0
+    ):
+      # The feedforward command is already sent immediately. Do not learn the
+      # expected acceleration error before the configured actuator delay has
+      # elapsed; route 288 showed that this otherwise creates a large positive
+      # integral at launch which can survive into the next braking event.
+      self.launch_integrator_hold = max(float(self.CP.longitudinalActuatorDelay), 0.0)
+
     if self.long_control_state == LongCtrlState.off:
       self.reset()
       output_accel = 0.
@@ -67,8 +80,10 @@ class LongControl:
 
     else:  # LongCtrlState.pid
       error = a_target - CS.aEgo
-      output_accel = self.pid.update(error, speed=CS.vEgo,
-                                     feedforward=a_target)
+      freeze_integrator = self.launch_integrator_hold > 0.0
+      output_accel = self.pid.update(error, speed=CS.vEgo, feedforward=a_target,
+                                     freeze_integrator=freeze_integrator)
+      self.launch_integrator_hold = max(0.0, self.launch_integrator_hold - DT_CTRL)
 
     self.last_output_accel = np.clip(output_accel, accel_limits[0], accel_limits[1])
     return self.last_output_accel
