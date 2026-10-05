@@ -5,8 +5,7 @@ import numpy as np
 
 from openpilot.common.constants import CV
 
-ASSIST_MAX_SPEED = 65 / CV.MS_TO_KPH
-ASSIST_REARM_SPEED = 63 / CV.MS_TO_KPH
+ASSIST_MAX_LEAD_SPEED = 40 / CV.MS_TO_KPH
 BRAKE_THRESHOLD = -0.2  # m/s^2; ignore near-zero model fluctuations before entry
 BRAKE_CONFIRM_TIME = 0.15
 GO_THRESHOLD = 0.1  # m/s^2
@@ -14,6 +13,19 @@ GO_CONFIRM_TIME = 0.2
 RELEASE_JERK = 1.0  # m/s^3; stronger braking is never slew-limited
 RELEVANCE_RELEASE_TIME = 1.0  # s; fast entry, gradual reduction in influence
 PULL_AWAY_WINDOW = 0.5  # s of continuous accepted range observations
+
+
+def get_model_lead_speed(model, v_ego):
+  """Use the vision fallback's ego-speed correction, not differentiated range."""
+  if not model.leadsV3 or not model.velocity.x:
+    return None
+  lead = model.leadsV3[0]
+  if not lead.v or not math.isfinite(lead.prob) or lead.prob <= 0.5:
+    return None
+  values = (v_ego, lead.v[0], model.velocity.x[0])
+  if not all(math.isfinite(x) for x in values):
+    return None
+  return max(0.0, v_ego + lead.v[0] - model.velocity.x[0])
 
 
 class E2ESlowingAssist:
@@ -28,11 +40,10 @@ class E2ESlowingAssist:
     self.brake_time = 0.0
     self.go_time = 0.0
     self.accel_limit = None
-    self.speed_blocked = False
     self.influence = 0.0
     self.range_history = deque(maxlen=round(PULL_AWAY_WINDOW / self.dt) + 1)
 
-  def update(self, *, eligible, lead, v_ego, regular_accel, e2e_accel, e2e_stop):
+  def update(self, *, eligible, lead, model_lead_speed, v_ego, regular_accel, e2e_accel, e2e_stop):
     # Driver override, disengagement and unhealthy data discard all history.
     # A healthy message with no accepted lead instead releases the previous cap.
     valid_lead = not lead.present or (all(math.isfinite(x) for x in (lead.dRel, lead.vLead, lead.vRel)) and lead.dRel > 0)
@@ -40,16 +51,13 @@ class E2ESlowingAssist:
       self.reset()
       return regular_accel, False, False
 
-    # Exit at 65; a speed crossing must return below 63 before another entry.
-    if v_ego >= ASSIST_MAX_SPEED:
-      self.speed_blocked = True
-    elif v_ego < ASSIST_REARM_SPEED:
-      self.speed_blocked = False
-
+    slow_lead = (model_lead_speed is not None and math.isfinite(model_lead_speed) and
+                 model_lead_speed < ASSIST_MAX_LEAD_SPEED)
     holding_stop = self.braking and e2e_stop and v_ego < 0.3
-    if self.speed_blocked or not lead.present:
+    if not slow_lead or not lead.present:
       # A disappearing lead cannot create a new stop request, or cancel a
       # previously latched stop that the fresh model still requests at rest.
+      # A lead reaching 40 km/h also releases through the bounded handoff.
       self.braking = holding_stop
       self.brake_time = self.go_time = 0.0
       self.influence = 1.0 if holding_stop else 0.0

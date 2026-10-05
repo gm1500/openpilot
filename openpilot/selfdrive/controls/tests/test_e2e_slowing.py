@@ -2,7 +2,7 @@ import math
 import unittest
 from types import SimpleNamespace
 
-from openpilot.selfdrive.controls.lib.e2e_slowing import E2ESlowingAssist, RELEASE_JERK
+from openpilot.selfdrive.controls.lib.e2e_slowing import E2ESlowingAssist, RELEASE_JERK, get_model_lead_speed
 from openpilot.selfdrive.ui.onroad.e2e_assist import slowing_assist_color
 
 
@@ -11,7 +11,8 @@ class TestE2ESlowingAssist(unittest.TestCase):
     self.assist = E2ESlowingAssist(0.05)
 
   def step(self, **kwargs):
-    args = {'eligible': True, 'v_ego': 40 / 3.6, 'regular_accel': 0.5, 'e2e_accel': -0.5, 'e2e_stop': False}
+    args = {'eligible': True, 'v_ego': 40 / 3.6, 'model_lead_speed': 30 / 3.6,
+            'regular_accel': 0.5, 'e2e_accel': -0.5, 'e2e_stop': False}
     args['lead'] = SimpleNamespace(present=True, dRel=20., vLead=40 / 3.6, vRel=0.)
     args.update(kwargs)
     return self.assist.update(**args)
@@ -86,16 +87,32 @@ class TestE2ESlowingAssist(unittest.TestCase):
       self.assertFalse(self.assist.braking)
       self.assertIsNone(self.assist.accel_limit)
 
-  def test_high_speed_and_boundary_hysteresis(self):
-    self.assertEqual(self.enter(v_ego=66 / 3.6), (0.5, False, False))
-    self.assertEqual(self.enter(v_ego=64 / 3.6), (0.5, False, False))
-    self.assertEqual(self.enter(v_ego=62 / 3.6), (-0.5, False, True))
+  def test_gate_uses_model_lead_speed_instead_of_ego_or_derived_speed(self):
+    self.assertEqual(self.enter(v_ego=20 / 3.6, model_lead_speed=50 / 3.6), (0.5, False, False))
+    self.assertEqual(self.enter(model_lead_speed=40 / 3.6), (0.5, False, False))
+    self.assertEqual(self.enter(v_ego=80 / 3.6, model_lead_speed=39.9 / 3.6), (-0.5, False, True))
+
+  def test_lead_speed_crossing_releases_gradually_and_reentry_is_confirmed(self):
+    self.enter(model_lead_speed=39.9 / 3.6)
     previous = -0.5
     for _ in range(30):
-      accel, _, _ = self.step(v_ego=65 / 3.6)
+      accel, _, _ = self.step(model_lead_speed=40 / 3.6)
       self.assertLessEqual(accel - previous, RELEASE_JERK * 0.05 + 1e-8)
       previous = accel
-    self.assertEqual(self.step(v_ego=65 / 3.6), (0.5, False, False))
+    self.assertEqual(self.step(model_lead_speed=40 / 3.6), (0.5, False, False))
+    self.assertEqual(self.step(model_lead_speed=39.9 / 3.6), (0.5, False, False))
+    self.assertEqual(self.step(model_lead_speed=40 / 3.6), (0.5, False, False))
+    self.assertEqual(self.enter(model_lead_speed=39.9 / 3.6), (-0.5, False, True))
+
+  def test_missing_or_nonfinite_model_speed_cannot_enter_and_releases_existing_cap(self):
+    for speed in (None, math.nan, math.inf, -math.inf):
+      self.assist.reset()
+      self.assertEqual(self.enter(model_lead_speed=speed), (0.5, False, False))
+      self.enter()
+      accel, stop, _ = self.step(model_lead_speed=speed)
+      self.assertAlmostEqual(accel, -0.45)
+      self.assertFalse(stop)
+      self.assertFalse(self.assist.braking)
 
   def test_far_paced_lead_does_not_inherit_scene_braking(self):
     lead = SimpleNamespace(present=True, dRel=90., vLead=60 / 3.6, vRel=0.)
@@ -171,6 +188,29 @@ class TestE2ESlowingAssist(unittest.TestCase):
       self.assertLessEqual(accel, 0.)
       self.assertTrue(stop)
     self.assertEqual(self.step(eligible=False, v_ego=0., e2e_stop=True), (.5, False, False))
+
+
+class TestModelLeadSpeed(unittest.TestCase):
+  def test_ego_speed_correction_and_missing_predictions(self):
+    model = SimpleNamespace(leadsV3=[SimpleNamespace(prob=.9, v=[8.])], velocity=SimpleNamespace(x=[10.]))
+    self.assertEqual(get_model_lead_speed(model, 12.), 10.)
+    model.leadsV3[0].v = [-3.]
+    self.assertEqual(get_model_lead_speed(model, 10.), 0.)
+    for values in ([], [math.nan], [math.inf]):
+      model.leadsV3[0].v = values
+      self.assertIsNone(get_model_lead_speed(model, 12.))
+    model.leadsV3[0].v = [8.]
+    for probability in (0., .5, math.nan, math.inf):
+      model.leadsV3[0].prob = probability
+      self.assertIsNone(get_model_lead_speed(model, 12.))
+    model.leadsV3[0].prob = .9
+    for values in ([], [math.nan], [math.inf]):
+      model.velocity.x = values
+      self.assertIsNone(get_model_lead_speed(model, 12.))
+    model.velocity.x = [10.]
+    self.assertIsNone(get_model_lead_speed(model, math.nan))
+    model.leadsV3 = []
+    self.assertIsNone(get_model_lead_speed(model, 12.))
 
 
 class TestE2EAssistColor(unittest.TestCase):

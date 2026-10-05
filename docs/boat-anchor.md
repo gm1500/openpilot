@@ -22,14 +22,14 @@ Stock ACC and lateral-only operation do not activate it.
 
 | Condition | POC behavior |
 | --- | --- |
-| Entry below 65 km/h | E2E requests at most -0.2 m/s² for three model cycles (0.15 s), with a present lead and nonzero relevance. |
+| Model lead below 40 km/h | E2E requests at most -0.2 m/s² for three model cycles (0.15 s), with a present lead and nonzero relevance. The threshold uses the model lead velocity, corrected by CAN ego speed minus model ego speed, not range-derived velocity. Raw lead probability must exceed 0.5 and the velocity samples must be finite. Ego speed no longer limits entry. |
 | Slowing assistance | Scale E2E deceleration from zero to full influence according to gap and closing motion. Select the more restrictive of this constraint and regular acceleration. Stronger regular braking always wins. |
 | E2E wants to go | Above +0.1 m/s² with `shouldStop` false for four cycles (0.2 s) releases the latch. |
 | Lead pulls away | At speed above 2 m/s, require 0.5 s of continuous positive lead relative speed above 0.5 m/s, range growth above 0.25 m, and gap above 6 m + 1.5 s. E2E above -0.1 m/s², regular acceleration above +0.1 m/s² and no stop request allow the same 0.2 s release confirmation. Range jumps clear this evidence. |
 | Distant, no longer closing | Zero relevance plus E2E above -0.1 m/s² and no stop request permits confirmed release. Low relevance alone cannot restore propulsion during a latched strong E2E slowdown. |
 | Handoff | Increase the constraint by at most 1.0 m/s³ toward regular acceleration. Stronger braking is applied immediately after entry. |
 | Lead loss | Do not enter on absent leads or consume new E2E braking commands. Release an existing constraint through the same handoff; pedal intervention and disengagement still clear immediately. |
-| Crossing 65 km/h | Release through the same handoff; re-arm below 63 km/h to avoid boundary chatter. |
+| Lead reaches 40 km/h or model estimate is unavailable | Release through the same bounded handoff. Re-entry below 40 requires the usual three confirming cycles. Confirmed pull-away can still release sooner, below 40. |
 | Standstill | Preserve all regular stop requests; add E2E `shouldStop` while latched. A fresh model stop request below 0.3 m/s retains an already latched stop through lead loss. Existing stop-hold and resume logic remain in control. |
 
 Proximity influence falls continuously from full at `6 + 2.0*vEgo` metres to
@@ -57,6 +57,42 @@ ordinary path colours. This reports a deceleration request, not measured braking
 or friction-brake engagement. Full Experimental Mode retains its original behavior.
 
 ### Offline validation
+
+#### Model lead-speed gate
+
+The below-40 gate was compared with `abee04b` on 21,521 recorded planner frames:
+route `000002b2--0ab6ab897d` segments 0, 9, 13 and 14; `000002b1--e670ceec8d`
+segments 1–12; and the two `000002b0--29d880bc44` stopping clips. This holds
+recorded vehicle/model feedback and regular-planner requests fixed.
+
+| Case | Effect of the below-40 gate |
+| --- | --- |
+| 2b2 segment 9, 23–28 s | Integrated E2E-added negative acceleration request falls 73.6%; minimum selected request changes from -1.069 to -0.871 m/s². This is not a measured brake-event reduction. |
+| 2b2 segment 9, 28–32 s | Unchanged. E2E assistance has already released; regular cruise's throttle-permission/coasting logic requests the remaining slowdown, reaching about -0.49 m/s². |
+| 2b1 segment 10, first 11 s | Removes the additional E2E constraint behind the faster lead. |
+| 2b1 completed stops, segments 1 and 8 | The first sustained request below -0.5 m/s² is respectively 2.750 s and 0.400 s later than `abee04b`. Peak requests are unchanged. |
+| 2b0 completed stop, segment 1 | The -0.5 m/s² onset is 0.950 s later, still 0.950 s before regular control. Stop-hold requests are unchanged. |
+| 2b0 intervened stop, segment 5 | Loses the earlier POC's 2.550 s advantage at -0.5 m/s² and 0.549 s advantage at -1.0 m/s². The lead model still estimates above 40 during that early approach. |
+
+No assist stop flags were lost, and every selected request remained at or below
+the regular request. Those checks do not establish equivalent stopping distance:
+the gate deliberately removes assistance while a lead is still estimated above
+40, even when E2E is already anticipating a stop. A stationary accepted lead with
+a valid below-40 estimate remains eligible. The prior intervened stop is not fixed.
+
+70 focused assist/UI, lead-handoff and map-cruise tests pass. Isolated production
+planner checks pass across 330 excluded-condition frames, high-speed approach to
+a slow lead, missing model estimates, bounded handoff, immediate override and
+message serialization. Native MPC and transport are unavailable in this test
+environment; no closed-loop stopping simulation or full device build was run.
+
+For the map reports, segment 13 loses a usable provider speed from approximately
+52.1 s until segment 14 at 1.1 s despite fresh GPS/heading. The files contain no
+navigation speed-limit messages to compare with the reported Mapbox display.
+Segments 1 and 2 and the cached OSM geometry are unavailable, so ramp coverage
+and the exact map-matching cause remain unverified. Map behavior is unchanged.
+
+#### Earlier POC results (before the below-40 gate)
 
 Recorded-input selector replay of route `615b11d4c01d81ec/000002b0--29d880bc44`,
 segments 1 and 5 (2,400 planner frames), preserved every regular stop flag and

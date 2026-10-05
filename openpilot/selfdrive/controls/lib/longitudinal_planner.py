@@ -12,7 +12,7 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
-from openpilot.selfdrive.controls.lib.e2e_slowing import E2ESlowingAssist
+from openpilot.selfdrive.controls.lib.e2e_slowing import E2ESlowingAssist, get_model_lead_speed
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
@@ -151,6 +151,7 @@ class LongitudinalPlanner:
                        math.isfinite(output_a_target_e2e) and sm.all_checks())
     output_a_target, assist_stop, self.e2e_assist_active = self.e2e_assist.update(
       eligible=assist_eligible, lead=sm['radarState'].leadOne, v_ego=v_ego,
+      model_lead_speed=get_model_lead_speed(sm['modelV2'], v_ego),
       regular_accel=float(np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)),
       e2e_accel=float(np.clip(output_a_target_e2e, ACCEL_MIN, ACCEL_MAX)), e2e_stop=output_should_stop_e2e)
     self.output_should_stop |= assist_stop
