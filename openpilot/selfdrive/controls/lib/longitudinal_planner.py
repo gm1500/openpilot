@@ -12,6 +12,7 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
+from openpilot.selfdrive.controls.lib.e2e_slowing import E2ESlowingAssist, get_model_lead_speed
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
@@ -65,6 +66,8 @@ class LongitudinalPlanner:
     self.a_cruise = init_a
     self.output_a_target = init_a
     self.output_should_stop = False
+    self.e2e_assist = E2ESlowingAssist(dt)
+    self.e2e_assist_active = False
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -142,6 +145,18 @@ class LongitudinalPlanner:
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
+    assist_eligible = (self.CP.openpilotLongitudinalControl and not reset_state and sm['selfdriveState'].enabled and
+                       not sm['selfdriveState'].experimentalMode and sm['carControl'].longActive and
+                       not (sm['carState'].gasPressed or sm['carState'].brakePressed) and
+                       math.isfinite(output_a_target_e2e) and sm.all_checks())
+    output_a_target, assist_stop, self.e2e_assist_active = self.e2e_assist.update(
+      eligible=assist_eligible, lead=sm['radarState'].leadOne, v_ego=v_ego,
+      model_lead_speed=get_model_lead_speed(sm['modelV2'], v_ego),
+      regular_accel=float(np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)),
+      e2e_accel=float(np.clip(output_a_target_e2e, ACCEL_MIN, ACCEL_MAX)), e2e_stop=output_should_stop_e2e)
+    self.output_should_stop |= assist_stop
+    if self.e2e_assist_active:
+      self.mpc.source = LongitudinalPlanSource.e2e
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
@@ -168,5 +183,6 @@ class LongitudinalPlanner:
     longitudinalPlan.shouldStop = bool(self.output_should_stop)
     longitudinalPlan.allowBrake = True
     longitudinalPlan.allowThrottle = bool(self.allow_throttle)
+    longitudinalPlan.e2eAssistActive = bool(self.e2e_assist_active)
 
     pm.send('longitudinalPlan', plan_send)

@@ -1242,6 +1242,7 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
   shouldStop @37: Bool;
   allowThrottle @38: Bool;
   allowBrake @39: Bool;
+  e2eAssistActive @40 :Bool;  # selective assist constrains aTarget; experimental mode is unchanged
 
 
   solverExecutionTime @35 :Float32;
