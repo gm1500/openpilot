@@ -19,12 +19,16 @@ also available at the smaller comma 4 HUD scale.
 | Appearance | Meaning |
 | --- | --- |
 | White glyph | Conditional mode selected; no armed approach |
-| Thin cyan ring | Qualified mapped approach is within the activation distance |
-| Amber ring | Junction assistance contributes to the selected slowing or stop command |
+| Cyan glyph and thick ring | Qualified mapped approach is within the activation distance, independently of E2E slowing intent |
+| Amber glyph and thick ring | Junction assistance contributes to the selected slowing or stop command |
 
 Map proximity, a model proposal, and the existing lead-only assist cannot by
 themselves produce amber. A positive-acceleration handoff is not shown as active
-slowing. Stale planner/control messages and driver intervention clear the ring.
+slowing. Cyan remains available with conditional mode selected during driver
+braking, disengagement, or invalid model trajectory data. Those conditions clear
+assistance and amber immediately; re-entry requires fresh model confirmation.
+Stale planner/state messages clear the indicator. Both coloured rings use 4% of
+button width (7.7 px on the 192 px button), with matching coloured artwork.
 
 ## Activation distance
 
@@ -45,15 +49,19 @@ vehicle's longitudinal actuator delay. Calculate distance through:
 Examples assume zero current acceleration and a 0.5 s actuator delay. Positive
 acceleration increases the distance. Existing deceleration reduces it, but the
 calculation never assumes braking stronger than the selected comfort level will
-persist. These constants size the attention window; they do not change actuator
+persist. Tiny signed-speed filter noise down to −0.1 m/s is treated as standstill;
+the caller still requires a forward gear. These constants size the attention window; they do not change actuator
 limits or force the model to deliver a comfortable stop.
 
 ## OSM targeting
 
 Fetch `highway=stop` and `highway=traffic_signals` nodes belonging to the cached
-drivable ways. Measure distance along the matched directed road and unique
-connected continuations, up to 1,000 m and 16 ways. A control at a junction can
-qualify; an unresolved fork prevents looking beyond it. Nearby parallel roads,
+drivable ways. Measure distance along the matched directed road and connected
+continuations, up to 1,000 m and 16 ways. A side street does not block a clear
+straight continuation: its heading change must be at most 25°, and at least 30°
+better than every alternative. Shallow splits and ambiguous forks remain blocked;
+the lookup does not select a turn at a branching junction. A control at the
+junction itself can qualify. Nearby parallel roads,
 cross-street signs, and grade-separated crossings are not radial targets.
 
 Respect `direction`, `stop:direction`, and `traffic_signals:direction`. Accept
@@ -92,7 +100,7 @@ Select the lower of the existing boat-anchor command and accepted junction E2E
 command. Stronger regular braking always wins. Conditional mode never sets the
 full `ExperimentalMode` flag. A sustained model go request releases assistance;
 only the return toward acceleration is softened, at 1 m/s³. Driver override,
-disengagement, invalid model data, and leaving conditional mode clear immediately.
+disengagement, invalid model data, and leaving conditional mode clear assistance immediately.
 Map loss while moving releases the additional constraint. An already established
 stop can remain held through map loss while a fresh, valid model continues to
 request stopping at rest; map loss cannot create a new stop request.
@@ -100,7 +108,9 @@ request stopping at rest; map loss cannot create a new stop request.
 ## Logging and validation
 
 `mapTrafficControl` records target type/IDs, matched way, signed path distance,
-real GPS age, and projection status independently of `mapSpeedLimit`.
+real GPS age, and projection status independently of `mapSpeedLimit`. Its `reason`
+field distinguishes no control, direction rejection, an ambiguous fork or road,
+poor alignment, stale GPS, missing position, and an unavailable map cache.
 `longitudinalPlan.conditionalExperimental` records activation distance, target
 distance, predicted stop distance, both acceleration proposals, stop intent,
 arming, actual contribution, state, and transition reason.
@@ -109,12 +119,21 @@ Focused tests cover the stopping-distance calculation against numerical
 integration, profile ordering, map direction/topology, stale/estimated positions,
 mode cycling, model confirmation, holding/release, target passage, overrides,
 and HUD contribution semantics. Existing map/SLC/lead regression suites also run.
-Local result: **184 tests and 33 subtests passed**, plus lint and Python syntax
+Local result: **189 tests and 33 subtests passed**, plus lint and Python syntax
 checks. The map regressions used the Python reference transformations in place
 of the unavailable native extension.
 An isolated harness exercises the real planner update/publish with real Cap'n
 Proto messages and substitutes the native IPC/MPC dependencies. Another checks
 the actual button's rapid taps and captures its drawing primitives at both sizes.
+
+Recorded-input replay of five first-drive segments covers 5,987 planner frames.
+With the recorded map targets held fixed, the updated policy restores 104 frames
+of map-only cyan during driver intervention, with no change to the selected
+acceleration. This replay cannot validate newly discoverable map targets: the
+logs contain the selected target, not the downloaded OSM road/node snapshot, and
+live OSM retrieval was unavailable during this investigation. Straight-road
+lookahead is covered by topology tests, including continued rejection of shallow
+forks, cross-street controls, disconnected geometry, and competing parallel roads.
 
 These are offline checks, not a full device build or closed-loop road validation.
 OSM completeness and model perception limit coverage. OSM supplies no live signal

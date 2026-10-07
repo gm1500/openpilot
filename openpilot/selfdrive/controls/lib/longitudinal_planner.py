@@ -167,7 +167,8 @@ class LongitudinalPlanner:
     self.model_accel = float(output_a_target_e2e)
     self.model_stop = bool(output_should_stop_e2e)
     output_a_target, junction_stop, junction_active = self.conditional.update(
-      enabled=sm['selfdriveState'].conditionalExperimental and not sm['selfdriveState'].experimentalMode,
+      enabled=(sm['selfdriveState'].conditionalExperimental and not sm['selfdriveState'].experimentalMode and
+               str(sm['carState'].gearShifter) in ('drive', 'low', 'sport')),
       eligible=assist_eligible and str(sm['carState'].gearShifter) in ('drive', 'low', 'sport'),
       approach=map_approach(sm, time.monotonic()), model=sm['modelV2'],
       v_ego=v_ego, a_ego=sm['carState'].aEgo, personality=sm['selfdriveState'].personality.raw,

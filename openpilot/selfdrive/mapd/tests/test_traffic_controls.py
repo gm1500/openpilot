@@ -69,10 +69,46 @@ class TestTrafficControls(unittest.TestCase):
     right = road([(0, 50), (20, 100), (100, 150)], [2, 5, 6], way_id=3)
     self.assertIsNone(self.target([first, left, right]))
 
-  def test_interior_junction_blocks_target_beyond_it(self):
+  def test_side_street_does_not_hide_target_on_clear_straight_road(self):
     main = road([(0, -100), (0, 50), (0, 100), (0, 200)], [1, 2, 3, 4], {3: {'highway': 'stop', 'direction': 'forward'}})
     side = road([(0, 50), (100, 50)], [2, 5], way_id=2)
-    self.assertIsNone(self.target([main, side]))
+    result = self.target([main, side])
+    self.assertEqual(result.node_id, 3)
+    self.assertAlmostEqual(result.distance, 100., places=3)
+
+  def test_straight_continuation_across_way_boundary_and_reverse_direction(self):
+    first = road([(0, -100), (0, 50)], [1, 2])
+    for reverse in (False, True):
+      points, nodes = [(0, 50), (0, 100), (0, 200)], [2, 3, 4]
+      if reverse:
+        points.reverse()
+        nodes.reverse()
+      onward = road(points, nodes, {3: {'highway': 'traffic_signals', 'direction': 'backward' if reverse else 'forward'}}, way_id=2)
+      cross = road([(-100, 50), (0, 50), (100, 50)], [5, 2, 6], way_id=3)
+      result = self.target([first, onward, cross])
+      self.assertEqual(result.node_id, 3)
+      self.assertAlmostEqual(result.distance, 100., places=3)
+
+  def test_shallow_fork_and_cross_street_target_remain_rejected(self):
+    main = road([(0, -100), (0, 50), (0, 200)], [1, 2, 3])
+    for x, y in ((25, 150), (100, 50)):
+      side = road([(0, 50), (x, y)], [2, 4], {4: {'highway': 'stop', 'direction': 'forward'}}, way_id=2)
+      self.assertIsNone(self.target([main, side]))
+    # A target on the straight branch cannot break an otherwise shallow tie.
+    main = replace(main, control_tags={3: {'highway': 'stop', 'direction': 'forward'}})
+    fork = road([(0, 50), (25, 150)], [2, 4], way_id=2)
+    tracker = osm.RoadTracker()
+    match = tracker.update((main, fork), self.fix)
+    self.assertIsNone(tracker.traffic_control(match))
+    self.assertEqual(tracker.control_reason, 'ambiguousFork')
+
+  def test_control_rejection_reason_distinguishes_direction_and_missing_data(self):
+    tracker = osm.RoadTracker()
+    for tags, reason in (({'highway': 'stop'}, 'controlDirection'), ({}, 'noControl')):
+      main = road([(0, -100), (0, 50), (0, 200)], [1, 2, 3], {2: tags} if tags else {})
+      match = tracker.update((main,), self.fix)
+      self.assertIsNone(tracker.traffic_control(match))
+      self.assertEqual(tracker.control_reason, reason)
 
   def test_bridge_and_nearby_side_road_are_not_connected(self):
     main = road([(0, -100), (0, 50), (0, 200)], [1, 2, 3])
@@ -102,6 +138,7 @@ class TestTrafficControls(unittest.TestCase):
     service._cache = ((r,), self.fix, 100.)
     service.update(self.fix, 100.)
     self.assertEqual(service.control.node_id, 2)
+    self.assertEqual(service.control_reason, 'target')
     service.update(replace(self.fix, timestamp=100.2, estimated=True), 100.2)
     self.assertIsNone(service.control)
     self.assertIsNone(service.control_match)
@@ -109,8 +146,10 @@ class TestTrafficControls(unittest.TestCase):
     self.assertEqual(service.control.node_id, 2)
     service.update(replace(self.fix, timestamp=103.2, estimated=True, gps_timestamp=100.), 103.2)
     self.assertIsNone(service.control)
+    self.assertEqual(service.control_reason, 'gpsStale')
     service.update(replace(self.fix, timestamp=800.), 800.)
     self.assertIsNone(service.control)
+    self.assertEqual(service.control_reason, 'cacheUnavailable')
 
   def test_fetches_tagged_road_nodes_and_preserves_geometry(self):
     payload = {'elements': [

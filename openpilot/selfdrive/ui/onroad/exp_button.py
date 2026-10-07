@@ -54,13 +54,14 @@ class ExpButton(Widget):
     mode = self._held_or_actual_mode()
     rl.draw_circle(center_x, center_y, self._rect.width / 2, self._black_bg)
     if mode == LongitudinalMode.conditional:
-      draw_conditional_icon(center_x, center_y, self._icon_size, self._white_color)
       state = conditional_ring_state(ui_state.sm, ui_state.started_frame, time.monotonic())
+      color = self._white_color
       if state != 'ready':
-        color = rl.Color(255, 190, 0, self._white_color.a) if state == 'assisting' else rl.Color(80, 200, 230, self._white_color.a)
-        radius = self._rect.width / 2 - self._rect.width * .035
-        width = self._rect.width * (.025 if state == 'assisting' else .012)
+        color = rl.Color(255, 190, 0, self._white_color.a) if state == 'assisting' else rl.Color(0, 220, 255, self._white_color.a)
+        radius = self._rect.width * .49
+        width = self._rect.width * .04
         rl.draw_ring(rl.Vector2(center_x, center_y), radius - width, radius, 0, 360, 96, color)
+      draw_conditional_icon(center_x, center_y, self._icon_size, color)
       return
     texture = self._txt_exp if mode == LongitudinalMode.experimental else self._txt_wheel
     rl.draw_texture_ex(texture, rl.Vector2(center_x - texture.width / 2, center_y - texture.height / 2), 0.0, 1.0, self._white_color)

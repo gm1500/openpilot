@@ -22,13 +22,15 @@ def draw_conditional_icon(cx, cy, size, color):
 
 def conditional_ring_state(sm, started_frame, now):
   """Fresh policy state, never the model proposal or lead-assist flag."""
-  for service in ('longitudinalPlan', 'selfdriveState', 'carControl', 'carState'):
-    if (not sm.valid[service] or sm.recv_frame[service] < started_frame or
-        not 0 <= now - sm.recv_time[service] <= .3 or not 0 <= now - sm.logMonoTime[service] * 1e-9 <= .3):
-      return 'ready'
+  def fresh(service):
+    return (sm.valid[service] and sm.recv_frame[service] >= started_frame and
+            0 <= now - sm.recv_time[service] <= .3 and 0 <= now - sm.logMonoTime[service] * 1e-9 <= .3)
+
+  if not all(fresh(service) for service in ('longitudinalPlan', 'selfdriveState', 'carState')):
+    return 'ready'
   state, car = sm['selfdriveState'], sm['carState']
-  if (not state.conditionalExperimental or state.experimentalMode or not state.enabled or
-      not sm['carControl'].longActive or car.gasPressed or car.brakePressed):
+  if not state.conditionalExperimental or state.experimentalMode:
     return 'ready'
   policy = sm['longitudinalPlan'].conditionalExperimental
-  return 'assisting' if policy.contributing and str(policy.state) == 'assisting' else 'inRange' if policy.armed else 'ready'
+  active = state.enabled and fresh('carControl') and sm['carControl'].longActive and not (car.gasPressed or car.brakePressed)
+  return 'assisting' if active and policy.contributing and str(policy.state) == 'assisting' else 'inRange' if policy.armed else 'ready'

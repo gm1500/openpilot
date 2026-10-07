@@ -44,6 +44,7 @@ def main():
     # traffic control, and optional map health never disables ordinary control.
     control_msg = messaging.new_message('mapTrafficControl')
     control_msg.valid = sample is not None and provider.control_match is not None
+    control_msg.mapTrafficControl.reason = provider.control_reason
     if control_msg.valid:
       control = control_msg.mapTrafficControl
       control.gpsMonoTime = int((fix.gps_timestamp if fix.estimated else fix.timestamp) * 1e9)

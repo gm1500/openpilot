@@ -15,8 +15,9 @@ PASS_DISTANCE = 12.0
 
 def activation_distance(v_ego: float, a_ego: float, personality: int, actuator_delay: float) -> float:
   """Distance through response delay, a jerk ramp, and constant comfortable braking."""
-  if not all(math.isfinite(x) for x in (v_ego, a_ego, actuator_delay)) or not 0 <= v_ego <= 75:
+  if not all(math.isfinite(x) for x in (v_ego, a_ego, actuator_delay)) or not -.1 <= v_ego <= 75:
     return 0.
+  v_ego = max(0., v_ego)  # signed-speed filter noise around standstill; gear is checked by the caller
   profile = int(personality) if int(personality) in (0, 1, 2) else 1
   brake, jerk = COMFORT_BRAKE[profile], COMFORT_JERK[profile]
   accel = max(-brake, min(a_ego, 3.))
@@ -103,33 +104,36 @@ class ConditionalExperimental:
     self.reset()
 
   def reset(self):
-    self.armed = self.braking = self.contributing = False
+    self.armed = False
+    self._clear_assistance()
     self.target_id = self.candidate_id = self.candidate_samples = 0
     self.passed_id = 0
     self.last_observation = 0.
-    self.brake_time = self.go_time = 0.
-    self.accel_limit = None
     self.state, self.reason = 'off', 'disabled'
     self.activation_distance = self.target_distance = 0.
     self.intent = ModelIntent()
     self.map_valid = False
 
+  def _clear_assistance(self):
+    self.braking = self.contributing = False
+    self.brake_time = self.go_time = 0.
+    self.accel_limit = None
+
   def update(self, *, enabled, eligible, approach, model, v_ego, a_ego, personality,
              regular_accel, regular_stop, e2e_accel, e2e_stop):
-    if not enabled or not eligible:
+    if not enabled:
       self.reset()
-      self.state, self.reason = ('ready', 'inactive') if enabled else ('off', 'disabled')
       return regular_accel, False, False
     self.activation_distance = activation_distance(v_ego, a_ego, personality, self.actuator_delay)
     self.intent = model_intent(model, v_ego)
-    if (not self.intent.valid or self.activation_distance <= 0 or
-        not all(math.isfinite(x) for x in (regular_accel, e2e_accel))):
+    if self.activation_distance <= 0:
       self.reset()
-      self.state, self.reason = 'ready', 'invalidModel'
+      self.state, self.reason = 'ready', 'invalidKinematics'
       return regular_accel, False, False
 
     self.map_valid = approach.valid
-    holding = self.braking and v_ego < .3 and e2e_stop
+    can_assist = eligible and self.intent.valid and all(math.isfinite(x) for x in (regular_accel, e2e_accel))
+    holding = can_assist and self.braking and v_ego < .3 and e2e_stop
     self.reason = 'armed' if self.armed else 'noTarget'
     has_target = approach.valid and approach.node_id != 0
     if has_target:
@@ -161,7 +165,19 @@ class ConditionalExperimental:
     else:
       self.armed = False
       self.candidate_id = self.candidate_samples = 0
+      self.target_id = 0
+      self.target_distance = 0.
       self.reason = 'mapLost' if not approach.valid else 'noTarget'
+
+    # Cyan is map awareness. A pedal override, disengagement, or unusable model
+    # clears assistance immediately without erasing a qualified mapped approach.
+    if not can_assist:
+      self._clear_assistance()
+      if not self.armed:
+        self.target_id = 0
+      self.state = 'inRange' if self.armed else 'ready'
+      self.reason = 'inactive' if not eligible else 'invalidModel'
+      return regular_accel, False, False
 
     # Latch range eligibility through deceleration; recomputing a shorter
     # stopping distance must not chatter between ordinary and conditional mode.

@@ -49,6 +49,7 @@ struct MapTrafficControl @0xf35cc4560bbf6ec2 {
   gpsMonoTime @5 :UInt64;
   positionMonoTime @6 :UInt64;
   positionEstimated @7 :Bool; # short motion bridge only while the real GPS anchor remains fresh
+  reason @8 :Text; # target, noControl, controlDirection, ambiguousFork/Road, roadAlignment, or unavailable input
   enum Kind {
     none @0;
     stopSign @1;

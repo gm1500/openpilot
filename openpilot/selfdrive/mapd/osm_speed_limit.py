@@ -218,6 +218,7 @@ class RoadTracker:
     self._path_fix: GpsFix | None = None
     self._winner: Road | None = None
     self._winner_since = self._winner_travel = 0.
+    self.control_reason = 'noRoadMatch'
 
   def _set_roads(self, roads: tuple[Road, ...]):
     self._roads = roads
@@ -467,13 +468,44 @@ class RoadTracker:
           neighbours.update(nodes[index + 1:index + 2])
     return len(neighbours) >= 3 and (kind == 'traffic_signals' or tags.get('stop') == 'all')
 
-  def _next_control(self, match: RoadMatch, maximum: float = 1000.) -> TrafficControl | None:
+  def _junction_bearing(self, road: Road, forward: bool, along: float, outgoing: bool) -> float | None:
+    """Use up to 15 m of geometry on the requested side of a connected node."""
+    nodes = self._nodes[id(road)]
+    index = next(i for i, (_, position) in enumerate(nodes) if abs(position - along) < .01)
+    origin = GpsFix(*road.geometry[index], None, 0., 0.)
+    step = 1 if forward == outgoing else -1
+    for other in range(index + step, len(nodes) if step > 0 else -1, step):
+      x, y = offset_metres(*road.geometry[other], origin)
+      if math.hypot(x, y) >= 3:
+        if abs(nodes[other][1] - along) >= 15 or other in (0, len(nodes) - 1):
+          return math.degrees(math.atan2(x, y)) % 360 if outgoing else math.degrees(math.atan2(-x, -y)) % 360
+    return None
+
+  def _control_continuation(self, road, forward, position, exits):
+    if len(exits) <= 1:
+      return exits[0] if exits else None
+    # A side street must not hide a signal on the clearly continuing road.
+    # Shallow splits, turns, and roundabouts still require a known route.
+    incoming = self._junction_bearing(road, forward, position, False)
+    if incoming is None or any(r.tags.get('junction') == 'roundabout' for r, _, _ in exits):
+      return None
+    ranked = []
+    for exit_road, direction, entry in exits:
+      bearing = self._junction_bearing(exit_road, direction, entry, True)
+      if bearing is None:
+        return None
+      ranked.append((abs((bearing - incoming + 180) % 360 - 180), (exit_road, direction, entry)))
+    ranked.sort(key=lambda item: item[0])
+    return ranked[0][1] if ranked[0][0] <= 25 and ranked[1][0] - ranked[0][0] >= 30 else None
+
+  def _next_control(self, match: RoadMatch, maximum: float = 1000.) -> tuple[TrafficControl | None, str]:
     road, forward, along = match.road, match.forward, match.along
     distance = 0.
     visited = set()
+    reason = 'noControl'
     for hop in range(16):
       if forward is None or id(road) in visited:
-        return None
+        return None, 'lookaheadLimit'
       visited.add(id(road))
       nodes = self._nodes[id(road)]
       next_road = None
@@ -483,12 +515,16 @@ class RoadTracker:
           continue
         total = distance + step
         if total > maximum:
-          return None
+          return None, 'lookaheadLimit'
         if self._control_applies(road, node, forward):
           kind = 'stopSign' if road.control_tags[node]['highway'] == 'stop' else 'trafficLight'
-          return TrafficControl(node, road.way_id, kind, total)
+          return TrafficControl(node, road.way_id, kind, total), 'target'
+        if node in road.control_tags:
+          reason = 'controlDirection'
         if step < -.1:
           continue
+        if hop > 0 and abs(step) < .1:
+          continue  # this entry node's outgoing direction was selected on the previous way
         exits = []
         if (nodes[-1][1] - position if forward else position) > .1:
           exits.append((road, forward, position))
@@ -496,31 +532,33 @@ class RoadTracker:
           remaining = self._nodes[id(other)][-1][1] - entry if direction else entry
           if other != road and id(other) not in visited and remaining > .1:
             exits.append((other, direction, entry))
-        # No route is known: a sign AT the junction is usable, a sign beyond
-        # an unresolved fork/turn is not. Crossing geometry without a shared
-        # node never provides a continuation.
-        if len(exits) > 1:
-          return None
-        if exits and exits[0][0] != road:
-          next_road = exits[0]
+        continuation = self._control_continuation(road, forward, position, exits)
+        if len(exits) > 1 and continuation is None:
+          return None, 'ambiguousFork'
+        if continuation is not None and continuation[0] != road:
+          next_road = continuation
           distance = total
           break
       if next_road is None:
-        return None
+        return None, reason
       road, forward, along = next_road
-    return None
+    return None, 'lookaheadLimit'
 
   def traffic_control(self, match: RoadMatch) -> TrafficControl | None:
-    result = self._next_control(match)
-    if result is None or match.distance > 20 or match.heading_error is None or match.heading_error > 20:
+    result, self.control_reason = self._next_control(match)
+    if match.distance > 20 or match.heading_error is None or match.heading_error > 20:
+      self.control_reason = 'roadAlignment'
+      return None
+    if result is None:
       return None
     # Speed-limit equality does not make two roads equivalent for stopping.
     # Require plausible competing paths to agree on the control as well.
     best_score = min((p[1] for p in self._paths), default=0.)
     for other, score, _, _ in self._paths:
       if score <= best_score + 2. and other != match:
-        alternative = self._next_control(other)
+        alternative, _ = self._next_control(other)
         if alternative is None or alternative.node_id != result.node_id or abs(alternative.distance - result.distance) > 20:
+          self.control_reason = 'ambiguousRoad'
           return None
     return result
 
@@ -627,9 +665,11 @@ class OSMSpeedLimit:
     self._wake = threading.Event()
     self.control: TrafficControl | None = None
     self.control_match: RoadMatch | None = None
+    self.control_reason = 'noPosition'
 
   def update(self, fix: GpsFix | None, now: float) -> tuple[GpsFix, float | None, float | None, float] | None:
     self.control = self.control_match = None
+    self.control_reason = 'noPosition'
     if fix is not None and (fix.speed < 0 or not 0 <= now - fix.timestamp <= GPS_MAX_AGE):
       fix = None  # reverse heading is retained by MapPosition, not walked as a forward road path
     with self._lock:
@@ -650,14 +690,17 @@ class OSMSpeedLimit:
     # snapshot was read. Its internal completion timestamp is still fresh.
     if now - fetched_at >= CACHE_TTL or distance >= QUERY_RADIUS - 50:
       self._tracker.reset()
+      self.control_reason = 'cacheUnavailable'
       return None
     # Publish the current match in this mapd cycle. No asynchronous grace period
     # or previous-limit hold is needed when GPS heading changes through a turn.
     match = self._tracker.update(roads, fix)
     gps_time = fix.gps_timestamp if fix.estimated else fix.timestamp
+    self.control_reason = 'noRoadMatch' if match is None else 'gpsStale'
     if match is not None and match.forward is not None and gps_time > 0 and 0 <= now - gps_time <= GPS_MAX_AGE:
       self.control_match = match
       self.control = self._tracker.traffic_control(match)
+      self.control_reason = self._tracker.control_reason
     speed = match.speed if match is not None else None
     advisory = match.advisory_speed if match is not None else None
     ahead = 0.

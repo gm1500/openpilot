@@ -116,14 +116,37 @@ class TestConditionalExperimental(unittest.TestCase):
     self.assertEqual(current, .5)
     self.assertFalse(self.policy.armed)
 
-  def test_override_disabled_or_invalid_model_clear_immediately(self):
+  def test_override_or_invalid_model_clear_assistance_but_preserve_map_awareness(self):
     bad = model()
     bad.velocity.x[3] = math.nan
-    for args in ({'eligible': False}, {'enabled': False}, {'model': bad}, {'a_ego': math.nan}, {'e2e_accel': math.inf}):
+    for args in ({'eligible': False}, {'model': bad}, {'e2e_accel': math.inf}):
+      self.enter()
+      self.assertEqual(self.step(**args), (.5, False, False))
+      self.assertFalse(self.policy.braking)
+      self.assertTrue(self.policy.armed)
+      self.assertEqual(self.policy.state, 'inRange')
+      # Assistance must reconfirm after eligibility/model validity returns.
+      self.assertEqual(self.step(), (.5, False, False))
+
+  def test_disabled_or_invalid_kinematics_clear_all_state(self):
+    for args in ({'enabled': False}, {'a_ego': math.nan}, {'v_ego': -1.}):
       self.enter()
       self.assertEqual(self.step(**args), (.5, False, False))
       self.assertFalse(self.policy.braking)
       self.assertFalse(self.policy.armed)
+
+  def test_map_qualifies_without_control_or_model_then_clears_on_map_loss(self):
+    bad = model()
+    bad.velocity.x = []
+    for args in ({'eligible': False}, {'model': bad}):
+      self.policy.reset()
+      for timestamp in (100., 101.):
+        self.assertEqual(self.step(approach=MapApproach(True, 10, 80., timestamp), **args), (.5, False, False))
+      self.assertTrue(self.policy.armed)
+      self.assertEqual(self.policy.state, 'inRange')
+      self.step(approach=MapApproach(), **args)
+      self.assertFalse(self.policy.armed)
+      self.assertEqual(self.policy.target_id, 0)
 
   def test_passed_changed_or_missing_target_releases(self):
     for approach in (MapApproach(True, 10, -15., 102.), MapApproach(True, 20, 70., 102.), MapApproach(True)):
@@ -170,6 +193,7 @@ class TestDistanceAndIntent(unittest.TestCase):
         self.assertLess(activation_distance(speed, 0, profile, .5), activation_distance(speed, 1, profile, .5))
         self.assertLess(activation_distance(speed, 0, profile, .5), activation_distance(speed + 5, 0, profile, .5))
     self.assertEqual(activation_distance(0, 0, 1, .5), 20.)
+    self.assertEqual(activation_distance(-.03, -1.3, 1, .5), 20.)
     self.assertEqual(activation_distance(15, -5, 1, .5), activation_distance(15, -1.8, 1, .5))
 
   def test_formula_agrees_with_independent_time_step_simulation(self):
@@ -241,6 +265,11 @@ class TestMapFreshnessAndHUD(unittest.TestCase):
     self.assertEqual(conditional_ring_state(sm, 1, 100.), 'assisting')
     self.assertEqual(conditional_ring_state(sm, 1, 101.), 'ready')
     sm['carState'].gasPressed = True
+    self.assertEqual(conditional_ring_state(sm, 1, 100.), 'inRange')
+    sm['selfdriveState'].enabled = False
+    sm.valid['carControl'] = False
+    self.assertEqual(conditional_ring_state(sm, 1, 100.), 'inRange')
+    sm['selfdriveState'].experimentalMode = True
     self.assertEqual(conditional_ring_state(sm, 1, 100.), 'ready')
 
   def test_mode_cycle_and_nonoverlapping_parameter_writes(self):
