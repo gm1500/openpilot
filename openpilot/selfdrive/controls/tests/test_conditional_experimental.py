@@ -7,7 +7,7 @@ from openpilot.selfdrive.controls.lib.conditional_experimental import (
 )
 from openpilot.selfdrive.controls.lib.longitudinal_mode import LongitudinalMode, selected_mode, set_longitudinal_mode, automatic_e2e_selected
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.selfdrive.ui.onroad.conditional_icon import conditional_ring_state
+from openpilot.selfdrive.ui.onroad.conditional_icon import conditional_ring_state, no_speed_e2e_active
 
 
 def model(speed=15., brake=1.5):
@@ -410,6 +410,42 @@ class TestMapFreshnessAndHUD(unittest.TestCase):
       for mode in (LongitudinalMode.conditional, LongitudinalMode.experimental, LongitudinalMode.voacc):
         set_longitudinal_mode(params, mode)
         self.assertEqual(selected_mode(params.values['ExperimentalMode'], params.values['ConditionalExperimentalMode']), mode)
+
+
+class TestNoSpeedIcon(unittest.TestCase):
+  def setUp(self):
+    self.sm = FakeSM(
+      mapCruiseState=NS(automaticE2e=True, e2eFallback=True, state='paused'),
+      longitudinalPlan=NS(conditionalExperimental=NS(e2eEnabled=True, state='active', reason='noSpeedLimit')),
+      selfdriveState=NS(conditionalExperimental=True, experimentalMode=False, enabled=True),
+      carControl=NS(longActive=True), carState=NS(gasPressed=False, brakePressed=False))
+
+  def test_confirmed_fallback_shows_icon_even_with_paused_slc(self):
+    self.assertTrue(no_speed_e2e_active(self.sm, 1, 100.))
+
+  def test_inactive_other_conditions_and_recovered_map_cannot_show_override(self):
+    cases = [('mapCruiseState', None, 'automaticE2e', False), ('mapCruiseState', None, 'e2eFallback', False),
+             ('mapCruiseState', None, 'state', 'off'), ('mapCruiseState', None, 'state', 'unsupported'),
+             ('longitudinalPlan', 'conditionalExperimental', 'e2eEnabled', False),
+             ('longitudinalPlan', 'conditionalExperimental', 'state', 'ready'),
+             ('longitudinalPlan', 'conditionalExperimental', 'reason', 'junction'),
+             ('selfdriveState', None, 'conditionalExperimental', False), ('selfdriveState', None, 'experimentalMode', True),
+             ('selfdriveState', None, 'enabled', False), ('carControl', None, 'longActive', False),
+             ('carState', None, 'gasPressed', True), ('carState', None, 'brakePressed', True)]
+    for service, child, attr, value in cases:
+      with self.subTest(service=service, attr=attr, value=value):
+        self.setUp()
+        message = getattr(self.sm[service], child) if child else self.sm[service]
+        setattr(message, attr, value)
+        self.assertFalse(no_speed_e2e_active(self.sm, 1, 100.))
+
+  def test_invalid_stale_or_previous_drive_messages_cannot_show_override(self):
+    for service in self.sm.services:
+      for attr, value in (('valid', False), ('recv_frame', 0), ('recv_time', 99.), ('logMonoTime', int(99e9))):
+        with self.subTest(service=service, attr=attr):
+          self.setUp()
+          getattr(self.sm, attr)[service] = value
+          self.assertFalse(no_speed_e2e_active(self.sm, 1, 100.))
 
 
 class TestSLCState(unittest.TestCase):

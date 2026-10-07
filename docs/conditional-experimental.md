@@ -51,9 +51,10 @@ A qualified nearby junction independently keeps E2E enabled after recovery.
 Without one, regular mode resumes. A fresh explicit SET can accept the recovered
 map limit before the automatic recovery timer completes.
 
-The automatic 105 change happens once per outage while SLC is tracking.
-Manual +/- or RES pauses the SET change; the helper does not repeatedly undo a
-driver's adjustment during the outage. A simultaneous manual selection can
+The automatic 105 change happens once per outage, including when a previous
+manual selection paused SLC before speed data disappeared. Manual +/- or RES
+after the fallback request cancels any pending raise; the helper does not
+repeatedly undo a driver's adjustment during the outage. A simultaneous manual selection can
 override automatic recovery. Pedals and disengagement prevent an automatic
 raise; disabling SLC or conditional mode clears both automatic conditions.
 Turning conditional mode off preserves the SLC setting. A previously established
@@ -82,6 +83,15 @@ Disengagement, a pedal override, invalid model data, or stale HUD messages make
 it white immediately. Qualified map awareness can remain latched internally
 while the driver overrides, allowing direct re-entry when control resumes.
 Lead-only E2E assistance cannot turn this icon orange.
+
+During acknowledged no-speed E2E, the MAX sign replaces the map number with
+the existing experimental-mode icon, scaled to the number area on both screens.
+An orange border, `OVERRIDE` caption and `NO MAP LIMIT` status distinguish it
+from a mapped speed. The actual SET remains underneath (normally 105 km/h,
+or its mph conversion, unless manually adjusted). The override stays through
+map recovery qualification and returns to the speed number when SLC takes over.
+Junction-only E2E does not replace a usable speed number. Disengagement, pedal
+override, disabled conditional/SLC mode, or stale feedback clears the override.
 
 ## Range from current SET speed
 
@@ -206,7 +216,7 @@ from additional braking; legacy state enum values remain readable. Reasons
 `automaticE2e`, `e2eFallback` and applied `setSpeed` for the cross-service handshake.
 Card publishes transitions immediately in addition to its regular 5 Hz status.
 
-Validation: **246 tests and 101 subtests passed**, covering both OR conditions,
+Initial validation: **246 tests and 101 subtests passed**, covering both OR conditions,
 missing/recovered speed, SET buttons, map matching/topology, stronger ordinary
 braking, driver override, mode selection and HUD state. The actual cruise helper
 and longitudinal planner were also coupled through Cap'n Proto request/ack
@@ -216,7 +226,7 @@ range, and invalid model/plan, stale acknowledgement and pedal blocking.
 
 Native messaging, parameters and the longitudinal MPC solver were built locally.
 The ordinary/full-experimental cruise and longitudinal maneuver suites pass:
-21 tests and 56 maneuver subtests. Nine additional integration tests couple the
+21 tests and 56 maneuver subtests. The initial nine integration tests couple the
 actual cruise helper, native MPC, SubMaster health checks and native planner
 publications. They cover both triggers, 105 entry, recovery with and without a
 junction, the smaller recovered SET window, reordered recovery messages, invalid
@@ -230,7 +240,7 @@ The native suite exposed and verified a fix for dictionary-based simulation
 inputs: optional map readers now treat absent service metadata as unavailable
 data, rather than raising an exception or trusting an unqualified map message.
 
-The current SET/mode replay covers the six latest `2c3` segments and **6,556
+The earlier SET/mode replay covers six `2c3` segments and **6,556
 planner frames** using the recorded map-speed, junction, button and model inputs.
 It raises SET to 105 once, after the planner acknowledgement, then returns to
 40 when map speed qualifies. A second recovery occurs while disengaged and
@@ -238,6 +248,21 @@ does not raise SET. Junction-only E2E remains **73.95 seconds**, matching the
 previous junction smoothing replay; missing-speed E2E adds **2.75 seconds**.
 Stronger ordinary braking wins in every replayed frame, and no conditional
 contribution occurs while control is ineligible.
+
+The `2c4` follow-up reproduces the missed 105 SET in segments 18 and 19:
+SLC was already paused when the logs began. No-speed E2E activated at segment
+18 +43.450 s, 14.33 seconds before the bookmark, but the old tracking gate
+left SET at 100. Replaying the corrected selector over **2,400 planner frames**
+raises SET to 105 at +43.452 s after acknowledgement. The restored 70 limit
+applies at segment 19 +30.610 s before releasing fallback; junction activation
+remains independent. This replay seeds the observed initial paused/100 state.
+
+Follow-up validation: **129 tests and 63 subtests passed**, including the real
+MPC/messaging integration with previously paused SLC, manual adjustment after
+the fallback request, and inactive/stale/previous-drive HUD rejection. Six
+abstract test templates are skipped. Native sign drawing calls were checked at
+both production widths (180 px and 96 px), in metric and imperial modes: the
+experimental icon stays inside the number area and the actual SET stays visible.
 
 The previous junction-only validation covered 17 segments and 19,743 frames.
 It removed all eight short detection gaps during engaged driving in `2c3`:

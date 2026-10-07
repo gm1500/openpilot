@@ -65,6 +65,33 @@ class TestSLCFallback(unittest.TestCase):
     self.tick()
     self.assertEqual(self.helper.v_cruise_kph, 105)
 
+  def test_new_outage_sets_105_even_when_slc_was_already_paused(self):
+    self.limit = 100.
+    self.tick(210)
+    self.tick(button=ButtonType.resumeCruise, pressed=True)
+    self.tick(button=ButtonType.resumeCruise)
+    self.assertEqual(self.helper.map_cruise.state(True), 'paused')
+    self.limit = None
+    self.tick(110)
+    self.assertTrue(self.helper.map_cruise.e2e_fallback)
+    self.assertEqual(self.helper.v_cruise_kph, 100)  # still wait for planner acknowledgement
+    self.ready = True
+    self.tick()
+    self.assertEqual(self.helper.v_cruise_kph, 105)
+    self.limit = 70.
+    self.tick(210)
+    self.assertEqual(self.helper.v_cruise_kph, 70)
+    self.assertFalse(self.helper.map_cruise.e2e_fallback)
+
+  def test_manual_selection_after_request_cancels_pending_raise(self):
+    self.unknown()
+    self.tick(button=ButtonType.decelCruise, pressed=True)
+    self.tick(button=ButtonType.decelCruise)
+    self.ready = True
+    self.tick(250)
+    self.assertTrue(self.helper.map_cruise.e2e_fallback)
+    self.assertEqual(self.helper.v_cruise_kph, 49)
+
   def test_brief_missing_data_does_not_change_set_or_enable_fallback(self):
     self.tick(210)
     self.ready = True

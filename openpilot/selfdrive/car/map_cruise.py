@@ -108,7 +108,9 @@ class MapCruise:
       if self._missing_since is None or now < self._missing_since:
         self._missing_since = now
       if now - self._missing_since >= MAP_MISSING_TIME and not self.e2e_fallback:
-        self.request_fallback(raise_set=self.tracking)
+        # A new no-speed interval owns its initial SET even if an earlier
+        # manual adjustment paused SLC. Later buttons can still cancel it.
+        self.request_fallback()
     else:
       self._missing_since = None
       if self.e2e_fallback and previous_target is None and self.target_kph is not None:
@@ -116,10 +118,10 @@ class MapCruise:
         # Buttons processed after this update can still override it explicitly.
         self.tracking = True
 
-  def request_fallback(self, raise_set: bool = True):
+  def request_fallback(self):
     if self.automatic_e2e:
       self.e2e_fallback = True
-      self.fallback_set_pending = raise_set
+      self.fallback_set_pending = True
 
   def finish_recovery(self, set_kph: float):
     # Keep E2E requested until the mapped SET has been applied (or the driver

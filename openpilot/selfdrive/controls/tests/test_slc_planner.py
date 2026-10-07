@@ -5,7 +5,7 @@ from opendbc.car.structs import car
 from openpilot.cereal import messaging
 from openpilot.common.params import Params
 from openpilot.common.test import OpenpilotTestCase
-from openpilot.selfdrive.car.cruise import VCruiseHelper
+from openpilot.selfdrive.car.cruise import VCruiseHelper, ButtonType
 from openpilot.selfdrive.car.map_cruise import fallback_e2e_ready
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
 from openpilot.selfdrive.controls.lib.longitudinal_mode import LongitudinalMode, automatic_e2e_selected, set_longitudinal_mode
@@ -125,6 +125,22 @@ class TestSLCPlanner(OpenpilotTestCase):
 
   def test_no_speed_entry_and_recovery_without_junction(self):
     self.outage()
+    self.recover()
+    self.assertFalse(self.ack['longitudinalPlan'].conditionalExperimental.e2eEnabled)
+
+  def test_paused_slc_still_enters_no_speed_ceiling_after_ack(self):
+    self.limit = 100.
+    self.tick(220)
+    self.cs.buttonEvents = [car.CarState.ButtonEvent(type=ButtonType.resumeCruise, pressed=True)]
+    self.tick(1)
+    self.cs.buttonEvents = []
+    self.assertEqual(self.cruise.map_cruise.state(True), 'paused')
+    self.assertEqual(self.cs.vCruise, 100)
+    self.limit = None
+    self.tick(115)
+    self.assertEqual(self.cs.vCruise, 105)
+    self.assertTrue(self.ack['longitudinalPlan'].conditionalExperimental.e2eEnabled)
+    self.assertEqual(self.ack['longitudinalPlan'].conditionalExperimental.reason, 'noSpeedLimit')
     self.recover()
     self.assertFalse(self.ack['longitudinalPlan'].conditionalExperimental.e2eEnabled)
 

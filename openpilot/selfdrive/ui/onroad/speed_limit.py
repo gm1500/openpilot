@@ -9,12 +9,16 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 
 
 def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: float | None, is_metric: bool, set_color: rl.Color,
-                     state: str = 'unsupported', pulse_elapsed: float | None = None, advisory: bool = False) -> None:
+                     state: str = 'unsupported', pulse_elapsed: float | None = None, advisory: bool = False,
+                     e2e_override: bool = False) -> None:
   """North American-style map sign, with the cruise target outside underneath."""
   font = gui_app.font(FontWeight.BOLD)
   medium = gui_app.font(FontWeight.MEDIUM)
   scale = rect.width / 180
   black = rl.Color(20, 22, 24, 255)
+  orange = rl.Color(255, 152, 0, 255)
+  if e2e_override:
+    advisory, pulse_elapsed, state = False, None, 'e2e'
   # Initial map SET and automatic changes pulse until vehicle speed settles.
   # Start bright green, with a broad peak each second; None restores white.
   pulse = 0. if pulse_elapsed is None or advisory else math.sqrt((1 + math.cos(2 * math.pi * pulse_elapsed)) / 2)
@@ -36,18 +40,27 @@ def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: f
 
   if not advisory:
     text("MAXIMUM" if is_metric else "SPEED LIMIT", 14, 34, 27, black)
-  conversion = CV.MS_TO_KPH if is_metric else CV.MS_TO_MPH
-  value = "–" if speed_limit is None else str(round(speed_limit * conversion))
-  text(value, 30 if advisory else 48, 126 if advisory else 108, 104, black)
-  text("km/h" if is_metric else "mph", 158, 34, 30, black, bold=False)
+  if e2e_override:
+    # Reuse the mode button's icon, centered where the map number normally sits.
+    icon = gui_app.texture('icons/experimental.png', round(100 * scale), round(100 * scale))
+    center = rl.Vector2(rect.x + rect.width / 2, rect.y + 102 * scale)
+    rl.draw_texture_ex(icon, rl.Vector2(center.x - icon.width / 2, center.y - icon.height / 2), 0., 1., rl.WHITE)
+    text('OVERRIDE', 158, 34, 24, black)
+  else:
+    conversion = CV.MS_TO_KPH if is_metric else CV.MS_TO_MPH
+    value = "–" if speed_limit is None else str(round(speed_limit * conversion))
+    text(value, 30 if advisory else 48, 126 if advisory else 108, 104, black)
+    text("km/h" if is_metric else "mph", 158, 34, 30, black, bold=False)
 
   # A separate dark strip keeps the actual cruise target readable against the camera.
   subtext = rl.Rectangle(rect.x, rect.y + rect.height + 7 * scale, rect.width, 64 * scale)
   rl.draw_rectangle_rounded(subtext, 0.2, 8, rl.Color(0, 0, 0, 166))
   text('–' if set_speed is None else str(round(set_speed)), 212, 61, 46, set_color)
-  labels = {'active': 'MAP ON', 'armed': 'MAP READY', 'waiting': 'MAP WAIT', 'paused': 'MAP HOLD', 'off': 'MAP OFF', 'estimated': 'MAP EST'}
+  labels = {'active': 'MAP ON', 'armed': 'MAP READY', 'waiting': 'MAP WAIT', 'paused': 'MAP HOLD', 'off': 'MAP OFF',
+            'estimated': 'MAP EST', 'e2e': 'NO MAP LIMIT'}
   if state in labels:
-    color = rl.Color(13, 248, 122, 255) if state in ('active', 'armed') else rl.Color(255, 200, 96, 255) if state != 'off' else rl.LIGHTGRAY
+    color = (orange if e2e_override else rl.Color(13, 248, 122, 255) if state in ('active', 'armed') else
+             rl.Color(255, 200, 96, 255) if state != 'off' else rl.LIGHTGRAY)
     rl.draw_rectangle_rounded_lines_ex(border, 0.08, 8, (7 if state in ('active', 'armed') else 4) * scale, color)
     status = rl.Rectangle(rect.x, rect.y + 276 * scale, rect.width, 29 * scale)
     rl.draw_rectangle_rounded(status, 0.2, 8, rl.Color(0, 0, 0, 190))
@@ -85,4 +98,5 @@ class SpeedLimitButton(Widget):
       self._pulse_since = now
     elapsed = None if self._pulse_since is None else now - self._pulse_since
     draw_speed_limit(rect, ui_state.speed_limit, self.set_speed, ui_state.is_metric, self.set_color, state, elapsed,
-                     advisory=ui_state.speed_limit_is_advisory)
+                     advisory=ui_state.speed_limit_is_advisory,
+                     e2e_override=ui_state.map_cruise_e2e and ui_state.map_cruise_enabled and ui_state.map_cruise_supported)

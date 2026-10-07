@@ -1,5 +1,6 @@
 """Approved intersection, stop sign and signal, drawn crisply at native HUD size."""
 import pyray as rl
+from openpilot.selfdrive.car.map_cruise import MAP_MESSAGE_MAX_AGE
 
 
 def draw_conditional_icon(cx, cy, size, color):
@@ -61,3 +62,17 @@ def conditional_ring_state(sm, started_frame, now):
   policy = sm['longitudinalPlan'].conditionalExperimental
   active = state.enabled and fresh('carControl') and sm['carControl'].longActive and not (car.gasPressed or car.brakePressed)
   return 'active' if active and policy.e2eEnabled else 'ready'
+
+
+def no_speed_e2e_active(sm, started_frame, now):
+  """Show the speed-sign override only for acknowledged, current no-speed E2E."""
+  service = 'mapCruiseState'
+  if (not sm.valid[service] or sm.recv_frame[service] < started_frame or
+      not 0 <= now - sm.recv_time[service] <= MAP_MESSAGE_MAX_AGE or
+      not 0 <= now - sm.logMonoTime[service] * 1e-9 <= MAP_MESSAGE_MAX_AGE):
+    return False
+  request = sm[service]
+  policy = sm['longitudinalPlan'].conditionalExperimental
+  return (request.automaticE2e and request.e2eFallback and str(request.state) not in ('off', 'unsupported') and
+          conditional_ring_state(sm, started_frame, now) == 'active' and
+          str(policy.state) == 'active' and policy.reason == 'noSpeedLimit')
