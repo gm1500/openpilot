@@ -105,13 +105,16 @@ class TestCameraMode(unittest.TestCase):
                      carState=NS(gasPressed=False, brakePressed=False), carControl=NS(longActive=True),
                      longitudinalPlan=NS(conditionalExperimental=NS(e2eEnabled=False)))
 
-  def test_slc_and_conditional_selection_alone_do_not_enable_camera_animation(self):
+  def test_conditional_selection_enables_camera_independently_of_e2e_activation(self):
     self.assertFalse(experimental_camera_active(self.sm, 1, 100.))
     self.sm['selfdriveState'].conditionalExperimental = True
-    self.assertFalse(experimental_camera_active(self.sm, 1, 100.))
+    self.assertTrue(experimental_camera_active(self.sm, 1, 100.))
     self.sm['longitudinalPlan'].conditionalExperimental.e2eEnabled = True
     self.assertTrue(experimental_camera_active(self.sm, 1, 100.))
+    self.sm['longitudinalPlan'].conditionalExperimental.e2eEnabled = False
     self.sm['carState'].gasPressed = True
+    self.assertTrue(experimental_camera_active(self.sm, 1, 100.))
+    self.sm['selfdriveState'].conditionalExperimental = False
     self.assertFalse(experimental_camera_active(self.sm, 1, 100.))
 
   def test_full_experimental_preserves_original_selection_behavior(self):

@@ -124,17 +124,24 @@ class TestCameraTransition(unittest.TestCase):
         self.assertIsNone(view._target_client)
         self.assertEqual(view.stream_type, mod.NARROW_ROAD_CAM)
 
-  def test_conditional_selection_waits_for_actual_e2e_and_offroad_resets_pending_switch(self):
+  def test_conditional_selection_allows_camera_between_e2e_activations_and_offroad_resets_switch(self):
     for device in ('tici', 'mici'):
       with self.subTest(device=device), ExitStack() as stack:
         view, sm, step, mod = self.make_view(device, stack)
         sm['selfdriveState'].experimentalMode = False
-        sm['selfdriveState'].conditionalExperimental = True
         step()
         self.assertFalse(view._switching)
+        sm['selfdriveState'].conditionalExperimental = True
+        step()
+        self.assertFalse(sm['longitudinalPlan'].conditionalExperimental.e2eEnabled)
+        self.assertTrue(view._switching)
+        target = view._target_client
         sm['longitudinalPlan'].conditionalExperimental.e2eEnabled = True
         step()
+        sm['longitudinalPlan'].conditionalExperimental.e2eEnabled = False
+        step()
         self.assertTrue(view._switching)
+        self.assertIs(view._target_client, target)
         view._offroad_transition()
         self.assertFalse(view._switching)
         self.assertIsNone(view._target_client)

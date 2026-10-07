@@ -1,19 +1,19 @@
 """Wide-camera easing adapted from upstream 33ddd8eb (Qt) for both raylib UIs."""
 import math
 
-from openpilot.selfdrive.ui.onroad.conditional_icon import conditional_ring_state
-
 WIDE_CAM_MAX_SPEED = 5.0  # m/s (18 km/h)
 ROAD_CAM_MIN_SPEED = 10.0  # m/s (36 km/h)
 
 
 def experimental_camera_active(sm, started_frame: int, now: float) -> bool:
+  """Camera behavior follows the selected mode, independently of E2E activation."""
   for service in ('selfdriveState', 'carState'):
     if (not sm.valid[service] or sm.recv_frame[service] < started_frame or
         not 0 <= now - sm.recv_time[service] <= .3 or
         not 0 <= now - sm.logMonoTime[service] * 1e-9 <= .3):
       return False
-  return sm['selfdriveState'].experimentalMode or conditional_ring_state(sm, started_frame, now) == 'active'
+  state = sm['selfdriveState']
+  return state.experimentalMode or state.conditionalExperimental
 
 
 class CameraZoom:

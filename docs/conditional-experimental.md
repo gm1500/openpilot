@@ -103,9 +103,12 @@ animation clock. Recovery can start a fresh pulse when the mapped SET applies.
 Both raylib layouts adapt the wide-camera animation from upstream
 [`33ddd8eb`](https://github.com/commaai/openpilot/commit/33ddd8eb444ca4767d141e46e3b7e0abed6815da).
 Full Experimental mode retains its original camera-selection behavior.
-Conditional mode permits the animation only while the fresh planner/UI state
-confirms E2E is active, for either a junction or unavailable map speed. Merely
-selecting conditional mode, regular cruise, and SLC alone do not request wide.
+Selecting conditional mode permits the same speed-based camera behavior,
+including between actual E2E activations while the conditional icon is white.
+The camera follows the selected mode independently of the longitudinal planner;
+E2E entering or leaving a junction/no-speed condition does not reset the camera
+request. Regular cruise and SLC alone do not request wide. Current-drive, fresh
+mode and vehicle-speed messages are still required.
 
 The existing speed thresholds remain: request wide below **18 km/h**, narrow
 above **36 km/h**, and retain the requested direction between them. On entry,
