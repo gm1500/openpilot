@@ -92,6 +92,25 @@ class TestSLCFallback(unittest.TestCase):
     self.assertTrue(self.helper.map_cruise.e2e_fallback)
     self.assertEqual(self.helper.v_cruise_kph, 49)
 
+  def test_no_speed_fallback_clears_old_pulse_and_recovery_starts_map_pulse(self):
+    self.tick(210)
+    self.assertEqual(self.helper.map_pulse.target_kph, 50)
+    self.limit = None
+    self.tick(110)
+    self.assertTrue(self.helper.map_cruise.e2e_fallback)
+    self.assertIsNone(self.helper.map_pulse.target_kph)
+    self.ready = True
+    self.tick()
+    self.assertEqual(self.helper.v_cruise_kph, 105)
+    self.assertIsNone(self.helper.map_pulse.target_kph)
+    self.limit = 70.
+    self.tick(190)
+    self.assertIsNone(self.helper.map_pulse.target_kph)  # still qualifying, still E2E
+    self.tick(20)
+    self.assertFalse(self.helper.map_cruise.e2e_fallback)
+    self.assertEqual(self.helper.v_cruise_kph, 70)
+    self.assertEqual(self.helper.map_pulse.target_kph, 70)
+
   def test_brief_missing_data_does_not_change_set_or_enable_fallback(self):
     self.tick(210)
     self.ready = True

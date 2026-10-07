@@ -182,6 +182,7 @@ class UIState:
       # Completion/cancellation is latched in card, not inferred from speed
       # mismatch, so a later speed drift cannot restart a finished pulse.
       self.map_cruise_pulsing = (self.map_cruise_enabled and self.map_cruise_supported and self.engaged and
+                                 not self.sm['mapCruiseState'].e2eFallback and self.speed_limit is not None and
                                  cs.cruiseState.available and not (cs.gasPressed or cs.brakePressed) and
                                  8 <= adjusting_kph <= 145 and 8 <= cs.vCruise <= 145 and
                                  not lead_limits_speed(self.sm, self.started_frame, now))

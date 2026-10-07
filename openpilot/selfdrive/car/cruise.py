@@ -95,6 +95,8 @@ class VCruiseHelper:
     self.map_pulse.update(candidate, self.v_cruise_kph, CS.vEgo * CV.MS_TO_KPH, now,
                           enabled and CS.cruiseState.available and self.map_cruise.enabled,
                           intervention, map_applied)
+    if self.map_cruise.e2e_fallback:
+      self.map_pulse.cancel()  # no green feedback for the no-speed E2E ceiling
 
   def _update_v_cruise_non_pcm(self, CS, enabled, is_metric):
     # handle button presses. TODO: this should be in state_control, but a decelCruise press

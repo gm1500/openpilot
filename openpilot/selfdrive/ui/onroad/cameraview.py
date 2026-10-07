@@ -108,6 +108,8 @@ class CameraView(Widget):
     ui_state.add_offroad_transition_callback(self._offroad_transition)
 
   def _offroad_transition(self):
+    self._target_client = self._target_stream_type = None
+    self._switching = False
     # Reconnect if not first time going onroad
     if ui_state.is_onroad() and self.frame is not None:
       # Prevent old frames from showing when going onroad. Qt has a separate thread
@@ -125,6 +127,9 @@ class CameraView(Widget):
 
   def switch_stream(self, stream_type: VisionStreamType) -> None:
     if self._stream_type == stream_type:
+      # The requested view can reverse while the other camera is connecting.
+      self._target_client = self._target_stream_type = None
+      self._switching = False
       return
 
     if self._switching and self._target_stream_type == stream_type:

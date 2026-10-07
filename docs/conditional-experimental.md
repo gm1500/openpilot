@@ -93,6 +93,35 @@ map recovery qualification and returns to the speed number when SLC takes over.
 Junction-only E2E does not replace a usable speed number. Disengagement, pedal
 override, disabled conditional/SLC mode, or stale feedback clears the override.
 
+Green pulsing belongs to a mapped-speed adjustment, never the 105 E2E ceiling.
+Entering no-speed fallback cancels any old pending map pulse. A missing map
+number and the experimental override both suppress the pulse and reset its
+animation clock. Recovery can start a fresh pulse when the mapped SET applies.
+
+## Experimental camera transition
+
+Both raylib layouts adapt the wide-camera animation from upstream
+[`33ddd8eb`](https://github.com/commaai/openpilot/commit/33ddd8eb444ca4767d141e46e3b7e0abed6815da).
+Full Experimental mode retains its original camera-selection behavior.
+Conditional mode permits the animation only while the fresh planner/UI state
+confirms E2E is active, for either a junction or unavailable map speed. Merely
+selecting conditional mode, regular cruise, and SLC alone do not request wide.
+
+The existing speed thresholds remain: request wide below **18 km/h**, narrow
+above **36 km/h**, and retain the requested direction between them. On entry,
+the wide image starts cropped to the narrow field of view, then zooms out.
+On exit, wide zooms back in before switching to live narrow frames. The original
+easing takes about **0.85 seconds** and is normalized for elapsed time, so
+20 Hz and 60 Hz rendering have the same timing. Missing camera streams cannot
+stall a return to narrow; reversing the request cancels a pending stale switch.
+
+Camera projection and the road overlay use the same animated zoom. The
+projection cache updates on every zoom step. Each layout retains its normal
+framing, including mici's existing narrow-camera speed-dependent crop; the
+added wide/narrow animation is confined to Experimental entry and exit.
+The portrait layout also interpolates its extra vertical framing offset at
+the handoff to avoid a 20-pixel jump when the narrow view fills the viewport.
+
 ## Range from current SET speed
 
 Use the current valid `carState.vCruise` in km/h, converted to m/s. The range is
@@ -263,6 +292,15 @@ the fallback request, and inactive/stale/previous-drive HUD rejection. Six
 abstract test templates are skipped. Native sign drawing calls were checked at
 both production widths (180 px and 96 px), in metric and imperial modes: the
 experimental icon stays inside the number area and the actual SET stays visible.
+
+Camera/pulse follow-up: **81 tests and 38 subtests passed**, including both
+native raylib camera classes' stream-switch and projection code with synthetic
+frame sources and GPU uploads replaced. Cases cover delayed target frames,
+mid-animation reversal, pending-switch cancellation, stream loss, offroad reset,
+mode eligibility, matching fields of view, animated overlay/cache updates,
+and 20/60 Hz timing. Cruise and native MPC integration tests verify the 105
+handoff and mapped-speed recovery still work, while only the mapped target
+starts green feedback. This does not include device GPU or on-road validation.
 
 The previous junction-only validation covered 17 segments and 19,743 frames.
 It removed all eight short detection gaps during engaged driving in `2c3`:

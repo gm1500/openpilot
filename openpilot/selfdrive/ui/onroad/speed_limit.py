@@ -21,7 +21,7 @@ def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: f
     advisory, pulse_elapsed, state = False, None, 'e2e'
   # Initial map SET and automatic changes pulse until vehicle speed settles.
   # Start bright green, with a broad peak each second; None restores white.
-  pulse = 0. if pulse_elapsed is None or advisory else math.sqrt((1 + math.cos(2 * math.pi * pulse_elapsed)) / 2)
+  pulse = 0. if pulse_elapsed is None or advisory or speed_limit is None else math.sqrt((1 + math.cos(2 * math.pi * pulse_elapsed)) / 2)
   background = rl.Color(255, 205, 40, 255) if advisory else rl.Color(
     round(250 - 230 * pulse), round(250 - 15 * pulse), round(247 - 182 * pulse), 255)
   rl.draw_rectangle_rounded(rect, 0.12, 8, background)
@@ -90,7 +90,7 @@ class SpeedLimitButton(Widget):
     elif state in ('active', 'armed', 'waiting') and ui_state.speed_limit is not None and ui_state.sm['mapSpeedLimit'].positionEstimated:
       state = 'estimated'
     pulsing = (ui_state.map_cruise_pulsing and ui_state.map_cruise_enabled and ui_state.map_cruise_supported and
-               not ui_state.speed_limit_is_advisory)
+               ui_state.speed_limit is not None and not ui_state.map_cruise_e2e and not ui_state.speed_limit_is_advisory)
     now = rl.get_time()
     if not pulsing:
       self._pulse_since = None

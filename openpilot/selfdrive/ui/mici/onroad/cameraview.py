@@ -151,6 +151,8 @@ class CameraView(Widget):
     ui_state.add_offroad_transition_callback(self._offroad_transition)
 
   def _offroad_transition(self):
+    self._target_client = self._target_stream_type = None
+    self._switching = False
     # Drain queued SubSocket messages to prevent old frames from showing when going
     # onroad. Qt had a separate thread which drains the VisionIpcClient SubSocket for us.
     if self.client and self.client.is_connected():
@@ -164,6 +166,9 @@ class CameraView(Widget):
 
   def switch_stream(self, stream_type: VisionStreamType) -> None:
     if self._stream_type == stream_type:
+      # The requested view can reverse while the other camera is connecting.
+      self._target_client = self._target_stream_type = None
+      self._switching = False
       return
 
     if self._switching and self._target_stream_type == stream_type:
