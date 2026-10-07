@@ -20,7 +20,8 @@ def main():
   longitudinal_planner = LongitudinalPlanner(CP)
   pm = messaging.PubMaster(['longitudinalPlan', 'driverAssistance'])
   sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'vehicleParameters', 'radarState', 'modelV2', 'selfdriveState',
-                           'mapTrafficControl'], poll='modelV2', ignore_alive=['mapTrafficControl'], ignore_valid=['mapTrafficControl'])
+                           'mapTrafficControl', 'mapCruiseState'], poll='modelV2', ignore_alive=['mapTrafficControl', 'mapCruiseState'],
+                           ignore_valid=['mapTrafficControl', 'mapCruiseState'])
 
   while True:
     sm.update()

@@ -3,9 +3,9 @@ import unittest
 from types import SimpleNamespace as NS
 
 from openpilot.selfdrive.controls.lib.conditional_experimental import (
-  ConditionalExperimental, MapApproach, activation_distance, map_approach, model_intent,
+  ConditionalExperimental, MapApproach, activation_distance, map_approach, model_intent, slc_fallback_request,
 )
-from openpilot.selfdrive.controls.lib.longitudinal_mode import LongitudinalMode, selected_mode, set_longitudinal_mode
+from openpilot.selfdrive.controls.lib.longitudinal_mode import LongitudinalMode, selected_mode, set_longitudinal_mode, automatic_e2e_selected
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.ui.onroad.conditional_icon import conditional_ring_state
 
@@ -254,6 +254,40 @@ class TestConditionalExperimental(unittest.TestCase):
     self.assertFalse(self.policy.armed)
     self.assertFalse(self.policy.active)
 
+  def test_no_speed_and_junction_are_independent_or_conditions(self):
+    # No qualified junction: missing speed alone enables the model candidate.
+    self.assertEqual(self.step(fallback=True, approach=MapApproach()), (-1., False, True))
+    self.assertTrue(self.policy.active)
+    self.assertEqual(self.policy.reason, 'noSpeedLimit')
+    self.step(fallback=False, approach=MapApproach())
+    self.assertFalse(self.policy.active)
+    # Known map speed: a qualified junction independently enables E2E.
+    self.arm()
+    self.assertTrue(self.policy.active)
+    self.assertEqual(self.policy.reason, 'junction')
+    self.step(fallback=True)
+    self.assertTrue(self.policy.active)
+    self.step(fallback=False)
+    self.assertTrue(self.policy.active)
+    self.assertEqual(self.policy.reason, 'junction')
+    self.step(approach=MapApproach(True))
+    self.assertFalse(self.policy.active)
+
+  def test_map_recovery_requalifies_junction_against_restored_set(self):
+    for distance, expected in ((180., False), (40., True)):
+      self.setUp()
+      for timestamp in (100., 101.):
+        self.step(fallback=True, v_set=105/3.6, approach=MapApproach(True,10,distance,timestamp))
+      self.assertTrue(self.policy.armed)
+      self.step(fallback=False, v_set=40/3.6, approach=MapApproach(True,10,distance,102.))
+      self.assertEqual(self.policy.active, expected)
+
+  def test_no_speed_only_stop_releases_when_map_returns_without_junction(self):
+    self.step(fallback=True, approach=MapApproach(), v_ego=0., model=model(speed=0), e2e_stop=True, e2e_accel=0.)
+    _, stop, _ = self.step(fallback=False, approach=MapApproach(True), v_ego=0., model=model(speed=0), e2e_stop=True, e2e_accel=0.)
+    self.assertFalse(stop)
+    self.assertFalse(self.policy.active)
+
 
 class TestDistanceAndIntent(unittest.TestCase):
   def test_profile_speed_acceleration_order(self):
@@ -376,6 +410,77 @@ class TestMapFreshnessAndHUD(unittest.TestCase):
       for mode in (LongitudinalMode.conditional, LongitudinalMode.experimental, LongitudinalMode.voacc):
         set_longitudinal_mode(params, mode)
         self.assertEqual(selected_mode(params.values['ExperimentalMode'], params.values['ConditionalExperimentalMode']), mode)
+
+
+class TestSLCState(unittest.TestCase):
+  def sm(self, **kwargs):
+    msg = NS(state='waiting', automaticE2e=True, e2eFallback=True, setSpeed=105 / 3.6)
+    for k, v in kwargs.items():
+      setattr(msg, k, v)
+    return FakeSM(mapCruiseState=msg, carState=NS(vCruise=105.0))
+
+  def test_fresh_slc_request_and_usable_limit(self):
+    sm = self.sm()
+    self.assertEqual(slc_fallback_request(sm, 100.0, False), (True, True))
+    sm['mapCruiseState'].e2eFallback = False
+    sm['mapCruiseState'].state = 'active'
+    self.assertEqual(slc_fallback_request(sm, 100.0, False), (True, False))
+    # This reader handles the no-speed branch; map_approach qualifies junctions separately.
+    sm['mapTrafficControl'] = NS(kind='junction', nodeId=10, distance=1.0)
+    self.assertEqual(slc_fallback_request(sm, 100.0, False), (True, False))
+
+  def test_recovery_waits_for_updated_carstate_set(self):
+    sm = self.sm(e2eFallback=False, state='active', setSpeed=50 / 3.6)
+    self.assertEqual(slc_fallback_request(sm, 100.0, True), (True, True))
+    sm['carState'].vCruise = 50.0
+    self.assertEqual(slc_fallback_request(sm, 100.0, True), (True, False))
+
+  def test_stale_status_cannot_start_fallback_or_release_established_fallback(self):
+    sm = self.sm()
+    self.assertEqual(slc_fallback_request(sm, 102.0, False), (False, False))
+    self.assertEqual(slc_fallback_request(sm, 102.0, True), (True, True))
+    sm.valid['mapCruiseState'] = False
+    self.assertEqual(slc_fallback_request(sm, 100.0, False), (False, False))
+    self.assertEqual(slc_fallback_request(FakeSM(), 100.0, True), (True, True))
+
+  def test_fresh_off_unsupported_or_unconfirmed_mode_clears_fallback(self):
+    for args in ({'state': 'off'}, {'state': 'unsupported'}, {'automaticE2e': False}):
+      self.assertEqual(slc_fallback_request(self.sm(**args), 100.0, True), (False, False))
+
+  def test_slc_is_master_switch_and_full_mode_is_explicit_override(self):
+    class Params:
+      def __init__(self):
+        self.values = {'ExperimentalMode': False, 'ConditionalExperimentalMode': False, 'MapCruiseEnabled': True, 'ExperimentalModeConfirmed': True}
+
+      def put_bool(self, key, value, block=True):
+        self.values[key] = value
+        assert not (self.values['ExperimentalMode'] and self.values['ConditionalExperimentalMode'])
+
+      def get_bool(self, key):
+        return self.values.get(key, False)
+
+      def get(self, key, return_default=False):
+        return self.values.get(key, False)
+
+    p = Params()
+    cp = NS(openpilotLongitudinalControl=True, pcmCruise=False, notCar=False, passive=False)
+    self.assertTrue(automatic_e2e_selected(p, cp, False))
+    for mode in (LongitudinalMode.voacc, LongitudinalMode.conditional, LongitudinalMode.experimental, LongitudinalMode.voacc):
+      set_longitudinal_mode(p, mode)
+      full = p.get_bool('ExperimentalMode')
+      automatic = automatic_e2e_selected(p, cp, full)
+      self.assertEqual(selected_mode(full, automatic), mode)
+    p.put_bool('MapCruiseEnabled', True)  # the SLC sign alone enables automatic mode
+    self.assertTrue(automatic_e2e_selected(p, cp, False))
+    p.put_bool('ExperimentalModeConfirmed', False)
+    self.assertFalse(automatic_e2e_selected(p, cp, False))
+    p.put_bool('ExperimentalModeConfirmed', True)
+    for key in ('pcmCruise', 'notCar', 'passive'):
+      setattr(cp, key, True)
+      self.assertFalse(automatic_e2e_selected(p, cp, False))
+      setattr(cp, key, False)
+    cp.openpilotLongitudinalControl = False
+    self.assertFalse(automatic_e2e_selected(p, cp, False))
 
 
 if __name__ == '__main__':

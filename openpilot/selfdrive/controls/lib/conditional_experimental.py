@@ -1,4 +1,4 @@
-"""A qualified junction enables the model candidate; the map never commands a stop."""
+"""SLC enables E2E at qualified junctions or while usable map speed is unavailable."""
 import math
 from dataclasses import dataclass
 
@@ -32,6 +32,26 @@ def activation_distance(v_ego: float, a_ego: float, personality: int, actuator_d
   distance += speed * ramp + .5 * accel * ramp**2 - jerk * ramp**3 / 6
   speed = max(0., speed + accel * ramp - .5 * jerk * ramp**2)
   return max(20., distance + speed**2 / (2 * brake) + 12.)
+
+
+def slc_fallback_request(sm, now: float, previous_fallback: bool) -> tuple[bool, bool]:
+  """Read card's mode request and order recovery after its applied SET arrives."""
+  service = 'mapCruiseState'
+  if (service not in sm.services or not sm.valid[service] or
+      not 0 <= now - sm.recv_time[service] <= .8 or
+      not 0 <= now - sm.logMonoTime[service] * 1e-9 <= .8):
+    # A missing status cannot establish a new request. Keep an established
+    # fallback until card confirms recovery; selfdriveState still owns SLC off.
+    return previous_fallback, previous_fallback
+  msg = sm[service]
+  automatic = msg.automaticE2e and str(msg.state) in ('active', 'armed', 'waiting', 'paused')
+  fallback = automatic and msg.e2eFallback
+  if automatic and previous_fallback and not fallback:
+    # carState and mapCruiseState are separate sockets. Never remove the E2E
+    # constraint while an older high SET is still visible to this planner.
+    actual_set = sm['carState'].vCruise / 3.6
+    fallback = not math.isfinite(msg.setSpeed) or abs(actual_set - msg.setSpeed) > .05
+  return automatic, fallback
 
 
 @dataclass(frozen=True)
@@ -113,6 +133,7 @@ class ConditionalExperimental:
 
   def reset(self):
     self.armed = False
+    self.speed_fallback = False
     self._clear_assistance()
     self.target_id = self.candidate_id = self.candidate_samples = 0
     self.passed_id = 0
@@ -186,7 +207,7 @@ class ConditionalExperimental:
         if not has_target:
           self.candidate_id = self.candidate_samples = 0
 
-  def update(self, *, enabled, eligible, approach, now, model, v_ego, v_set, personality,
+  def update(self, *, enabled, eligible, approach, now, fallback=False, model, v_ego, v_set, personality,
              regular_accel, regular_stop, e2e_accel, e2e_stop):
     if not enabled:
       self.reset()
@@ -208,6 +229,10 @@ class ConditionalExperimental:
     # A stop already requested by E2E may remain held at rest across map loss.
     # Loss of the map cannot create a new stop request.
     holding = can_assist and self.stop_requested and v_ego < .3 and e2e_stop
+    if (self.speed_fallback and not fallback and approach.valid and approach.node_id == self.target_id and
+        approach.distance > self.activation_distance):
+      self.armed = False  # recovered lower SET must not inherit the 105-kph entry window
+    self.speed_fallback = fallback
     self._update_approach(approach, now, v_ego)
     if not can_assist:
       self._clear_assistance()
@@ -215,24 +240,26 @@ class ConditionalExperimental:
       self.reason = 'inactive' if not eligible else 'invalidModel'
       return regular_accel, False, False
 
-    # Map qualification directly enables the E2E candidate, including a go or
-    # positive-acceleration proposal. No second model-slowing confirmation gate.
-    self.active = self.armed or holding
-    junction_stop = self.active and e2e_stop
+    # Either automatic condition directly enables the E2E candidate, including
+    # a go or positive-acceleration proposal. No model-slowing confirmation gate.
+    self.active = fallback or self.armed or holding
+    automatic_stop = self.active and e2e_stop
     target = min(regular_accel, e2e_accel) if self.active else regular_accel
     # Preserve stronger regular braking and soften only the return to gas.
     if self.accel_limit is not None:
       target = min(target, self.accel_limit + RELEASE_JERK * self.dt)
     selected = min(regular_accel, target)
-    self.contributing = selected < regular_accel - .01 or junction_stop and not regular_stop
+    self.contributing = selected < regular_accel - .01 or automatic_stop and not regular_stop
     self.accel_limit = selected if selected < regular_accel else None
-    self.stop_requested = junction_stop
+    self.stop_requested = automatic_stop and (self.armed or holding)
     self.state = 'active' if self.active else 'inRange' if self.armed else 'ready'
-    if holding and not self.armed:
+    if fallback:
+      self.reason = 'noSpeedLimit'
+    elif holding and not self.armed:
       self.reason = 'holdingStop'
     elif self.contributing and not self.active:
       self.reason = 'releasing'
-    return selected, junction_stop, self.contributing
+    return selected, automatic_stop, self.contributing
 
   def publish(self, msg, regular_accel, e2e_accel, e2e_stop):
     msg.state = self.state

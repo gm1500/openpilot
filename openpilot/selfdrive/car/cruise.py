@@ -45,9 +45,10 @@ class VCruiseHelper:
   def v_cruise_initialized(self):
     return self.v_cruise_kph != V_CRUISE_UNSET
 
-  def update_v_cruise(self, CS, enabled, is_metric, *, map_enabled=False, map_speed=None, map_gps_time=0., now=0.):
+  def update_v_cruise(self, CS, enabled, is_metric, *, map_enabled=False, map_speed=None, map_gps_time=0., now=0.,
+                      automatic_e2e=False, e2e_ready=False):
     self.v_cruise_kph_last = self.v_cruise_kph
-    self.map_cruise.update(map_enabled, map_speed, map_gps_time, now)
+    self.map_cruise.update(map_enabled, map_speed, map_gps_time, now, automatic_e2e)
     map_applied = False
 
     if CS.cruiseState.available:
@@ -55,8 +56,13 @@ class VCruiseHelper:
         # if stock cruise is completely disabled, then we can use our own set speed logic
         self._update_v_cruise_non_pcm(CS, enabled, is_metric)
         self.update_button_timers(CS, enabled)
-        if enabled and not any(self.button_timers.values()) and not CS.gasPressed:
+        if enabled and not any(self.button_timers.values()) and not (CS.gasPressed or CS.brakePressed):
           map_applied = self._apply_map_speed()
+          if (self.map_cruise.e2e_fallback and self.map_cruise.fallback_set_pending and
+              self.map_cruise.target_kph is None and e2e_ready):
+            self.v_cruise_kph = V_CRUISE_INITIAL_EXPERIMENTAL_MODE
+            self.map_cruise.fallback_set_pending = False
+        self.map_cruise.finish_recovery(self.v_cruise_kph)
         self.v_cruise_cluster_kph = self.v_cruise_kph
       else:
         self.v_cruise_kph = CS.cruiseState.speed * CV.MS_TO_KPH
@@ -205,3 +211,8 @@ class VCruiseHelper:
       self.map_cruise.tracking = self.v_cruise_kph == target
       if self.map_cruise.tracking and not (CS.gasPressed or CS.brakePressed):
         self.map_pulse.start(target)
+      self.map_cruise.finish_recovery(self.v_cruise_kph)
+    elif self.map_cruise.enabled:
+      # Explicit SET bypasses the missing-data debounce, but SET 105 waits for
+      # the planner's fresh E2E acknowledgement in update_v_cruise.
+      self.map_cruise.request_fallback()
