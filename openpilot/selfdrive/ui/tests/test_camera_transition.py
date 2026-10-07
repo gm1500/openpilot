@@ -10,6 +10,7 @@ import numpy as np
 import pyray as rl
 
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
+from openpilot.common.transformations.orientation import rot_from_euler
 from openpilot.selfdrive.controls.tests.test_conditional_experimental import FakeSM
 from openpilot.selfdrive.ui.onroad.camera_zoom import CameraZoom
 
@@ -123,6 +124,40 @@ class TestCameraTransition(unittest.TestCase):
         self.assertFalse(view._switching)
         self.assertIsNone(view._target_client)
         self.assertEqual(view.stream_type, mod.NARROW_ROAD_CAM)
+
+  def test_calibrated_handoff_preserves_the_actual_clamped_narrow_viewport(self):
+    for device in ('tici', 'mici'):
+      for sensor in ('ar0231', 'os04c10'):
+        with self.subTest(device=device, sensor=sensor), ExitStack() as stack:
+          view, sm, step, mod = self.make_view(device, stack)
+          view.device_camera = DEVICE_CAMERAS[device, sensor]
+          device_from_calib = rot_from_euler([.005, .14, -.011])
+          view.view_from_calib = view_frame_from_device_frame @ device_from_calib
+          view.view_from_wide_calib = view_frame_from_device_frame @ rot_from_euler([-.001, .036, -.028]) @ device_from_calib
+          step()
+          width, height = view._content_rect.width, view._content_rect.height
+          pixels = np.array([[width / 2, height / 2, 1.], [width * .25, height * .25, 1.],
+                             [width * .75, height * .75, 1.], [width * .5, height * .85, 1.]]).T
+          rays = np.linalg.solve(view.transforms[-1], pixels)
+          view._target_client.frames.append(view.frame)
+          step()
+          projected = view.transforms[-1] @ rays
+          projected /= projected[2]
+          # Same central ray at the first live wide frame. Small residuals away
+          # from it reflect perspective rotation, not a large framing jump.
+          np.testing.assert_allclose(projected[:, 0], pixels[:, 0], atol=1e-7)
+          self.assertLess(np.max(np.abs(projected - pixels)), 20.)
+          for _ in range(20):
+            step()
+          sm['carState'].vEgo = 11.
+          for _ in range(22):
+            step()
+          crop = view.transforms[-1].copy()
+          view._target_client.frames.append(view.frame)
+          step()
+          narrow_ray = np.linalg.solve(view.transforms[-1], pixels[:, 0])
+          returned = crop @ narrow_ray
+          np.testing.assert_allclose(returned / returned[2], pixels[:, 0], atol=1e-7)
 
   def test_conditional_selection_allows_camera_between_e2e_activations_and_offroad_resets_switch(self):
     for device in ('tici', 'mici'):

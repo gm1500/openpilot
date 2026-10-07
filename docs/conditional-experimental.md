@@ -122,8 +122,26 @@ Camera projection and the road overlay use the same animated zoom. The
 projection cache updates on every zoom step. Each layout retains its normal
 framing, including mici's existing narrow-camera speed-dependent crop; the
 added wide/narrow animation is confined to Experimental entry and exit.
-The portrait layout also interpolates its extra vertical framing offset at
-the handoff to avoid a 20-pixel jump when the narrow view fills the viewport.
+The handoff maps the centre ray of the actual, edge-clamped narrow viewport
+through the calibrated lens rotation (`wideFromDeviceEuler`). Its corresponding
+position in the wide image anchors the start/end of the zoom. The crop then
+eases toward normal wide framing, including the portrait layout's vertical
+offset. This prevents independently centred crops from jumping at the switch.
+The image remains live; this is not a frozen-frame fade. Lens distortion and
+parallax from nearby objects can still leave a small residual mismatch.
+
+## Recovery after a missed shallow exit
+
+A committed highway path can discard an exit before the lanes separate. The
+matcher may now reconsider a branch behind its current projection when both
+roads share a directed outgoing fork within 12 seconds of travel (40–400 m).
+The retained road must be over 20 m away; the alternative must be within 8 m,
+align within 5 degrees of both GPS and vehicle-motion headings, and improve
+both heading errors by at least 1 degree. Three fresh, non-projected fixes,
+at least one second and 30 m of forward motion on that branch are required.
+An isolated GPS jump, a closer unconnected road, or a parallel branch with no
+measured departure cannot reopen the old fork. SLC's two-second speed
+qualification remains in place after the corrected road match.
 
 ## Range from current SET speed
 

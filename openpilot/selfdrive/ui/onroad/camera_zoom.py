@@ -1,5 +1,6 @@
 """Wide-camera easing adapted from upstream 33ddd8eb (Qt) for both raylib UIs."""
 import math
+import numpy as np
 
 WIDE_CAM_MAX_SPEED = 5.0  # m/s (18 km/h)
 ROAD_CAM_MIN_SPEED = 10.0  # m/s (36 km/h)
@@ -65,3 +66,39 @@ class CameraZoom:
     wide_zoom = max(wide_zoom, width / wide.width, height / wide.height)
     matched_zoom = narrow_zoom * narrow.focal_length / wide.focal_length
     return wide_zoom + self.transition * (matched_zoom - wide_zoom)
+
+  def framing(self, wide_active, device_camera, narrow_calibration, wide_calibration,
+              narrow_zoom, wide_zoom, width, height, vertical_offset=0.):
+    """Animate around the narrow viewport's calibrated ray, including its crop.
+
+    Matching focal lengths alone is insufficient: narrow framing often clamps
+    at a sensor edge while the magnified wide image can centre its vanishing
+    point. Map the ACTUAL narrow crop centre into the other lens, then ease to
+    the normal wide framing. Video and model overlays share these offsets.
+    """
+    def normal_offset(camera, calibration, zoom):
+      point = camera.intrinsics @ calibration[:, 0]
+      offset = np.zeros(2)
+      if np.all(np.isfinite(point)) and point[2] > 1e-6:
+        offset = (point[:2] / point[2] - camera.intrinsics[:2, 2]) * zoom + (0., vertical_offset)
+      margin = np.maximum(0., np.array(camera.size) * zoom / 2 - np.array((width, height)) / 2 - 5.)
+      return np.clip(offset, -margin, margin)
+
+    narrow, wide = device_camera.narrow_road, device_camera.wide_road
+    fitted_narrow = self.zoom(False, device_camera, narrow_zoom, wide_zoom, width, height)
+    narrow_offset = normal_offset(narrow, narrow_calibration, fitted_narrow)
+    if not wide_active:
+      return fitted_narrow, *narrow_offset
+    fitted_wide = max(wide_zoom, width / wide.width, height / wide.height)
+    wide_offset = normal_offset(wide, wide_calibration, fitted_wide)
+    zoom = self.zoom(True, device_camera, narrow_zoom, wide_zoom, width, height)
+    # The calibrated lens rotation maps a viewing direction; no assumption that
+    # either optical centre or vanishing point sits at the viewport centre.
+    narrow_pixel = np.append(narrow.intrinsics[:2, 2] + narrow_offset / fitted_narrow, 1.)
+    ray = wide.intrinsics @ wide_calibration @ narrow_calibration.T @ narrow.intrinsics_inv @ narrow_pixel
+    if np.all(np.isfinite(ray)) and ray[2] > 1e-6:
+      matched_anchor = ray[:2] / ray[2] - wide.intrinsics[:2, 2]
+      anchor = self.transition * matched_anchor + (1. - self.transition) * wide_offset / fitted_wide
+      wide_offset = anchor * zoom
+    margin = np.maximum(0., np.array(wide.size) * zoom / 2 - np.array((width, height)) / 2 - 5.)
+    return zoom, *np.clip(wide_offset, -margin, margin)

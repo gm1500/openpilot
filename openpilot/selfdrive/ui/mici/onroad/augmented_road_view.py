@@ -298,44 +298,12 @@ class AugmentedRoadView(CameraView):
     is_wide_camera = self.stream_type == WIDE_CAM
     intrinsic = device_camera.wide_road.intrinsics if is_wide_camera else device_camera.narrow_road.intrinsics
     calibration = self.view_from_wide_calib if is_wide_camera else self.view_from_calib
-    narrow_zoom = np.interp(ui_state.sm['carState'].vEgo, [10, 30], [0.8, 1.0])
-    zoom = self._camera_zoom.zoom(is_wide_camera, device_camera, narrow_zoom, 0.7 * 1.5,
-                                  self._content_rect.width, self._content_rect.height)
-
-    # Calculate transforms for vanishing point
-    inf_point = np.array([1000.0, 0.0, 0.0])
+    zoom, x_offset, y_offset = self._camera_zoom.framing(
+      is_wide_camera, device_camera, self.view_from_calib, self.view_from_wide_calib,
+      np.interp(ui_state.sm['carState'].vEgo, [10, 30], [0.8, 1.0]), 0.7 * 1.5, self._content_rect.width, self._content_rect.height, CAM_Y_OFFSET)
     calib_transform = intrinsic @ calibration
-    kep = calib_transform @ inf_point
-
-    # Calculate center points and dimensions
     w, h = self._content_rect.width, self._content_rect.height
     cx, cy = intrinsic[0, 2], intrinsic[1, 2]
-
-    # Ensure zoom views the whole area
-    zoom = max(zoom, w / (2 * cx), h / (2 * cy))
-
-    # Calculate max allowed offsets with margins
-    margin = 5
-    max_x_offset = max(0.0, cx * zoom - w / 2 - margin)
-    max_y_offset = max(0.0, cy * zoom - h / 2 - margin)
-    # At the handoff use narrow's vertical framing allowance. Otherwise the
-    # portrait viewport can jump by CAM_Y_OFFSET when its narrow crop is full.
-    framing_offset = CAM_Y_OFFSET
-    if is_wide_camera:
-      narrow = device_camera.narrow_road
-      fitted_narrow_zoom = max(narrow_zoom, w / narrow.width, h / narrow.height)
-      narrow_y_margin = max(0.0, narrow.height / 2 * fitted_narrow_zoom - h / 2 - margin)
-      framing_offset = (1 - transition) * CAM_Y_OFFSET + transition * min(CAM_Y_OFFSET, narrow_y_margin)
-
-    # Calculate and clamp offsets to prevent out-of-bounds issues
-    try:
-      if abs(kep[2]) > 1e-6:
-        x_offset = np.clip((kep[0] / kep[2] - cx) * zoom, -max_x_offset, max_x_offset)
-        y_offset = np.clip((kep[1] / kep[2] - cy) * zoom + framing_offset, -max_y_offset, max_y_offset)
-      else:
-        x_offset, y_offset = 0, 0
-    except (ZeroDivisionError, OverflowError):
-      x_offset, y_offset = 0, 0
 
     # Cache the computed transformation matrix to avoid recalculations
     self._matrix_cache_key = cache_key

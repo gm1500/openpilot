@@ -27,9 +27,6 @@ BORDER_COLORS = {
   UIStatus.ENGAGED: rl.Color(0x16, 0x7F, 0x40, 0xFF),  # Green for engaged state
 }
 
-INF_POINT = np.array([1000.0, 0.0, 0.0])
-
-
 class AugmentedRoadView(CameraView):
   def __init__(self, stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_NARROW_ROAD):
     super().__init__("camerad", stream_type)
@@ -163,34 +160,13 @@ class AugmentedRoadView(CameraView):
     is_wide_camera = self.stream_type == WIDE_CAM
     intrinsic = device_camera.wide_road.intrinsics if is_wide_camera else device_camera.narrow_road.intrinsics
     calibration = self.view_from_wide_calib if is_wide_camera else self.view_from_calib
-    zoom = self._camera_zoom.zoom(is_wide_camera, device_camera, 1.1, 2.0, self._content_rect.width, self._content_rect.height)
-
-    # Calculate transforms for vanishing point
+    zoom, x_offset, y_offset = self._camera_zoom.framing(
+      is_wide_camera, device_camera, self.view_from_calib, self.view_from_wide_calib,
+      1.1, 2.0, self._content_rect.width, self._content_rect.height, 0.)
     calib_transform = intrinsic @ calibration
-    kep = calib_transform @ INF_POINT
-
-    # Calculate center points and dimensions
     x, y = self._content_rect.x, self._content_rect.y
     w, h = self._content_rect.width, self._content_rect.height
     cx, cy = intrinsic[0, 2], intrinsic[1, 2]
-
-    # Ensure zoom views the whole area
-    zoom = max(zoom, w / (2 * cx), h / (2 * cy))
-
-    # Calculate max allowed offsets with margins
-    margin = 5
-    max_x_offset = max(0.0, cx * zoom - w / 2 - margin)
-    max_y_offset = max(0.0, cy * zoom - h / 2 - margin)
-
-    # Calculate and clamp offsets to prevent out-of-bounds issues
-    try:
-      if abs(kep[2]) > 1e-6:
-        x_offset = np.clip((kep[0] / kep[2] - cx) * zoom, -max_x_offset, max_x_offset)
-        y_offset = np.clip((kep[1] / kep[2] - cy) * zoom, -max_y_offset, max_y_offset)
-      else:
-        x_offset, y_offset = 0, 0
-    except (ZeroDivisionError, OverflowError):
-      x_offset, y_offset = 0, 0
 
     # Cache the computed transformation matrix to avoid recalculations
     self._matrix_cache_key = cache_key

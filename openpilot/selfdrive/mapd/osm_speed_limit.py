@@ -218,6 +218,7 @@ class RoadTracker:
     self._path_fix: GpsFix | None = None
     self._winner: Road | None = None
     self._winner_since = self._winner_travel = 0.
+    self._branch_recovery: tuple[RoadMatch, GpsFix, float, float, int] | None = None
     self.control_reason = 'noRoadMatch'
 
   def _set_roads(self, roads: tuple[Road, ...]):
@@ -265,6 +266,7 @@ class RoadTracker:
         if projected is not None:
           refreshed.append((projected, score, since, travelled))
     self._paths = refreshed
+    self._branch_recovery = None
 
   @staticmethod
   def _lateral_offset(match: RoadMatch, fix: GpsFix) -> float:
@@ -283,6 +285,55 @@ class RoadTracker:
   def _observation(self, match: RoadMatch, fix: GpsFix) -> float:
     return .4 * (match.distance / max(5., fix.accuracy)) ** 2 + self._heading_cost(match, fix)
 
+  def _recover_branch(self, best: RoadMatch, candidates: list[RoadMatch], fix: GpsFix, moved: float) -> RoadMatch | None:
+    """Reconsider a recently passed fork only with sustained measured departure.
+
+    Committing a path can discard a shallow exit before the lanes separate.
+    Ordinary forward walking cannot return to that fork. A closer parallel
+    road alone is not evidence: require shared topology, GPS AND motion heading
+    agreement, and multiple advancing fixes along one outgoing branch.
+    """
+    alternatives = []
+    if not fix.estimated and not fix.stationary and fix.motion_bearing is not None and best.distance > 20:
+      maximum = min(400., max(40., fix.speed * 12.))
+      best_motion_error = abs((best.bearing - fix.motion_bearing + 180) % 360 - 180)
+      for current in candidates:
+        if (current.road == best.road or current.distance > 8 or current.heading_error is None or
+            current.heading_error > 5 or current.heading_error + 1 > best.heading_error):
+          continue
+        motion_error = abs((current.bearing - fix.motion_bearing + 180) % 360 - 180)
+        if motion_error > 5 or motion_error + 1 > best_motion_error:
+          continue
+        # Both projections must be downstream of the SAME shared fork. Never
+        # connect parallel roads by proximity or cross an incoming merge.
+        behind = {node: (best.along - along) * (1 if best.forward else -1)
+                  for node, along in self._nodes[id(best.road)]}
+        for node, along in self._nodes[id(current.road)]:
+          distance = (current.along - along) * (1 if current.forward else -1)
+          if (node in behind and 0 <= behind[node] <= maximum and 0 <= distance <= maximum and
+              abs(distance - behind[node]) <= max(15., fix.accuracy * 2)):
+            alternatives.append(current)
+            break
+    previous = self._branch_recovery
+    self._branch_recovery = None
+    if len(alternatives) != 1:
+      return None
+    current = alternatives[0]
+    since, travelled, count = fix.timestamp, 0., 1
+    if previous is not None:
+      match, last_fix, since, travelled, count = previous
+      progress = self._progress(match, current, max(15., moved * 1.6 + 8.))
+      if (current.road == match.road and current.forward == match.forward and progress is not None and progress > 0 and
+          abs(progress - moved) <= max(6., moved * .3) and 0 < fix.timestamp - last_fix.timestamp <= GPS_MAX_AGE):
+        travelled, count = travelled + moved, count + 1
+      else:
+        since, travelled, count = fix.timestamp, 0., 1
+    self._branch_recovery = current, fix, since, travelled, count
+    if count >= 3 and fix.timestamp - since >= 1. and travelled >= 30.:
+      self._branch_recovery = None
+      return current
+    return None
+
   def _walk(self, candidates: list[RoadMatch], fix: GpsFix) -> RoadMatch | None:
     """Keep competing continuations; a nearer parallel ramp is not a shortcut.
 
@@ -296,6 +347,7 @@ class RoadTracker:
     if not 0 < dt <= GPS_MAX_AGE or moved > 75 * dt + 10:
       self._paths = []
       self._winner = None
+      self._branch_recovery = None
     if (previous_fix is not None and fix.motion_epoch is not None and fix.motion_epoch == previous_fix.motion_epoch and
         fix.odometer is not None and previous_fix.odometer is not None):
       distance = fix.odometer - previous_fix.odometer
@@ -342,8 +394,14 @@ class RoadTracker:
     self._path_fix = fix
     if not ranked:
       self._winner = None
+      self._branch_recovery = None
       return None
     best, score, since, travelled = ranked[0]
+    recovered = self._recover_branch(best, candidates, fix, moved)
+    if recovered is not None:
+      self._paths = [(recovered, self._observation(recovered, fix), fix.timestamp, 0.)]
+      self._winner = None
+      return recovered
     walked = {(id(p[0].road), p[0].forward) for p in ranked}
     if any((id(c.road), c.forward) not in walked and c.bearing is not None and
            self._heading_cost(c, fix) + 1 < self._heading_cost(best, fix) for c in candidates):
