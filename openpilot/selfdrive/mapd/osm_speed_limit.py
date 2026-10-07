@@ -9,6 +9,9 @@ from itertools import pairwise
 
 import requests
 
+from openpilot.selfdrive.mapd.control_tags import (COMPASS, SIGN_KEYS, SIGNAL_CROSSINGS, all_way_stop, control_kind,
+                                                 road_controls, signal_crossing, stop_sign_direction)
+
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 QUERY_RADIUS = 1500.0  # metres; prefetch again after travelling 700 m
 QUERY_INTERVAL = 30.0
@@ -198,14 +201,6 @@ def road_nodes(road: Road) -> list[tuple[NodeKey, float]]:
 def allowed_directions(road: Road) -> tuple[bool, ...]:
   oneway = road.tags.get('oneway', 'yes' if road.tags.get('junction') == 'roundabout' else 'no')
   return (True,) if oneway in ('yes', '1', 'true') else (False,) if oneway == '-1' else (True, False)
-
-
-def control_kind(tags: dict[str, str]) -> str | None:
-  if tags.get('highway') == 'stop':
-    return 'stopSign'
-  if tags.get('highway') == 'traffic_signals' or (tags.get('highway') == 'crossing' and tags.get('crossing') == 'traffic_signals'):
-    return 'trafficLight'
-  return None
 
 
 class RoadTracker:
@@ -460,13 +455,22 @@ class RoadTracker:
     kind = control_kind(tags)
     if kind is None:
       return False
-    direction = tags.get('stop:direction' if kind == 'stopSign' else 'traffic_signals:direction', tags.get('direction', ''))
-    if direction:
-      return direction == 'both' or direction == ('forward' if forward else 'backward')
+    directed = stop_sign_direction(tags, forward) if kind == 'stopSign' else None
+    # Conflicting explicit directions reject the approach rather than allowing
+    # whichever spelling happened to be checked first to override the others.
+    keys = (('stop:direction', 'traffic_sign:direction', 'traffic_signals:direction', 'direction') if kind == 'stopSign'
+            else ('traffic_signals:direction', 'direction'))
+    directions = [tags[k].strip() for k in keys if tags.get(k)]
+    if directed is False or any(value not in ('both', 'forward' if forward else 'backward') for value in directions):
+      return False
+    if kind == 'stopSign' and tags.get('stop', '') not in ('', 'all', 'minor'):
+      return self._compass_stop_applies(road, node, forward, tags['stop'])
+    if directions or directed is True:
+      return True
     # This node marks the signal-controlled crossing on the drivable way,
     # not a particular signal head. Both approaches need map awareness unless
     # explicitly restricted. Footway-only nodes are excluded during the fetch.
-    if tags.get('highway') == 'crossing':
+    if kind == 'trafficLight' and signal_crossing(tags):
       return True
     if len(allowed_directions(road)) == 1:
       return True
@@ -479,7 +483,27 @@ class RoadTracker:
         if key == node:
           neighbours.update(nodes[max(0, index - 1):index])
           neighbours.update(nodes[index + 1:index + 2])
-    return len(neighbours) >= 3 and (kind == 'trafficLight' or tags.get('stop') == 'all')
+    return len(neighbours) >= 3 and (kind == 'trafficLight' or all_way_stop(tags))
+
+  def _compass_stop_applies(self, road: Road, node: NodeKey, forward: bool, value: str) -> bool:
+    # stop=E;W names the arms EAST/WEST OF the node, not the direction of
+    # travel. Choose each named incoming arm uniquely; do not borrow a stop
+    # from a nearby shallow branch with an equally plausible compass bearing.
+    names = [name.strip().upper() for name in value.split(';')]
+    if not names or any(name not in COMPASS for name in names):
+      return False
+    arms = []
+    for other, direction, along in self._connections.get(node, ()):
+      incoming = self._junction_bearing(other, direction, along, False)
+      if incoming is not None:
+        arms.append(((incoming + 180) % 360, other, direction))
+    for name in names:
+      ranked = sorted(((abs((bearing - COMPASS[name] + 180) % 360 - 180), r, d) for bearing, r, d in arms),
+                      key=lambda entry: entry[0])
+      if (ranked and ranked[0][0] <= 35 and (len(ranked) == 1 or ranked[1][0] - ranked[0][0] >= 15) and
+          ranked[0][1] is road and ranked[0][2] == forward):
+        return True
+    return False
 
   def _junction_bearing(self, road: Road, forward: bool, along: float, outgoing: bool) -> float | None:
     """Use up to 15 m of geometry on the requested side of a connected node."""
@@ -631,7 +655,13 @@ def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
   query = f'[out:json][timeout:10][maxsize:16777216];way(around:{QUERY_RADIUS:.0f},{fix.latitude:.6f},{fix.longitude:.6f})'
   query += f'["highway"~"^({"|".join(ROAD_TYPES)})$"]->.roads;.roads out body geom;'
   query += '(node(w.roads)["highway"~"^(stop|traffic_signals)$"];'
-  query += 'node(w.roads)["highway"="crossing"]["crossing"="traffic_signals"];);out body;'
+  query += 'node(w.roads)["highway"="crossing"]["crossing"="traffic_signals"];'
+  query += 'node(w.roads)["highway"="crossing"]["crossing:signals"="yes"];'
+  query += f'node(w.roads)["highway"="crossing"]["crossing_ref"~"^({"|".join(SIGNAL_CROSSINGS)})$"];'
+  # Retrieve full sign lists; exact code parsing happens locally, including
+  # omitted repeated country prefixes. These remain nodes of drivable ways.
+  query += ''.join(f'node(w.roads)["{key}"];' for key in SIGN_KEYS)
+  query += 'node(w.roads)["highway"="give_way"];);out body;'
   deadline = time.monotonic() + 20
   # One request at a time, bounded response size, no identifiers or route history.
   with requests.post(OVERPASS_URL, data={"data": query}, timeout=(3.05, 12), stream=True,
@@ -650,7 +680,7 @@ def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
   roads = []
   controls = {element['id']: element['tags'] for element in data['elements']
               if element.get('type') == 'node' and isinstance(element.get('id'), int) and
-              isinstance(element.get('tags'), dict) and control_kind(element['tags']) is not None and
+              isinstance(element.get('tags'), dict) and
               all(isinstance(k, str) and isinstance(v, str) for k, v in element['tags'].items())}
   for element in data["elements"]:
     tags = element.get("tags", {})
@@ -663,8 +693,7 @@ def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
       continue
     nodes = element.get('nodes', [])
     node_ids = tuple(nodes) if len(nodes) == len(geometry) and all(isinstance(node, int) and node > 0 for node in nodes) else ()
-    roads.append(Road(geometry, tags, int(element.get('id', 0)), node_ids,
-                      {node: controls[node] for node in node_ids if node in controls}))
+    roads.append(Road(geometry, tags, int(element.get('id', 0)), node_ids, road_controls(node_ids, tags, controls)))
   return tuple(roads)
 
 
