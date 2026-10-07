@@ -37,7 +37,7 @@ def activation_distance(v_ego: float, a_ego: float, personality: int, actuator_d
 def slc_fallback_request(sm, now: float, previous_fallback: bool) -> tuple[bool, bool]:
   """Read card's mode request and order recovery after its applied SET arrives."""
   service = 'mapCruiseState'
-  if (service not in sm.services or not sm.valid[service] or
+  if (service not in getattr(sm, 'services', ()) or not sm.valid[service] or
       not 0 <= now - sm.recv_time[service] <= .8 or
       not 0 <= now - sm.logMonoTime[service] * 1e-9 <= .8):
     # A missing status cannot establish a new request. Keep an established
@@ -65,7 +65,7 @@ class MapApproach:
 
 def map_approach(sm, now: float) -> MapApproach:
   service = 'mapTrafficControl'
-  if service not in sm.services:
+  if service not in getattr(sm, 'services', ()):
     return MapApproach()
   msg = sm[service]
   times = (sm.recv_time[service], sm.logMonoTime[service] * 1e-9)

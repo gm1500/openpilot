@@ -413,6 +413,12 @@ class TestMapFreshnessAndHUD(unittest.TestCase):
 
 
 class TestSLCState(unittest.TestCase):
+  def test_simulator_messages_without_service_metadata_cannot_establish_map_conditions(self):
+    sm = {'mapCruiseState': NS(automaticE2e=True, e2eFallback=True),
+          'mapTrafficControl': NS(kind='junction', nodeId=10, distance=1.)}
+    self.assertEqual(slc_fallback_request(sm, 100., False), (False, False))
+    self.assertEqual(map_approach(sm, 100.), MapApproach())
+
   def sm(self, **kwargs):
     msg = NS(state='waiting', automaticE2e=True, e2eFallback=True, setSpeed=105 / 3.6)
     for k, v in kwargs.items():

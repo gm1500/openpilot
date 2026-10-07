@@ -197,7 +197,7 @@ from additional braking; legacy state enum values remain readable. Reasons
 `automaticE2e`, `e2eFallback` and applied `setSpeed` for the cross-service handshake.
 Card publishes transitions immediately in addition to its regular 5 Hz status.
 
-Validation: **215 tests and 45 subtests passed**, covering both OR conditions,
+Validation: **244 tests and 101 subtests passed**, covering both OR conditions,
 missing/recovered speed, SET buttons, map matching/topology, stronger ordinary
 braking, driver override, mode selection and HUD state. The actual cruise helper
 and longitudinal planner were also coupled through Cap'n Proto request/ack
@@ -205,11 +205,19 @@ messages. Checks include SET-before-release recovery, deliberately reordered
 messages, recovery with and without a junction, rechecking the restored SET
 range, and invalid model/plan, stale acknowledgement and pedal blocking.
 
-The integration harness substitutes unavailable native IPC and the MPC solver.
-Map tests use the Python reference transformations in place of the unavailable
-native extension. Native HUD drawing and mode cycling pass at 192 px and 82 px
-button sizes. The full native cruise maneuver suite could not be collected in
-this environment because its `zmq` dependency is unavailable.
+Native messaging, parameters and the longitudinal MPC solver were built locally.
+The ordinary/full-experimental cruise and longitudinal maneuver suites pass:
+21 tests and 56 maneuver subtests. Seven additional integration tests couple the
+actual cruise helper, native MPC, SubMaster health checks and native planner
+publications. They cover both triggers, 105 entry, recovery with and without a
+junction, the smaller recovered SET window, reordered recovery messages, invalid
+model/plan blocking and SLC off. Seven abstract parameterized test templates are
+skipped; their generated cases run. The earlier substitute-solver checks remain
+supplemental. Native HUD drawing and mode cycling pass at 192 px and 82 px sizes.
+
+The native suite exposed and verified a fix for dictionary-based simulation
+inputs: optional map readers now treat absent service metadata as unavailable
+data, rather than raising an exception or trusting an unqualified map message.
 
 The current SET/mode replay covers the six latest `2c3` segments and **6,556
 planner frames** using the recorded map-speed, junction, button and model inputs.
