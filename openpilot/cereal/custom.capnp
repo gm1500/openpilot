@@ -40,7 +40,42 @@ struct MapCruiseState @0xaedffd8f31e7b55d {
   }
 }
 
-struct CustomReserved2 @0xf35cc4560bbf6ec2 {
+struct MapTrafficControl @0xf35cc4560bbf6ec2 {
+  kind @0 :Kind;
+  nodeId @1 :UInt64;
+  wayId @2 :UInt64;
+  distance @3 :Float32; # signed distance along connected road geometry, metres
+  matchedWayId @4 :UInt64;
+  gpsMonoTime @5 :UInt64;
+  positionMonoTime @6 :UInt64;
+  positionEstimated @7 :Bool; # short motion bridge only while the real GPS anchor remains fresh
+  enum Kind {
+    none @0;
+    stopSign @1;
+    trafficLight @2;
+  }
+}
+
+struct ConditionalExperimentalState {
+  state @0 :State;
+  reason @1 :Text;
+  targetId @2 :UInt64;
+  targetDistance @3 :Float32;
+  activationDistance @4 :Float32;
+  modelStopDistance @5 :Float32; # -1 if no sustained stop in the model horizon
+  regularAcceleration @6 :Float32; # boat-anchor output before junction assistance
+  modelAcceleration @7 :Float32;
+  modelShouldStop @8 :Bool;
+  modelSlowing @9 :Bool;
+  mapValid @10 :Bool;
+  armed @11 :Bool;
+  contributing @12 :Bool; # actual additional junction slowing/stop constraint
+  enum State {
+    off @0;
+    ready @1;
+    inRange @2;
+    assisting @3;
+  }
 }
 
 struct CustomReserved3 @0xda96579883444c35 {

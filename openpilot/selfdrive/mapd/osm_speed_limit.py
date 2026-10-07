@@ -46,6 +46,7 @@ class Road:
   tags: dict[str, str]
   way_id: int = 0
   node_ids: tuple[int, ...] = ()
+  control_tags: dict[int, dict[str, str]] = field(default_factory=dict)
   bounds: tuple[float, float, float, float] = field(init=False, repr=False)
 
   def __post_init__(self):
@@ -67,6 +68,14 @@ class RoadMatch:
   @property
   def advisory_speed(self) -> float | None:
     return road_speed(self.road.tags, self.forward, advisory=True)
+
+
+@dataclass(frozen=True)
+class TrafficControl:
+  node_id: int
+  way_id: int
+  kind: str
+  distance: float
 
 
 def gps_fix(sm, started_frame: int, now: float) -> GpsFix | None:
@@ -437,6 +446,84 @@ class RoadTracker:
         return limit, distance
     return None, 0.
 
+  def _control_applies(self, road: Road, node: NodeKey, forward: bool) -> bool:
+    tags = road.control_tags.get(node, {})
+    kind = tags.get('highway')
+    if kind not in ('stop', 'traffic_signals'):
+      return False
+    direction = tags.get('stop:direction' if kind == 'stop' else 'traffic_signals:direction', tags.get('direction', ''))
+    if direction:
+      return direction == 'both' or direction == ('forward' if forward else 'backward')
+    if len(allowed_directions(road)) == 1:
+      return True
+    # A central junction signal applies to the incoming roads. Undirected
+    # two-way approach nodes are ambiguous; do not borrow the opposing stop.
+    neighbours = set()
+    for other, _, _ in self._connections.get(node, ()):
+      nodes = other.node_ids
+      for index, key in enumerate(nodes):
+        if key == node:
+          neighbours.update(nodes[max(0, index - 1):index])
+          neighbours.update(nodes[index + 1:index + 2])
+    return len(neighbours) >= 3 and (kind == 'traffic_signals' or tags.get('stop') == 'all')
+
+  def _next_control(self, match: RoadMatch, maximum: float = 1000.) -> TrafficControl | None:
+    road, forward, along = match.road, match.forward, match.along
+    distance = 0.
+    visited = set()
+    for hop in range(16):
+      if forward is None or id(road) in visited:
+        return None
+      visited.add(id(road))
+      nodes = self._nodes[id(road)]
+      next_road = None
+      for node, position in (nodes if forward else reversed(nodes)):
+        step = (position - along) * (1 if forward else -1)
+        if step < (-20. if hop == 0 else -.1):
+          continue
+        total = distance + step
+        if total > maximum:
+          return None
+        if self._control_applies(road, node, forward):
+          kind = 'stopSign' if road.control_tags[node]['highway'] == 'stop' else 'trafficLight'
+          return TrafficControl(node, road.way_id, kind, total)
+        if step < -.1:
+          continue
+        exits = []
+        if (nodes[-1][1] - position if forward else position) > .1:
+          exits.append((road, forward, position))
+        for other, direction, entry in self._connections.get(node, ()):
+          remaining = self._nodes[id(other)][-1][1] - entry if direction else entry
+          if other != road and id(other) not in visited and remaining > .1:
+            exits.append((other, direction, entry))
+        # No route is known: a sign AT the junction is usable, a sign beyond
+        # an unresolved fork/turn is not. Crossing geometry without a shared
+        # node never provides a continuation.
+        if len(exits) > 1:
+          return None
+        if exits and exits[0][0] != road:
+          next_road = exits[0]
+          distance = total
+          break
+      if next_road is None:
+        return None
+      road, forward, along = next_road
+    return None
+
+  def traffic_control(self, match: RoadMatch) -> TrafficControl | None:
+    result = self._next_control(match)
+    if result is None or match.distance > 20 or match.heading_error is None or match.heading_error > 20:
+      return None
+    # Speed-limit equality does not make two roads equivalent for stopping.
+    # Require plausible competing paths to agree on the control as well.
+    best_score = min((p[1] for p in self._paths), default=0.)
+    for other, score, _, _ in self._paths:
+      if score <= best_score + 2. and other != match:
+        alternative = self._next_control(other)
+        if alternative is None or alternative.node_id != result.node_id or abs(alternative.distance - result.distance) > 20:
+          return None
+    return result
+
   def update(self, roads: tuple[Road, ...], fix: GpsFix) -> RoadMatch | None:
     refreshed = roads is not self._roads
     if refreshed:
@@ -491,7 +578,8 @@ class RoadTracker:
 
 def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
   query = f'[out:json][timeout:10][maxsize:16777216];way(around:{QUERY_RADIUS:.0f},{fix.latitude:.6f},{fix.longitude:.6f})'
-  query += f'["highway"~"^({"|".join(ROAD_TYPES)})$"];out body geom;'
+  query += f'["highway"~"^({"|".join(ROAD_TYPES)})$"]->.roads;.roads out body geom;'
+  query += 'node(w.roads)["highway"~"^(stop|traffic_signals)$"];out body;'
   deadline = time.monotonic() + 20
   # One request at a time, bounded response size, no identifiers or route history.
   with requests.post(OVERPASS_URL, data={"data": query}, timeout=(3.05, 12), stream=True,
@@ -508,6 +596,10 @@ def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
   if not isinstance(data, dict) or "remark" in data or not isinstance(data.get("elements"), list):
     raise ValueError("Incomplete OSM response")
   roads = []
+  controls = {element['id']: element['tags'] for element in data['elements']
+              if element.get('type') == 'node' and isinstance(element.get('id'), int) and
+              isinstance(element.get('tags'), dict) and element['tags'].get('highway') in ('stop', 'traffic_signals') and
+              all(isinstance(k, str) and isinstance(v, str) for k, v in element['tags'].items())}
   for element in data["elements"]:
     tags = element.get("tags", {})
     if element.get("type") != "way" or tags.get("highway") not in ROAD_TYPES:
@@ -519,7 +611,8 @@ def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
       continue
     nodes = element.get('nodes', [])
     node_ids = tuple(nodes) if len(nodes) == len(geometry) and all(isinstance(node, int) and node > 0 for node in nodes) else ()
-    roads.append(Road(geometry, tags, int(element.get('id', 0)), node_ids))
+    roads.append(Road(geometry, tags, int(element.get('id', 0)), node_ids,
+                      {node: controls[node] for node in node_ids if node in controls}))
   return tuple(roads)
 
 
@@ -532,8 +625,11 @@ class OSMSpeedLimit:
     self._tracker = RoadTracker()
     self._thread: threading.Thread | None = None
     self._wake = threading.Event()
+    self.control: TrafficControl | None = None
+    self.control_match: RoadMatch | None = None
 
   def update(self, fix: GpsFix | None, now: float) -> tuple[GpsFix, float | None, float | None, float] | None:
+    self.control = self.control_match = None
     if fix is not None and (fix.speed < 0 or not 0 <= now - fix.timestamp <= GPS_MAX_AGE):
       fix = None  # reverse heading is retained by MapPosition, not walked as a forward road path
     with self._lock:
@@ -558,6 +654,10 @@ class OSMSpeedLimit:
     # Publish the current match in this mapd cycle. No asynchronous grace period
     # or previous-limit hold is needed when GPS heading changes through a turn.
     match = self._tracker.update(roads, fix)
+    gps_time = fix.gps_timestamp if fix.estimated else fix.timestamp
+    if match is not None and match.forward is not None and gps_time > 0 and 0 <= now - gps_time <= GPS_MAX_AGE:
+      self.control_match = match
+      self.control = self._tracker.traffic_control(match)
     speed = match.speed if match is not None else None
     advisory = match.advisory_speed if match is not None else None
     ahead = 0.

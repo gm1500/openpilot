@@ -14,7 +14,7 @@ from openpilot.selfdrive.mapd.position import MapPosition
 def main():
   sm = messaging.SubMaster(['gpsLocationExternal', 'gpsLocation', 'carState', 'controlsState', 'vehicleParameters',
                            'deviceMotion', 'extrinsicsCalibration'])
-  pm = messaging.PubMaster(['mapSpeedLimit'])
+  pm = messaging.PubMaster(['mapSpeedLimit', 'mapTrafficControl'])
   provider = OSMSpeedLimit()
   params = Params()
   with car.CarParams.from_bytes(params.get('CarParams', block=True)) as CP:
@@ -40,6 +40,23 @@ def main():
       msg.mapSpeedLimit.headingValid = fix.bearing is not None
       msg.mapSpeedLimit.distanceAhead = ahead
     pm.send('mapSpeedLimit', msg)
+    # Independent validity: an untagged speed limit must not hide a well-matched
+    # traffic control, and optional map health never disables ordinary control.
+    control_msg = messaging.new_message('mapTrafficControl')
+    control_msg.valid = sample is not None and provider.control_match is not None
+    if control_msg.valid:
+      control = control_msg.mapTrafficControl
+      control.gpsMonoTime = int((fix.gps_timestamp if fix.estimated else fix.timestamp) * 1e9)
+      control.positionMonoTime = int(fix.timestamp * 1e9)
+      control.positionEstimated = fix.estimated
+      control.matchedWayId = provider.control_match.road.way_id
+      if provider.control is not None:
+        target = provider.control
+        control.kind = target.kind
+        control.nodeId = target.node_id
+        control.wayId = target.way_id
+        control.distance = target.distance
+    pm.send('mapTrafficControl', control_msg)
     rk.keep_time()
 
 

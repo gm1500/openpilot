@@ -109,6 +109,7 @@ class SelfdriveD:
       self.params.remove("AlphaLongitudinalEnabled")
     if not self.CP.openpilotLongitudinalControl:
       self.params.remove("ExperimentalMode")
+      self.params.remove("ConditionalExperimentalMode")
 
     self.CS_prev = car.CarState.new_message()
     self.AM = AlertManager()
@@ -126,6 +127,7 @@ class SelfdriveD:
     self.logged_comm_issue = None
     self.not_running_prev = None
     self.experimental_mode = False
+    self.conditional_experimental = False
     self.personality = self.params.get("LongitudinalPersonality", return_default=True)
     self.recalibrating_seen = False
     self.dm_lockout_set = False
@@ -535,6 +537,7 @@ class SelfdriveD:
     ss.state = self.state_machine.state
     ss.engageable = not self.events.contains(ET.NO_ENTRY)
     ss.experimentalMode = self.experimental_mode
+    ss.conditionalExperimental = self.conditional_experimental and not self.experimental_mode
     ss.personality = self.personality
 
     ss.alertText1 = self.AM.current_alert.alert_text_1
@@ -572,6 +575,8 @@ class SelfdriveD:
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
+      self.conditional_experimental = (self.params.get_bool("ConditionalExperimentalMode") and
+                                       self.CP.openpilotLongitudinalControl and not self.experimental_mode)
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
       time.sleep(0.1)
 

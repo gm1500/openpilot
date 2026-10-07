@@ -1,6 +1,8 @@
 import time
 import pyray as rl
 from openpilot.common.params import Params
+from openpilot.selfdrive.controls.lib.longitudinal_mode import LongitudinalMode, selected_mode, set_longitudinal_mode
+from openpilot.selfdrive.ui.onroad.conditional_icon import draw_conditional_icon, conditional_ring_state
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets import Widget
@@ -10,12 +12,13 @@ class ExpButton(Widget):
   def __init__(self, button_size: int, icon_size: int):
     super().__init__()
     self._params = Params()
-    self._experimental_mode: bool = False
+    self._mode = LongitudinalMode.voacc
+    self._icon_size = icon_size
     self._engageable: bool = False
 
     # State hold mechanism
     self._hold_duration = 2.0  # seconds
-    self._held_mode: bool | None = None
+    self._held_mode: LongitudinalMode | None = None
     self._hold_end_time: float | None = None
 
     self._white_color: rl.Color = rl.Color(255, 255, 255, 255)
@@ -29,14 +32,14 @@ class ExpButton(Widget):
 
   def _update_state(self) -> None:
     selfdrive_state = ui_state.sm["selfdriveState"]
-    self._experimental_mode = selfdrive_state.experimentalMode
+    self._mode = selected_mode(selfdrive_state.experimentalMode, selfdrive_state.conditionalExperimental)
     self._engageable = selfdrive_state.engageable or selfdrive_state.enabled
 
   def _handle_mouse_release(self, _):
     super()._handle_mouse_release(_)
     if self._is_toggle_allowed():
-      new_mode = not self._experimental_mode
-      self._params.put_bool("ExperimentalMode", new_mode)
+      new_mode = LongitudinalMode((int(self._held_or_actual_mode()) + 1) % 3)
+      set_longitudinal_mode(self._params, new_mode)
 
       # Hold new state temporarily
       self._held_mode = new_mode
@@ -48,8 +51,18 @@ class ExpButton(Widget):
 
     self._white_color.a = 180 if self.is_pressed or not self._engageable else 255
 
-    texture = self._txt_exp if self._held_or_actual_mode() else self._txt_wheel
+    mode = self._held_or_actual_mode()
     rl.draw_circle(center_x, center_y, self._rect.width / 2, self._black_bg)
+    if mode == LongitudinalMode.conditional:
+      draw_conditional_icon(center_x, center_y, self._icon_size, self._white_color)
+      state = conditional_ring_state(ui_state.sm, ui_state.started_frame, time.monotonic())
+      if state != 'ready':
+        color = rl.Color(255, 190, 0, self._white_color.a) if state == 'assisting' else rl.Color(80, 200, 230, self._white_color.a)
+        radius = self._rect.width / 2 - self._rect.width * .035
+        width = self._rect.width * (.025 if state == 'assisting' else .012)
+        rl.draw_ring(rl.Vector2(center_x, center_y), radius - width, radius, 0, 360, 96, color)
+      return
+    texture = self._txt_exp if mode == LongitudinalMode.experimental else self._txt_wheel
     rl.draw_texture_ex(texture, rl.Vector2(center_x - texture.width / 2, center_y - texture.height / 2), 0.0, 1.0, self._white_color)
 
   def _held_or_actual_mode(self):
@@ -60,7 +73,7 @@ class ExpButton(Widget):
     if self._hold_end_time and now >= self._hold_end_time:
       self._hold_end_time = self._held_mode = None
 
-    return self._experimental_mode
+    return self._mode
 
   def _is_toggle_allowed(self):
     if not self._params.get_bool("ExperimentalModeConfirmed"):
