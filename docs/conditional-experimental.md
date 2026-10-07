@@ -3,8 +3,13 @@
 Branch: `boat-anchor-conditional-e2e-poc`, based on `boat-anchor` at
 `ec919f529c63cf324517602199513689441357af`. The opendbc pin and vehicle tune are unchanged.
 
-The existing **SLC toggle is the master switch** for automatic E2E. It enables
-the model acceleration/stop candidate when **either** condition applies:
+**SLC and conditional E2E have separate controls.** With SLC enabled and
+conditional E2E off, the branch uses normal ACC-style control with mapped SET.
+Junctions and missing speed data do not activate conditional E2E or set 105.
+Missing speed retains the current SET, as ordinary SLC did previously.
+
+Turning **conditional E2E on**, while SLC is enabled, enables the model
+acceleration/stop candidate when **either** condition applies:
 
 | Condition | Mode and SET behavior |
 | --- | --- |
@@ -12,12 +17,15 @@ the model acceleration/stop candidate when **either** condition applies:
 | No usable map speed | Enable E2E, then automatically set 105 km/h |
 | Usable map speed and no qualified junction | Regular mode with mapped SET |
 
-The on-road mode button cycles **VOACC (SLC off) → conditional (SLC on) → full
-experimental → VOACC**. Full experimental remains an explicit override with its
-existing planner behavior. VOACC retains the existing lead slowing assistance.
-Automatic E2E requires experimental confirmation and supported non-PCM openpilot
-longitudinal control. SLC keeps its existing default-on reset at manager start
-and each on-road transition; full experimental keeps its existing persistence.
+The on-road mode button cycles **VOACC → conditional → full experimental →
+VOACC**. Changing mode preserves the separate SLC toggle, including when returning
+to normal VOACC. Full experimental remains an explicit override with its existing
+planner behavior. VOACC retains the existing lead slowing assistance.
+Automatic activation requires both SLC and conditional mode, experimental
+confirmation and supported non-PCM openpilot longitudinal control. Turning SLC
+on alone cannot opt into conditional E2E. SLC keeps its existing default-on reset
+at manager start and each on-road transition. Conditional selection defaults off
+and persists independently, as does full experimental selection.
 
 ## Missing-speed fallback and recovery
 
@@ -47,7 +55,8 @@ The automatic 105 change happens once per outage while SLC is tracking.
 Manual +/- or RES pauses the SET change; the helper does not repeatedly undo a
 driver's adjustment during the outage. A simultaneous manual selection can
 override automatic recovery. Pedals and disengagement prevent an automatic
-raise; disabling SLC clears both automatic conditions. A previously established
+raise; disabling SLC or conditional mode clears both automatic conditions.
+Turning conditional mode off preserves the SLC setting. A previously established
 no-speed request survives a stale status message until fresh recovery or an
 explicit mode change, subject to the planner's ordinary health checks.
 
@@ -197,7 +206,7 @@ from additional braking; legacy state enum values remain readable. Reasons
 `automaticE2e`, `e2eFallback` and applied `setSpeed` for the cross-service handshake.
 Card publishes transitions immediately in addition to its regular 5 Hz status.
 
-Validation: **244 tests and 101 subtests passed**, covering both OR conditions,
+Validation: **246 tests and 101 subtests passed**, covering both OR conditions,
 missing/recovered speed, SET buttons, map matching/topology, stronger ordinary
 braking, driver override, mode selection and HUD state. The actual cruise helper
 and longitudinal planner were also coupled through Cap'n Proto request/ack
@@ -207,12 +216,14 @@ range, and invalid model/plan, stale acknowledgement and pedal blocking.
 
 Native messaging, parameters and the longitudinal MPC solver were built locally.
 The ordinary/full-experimental cruise and longitudinal maneuver suites pass:
-21 tests and 56 maneuver subtests. Seven additional integration tests couple the
+21 tests and 56 maneuver subtests. Nine additional integration tests couple the
 actual cruise helper, native MPC, SubMaster health checks and native planner
 publications. They cover both triggers, 105 entry, recovery with and without a
 junction, the smaller recovered SET window, reordered recovery messages, invalid
-model/plan blocking and SLC off. Seven abstract parameterized test templates are
-skipped; their generated cases run. The earlier substitute-solver checks remain
+model/plan blocking and SLC off. They also verify that SLC alone stays in regular
+mode at junctions and through missing/recovered speed, and that conditional
+selection controls both triggers without disabling SLC. Seven abstract
+parameterized test templates are skipped; their generated cases run. The earlier substitute-solver checks remain
 supplemental. Native HUD drawing and mode cycling pass at 192 px and 82 px sizes.
 
 The native suite exposed and verified a fix for dictionary-based simulation

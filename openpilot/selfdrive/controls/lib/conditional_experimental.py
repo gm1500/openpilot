@@ -1,4 +1,4 @@
-"""SLC enables E2E at qualified junctions or while usable map speed is unavailable."""
+"""Opt-in conditional E2E at qualified junctions or while usable map speed is unavailable."""
 import math
 from dataclasses import dataclass
 

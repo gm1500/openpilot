@@ -31,7 +31,7 @@ struct MapCruiseState @0xaedffd8f31e7b55d {
   pendingSpeedDEPRECATED @2 :Float32;
   adjustingSpeed @3 :Float32; # UI pulse target until ego speed settles; zero if cancelled/complete
   e2eFallback @4 :Bool; # no usable speed: request E2E before raising SET; clear after recovery SET
-  automaticE2e @5 :Bool; # SLC on, supported and experimental confirmation accepted
+  automaticE2e @5 :Bool; # SLC and conditional mode on, supported and experimental confirmation accepted
   setSpeed @6 :Float32; # actual applied SET, m/s; lets planner order recovery across services
   enum State {
     off @0;

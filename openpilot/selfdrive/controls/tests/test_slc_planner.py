@@ -3,10 +3,12 @@ from unittest.mock import patch
 
 from opendbc.car.structs import car
 from openpilot.cereal import messaging
+from openpilot.common.params import Params
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.car.map_cruise import fallback_e2e_ready
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
+from openpilot.selfdrive.controls.lib.longitudinal_mode import LongitudinalMode, automatic_e2e_selected, set_longitudinal_mode
 from openpilot.selfdrive.modeld.constants import ModelConstants
 
 
@@ -20,6 +22,10 @@ class TestSLCPlanner(OpenpilotTestCase):
     self.limit = 50.
     self.junction = 0.
     self.slc_enabled = True
+    self.params = Params()
+    self.params.put_bool('ExperimentalModeConfirmed', True, block=True)
+    self.params.put_bool('MapCruiseEnabled', True, block=True)
+    set_longitudinal_mode(self.params, LongitudinalMode.conditional)
     self.model_valid = self.model_complete = True
     cp = car.CarParams(openpilotLongitudinalControl=True, longitudinalActuatorDelay=.5, steerRatio=16., wheelbase=3.6)
     self.cs = car.CarState(vEgo=40/3.6, gearShifter='drive', cruiseState={'available': True})
@@ -42,10 +48,13 @@ class TestSLCPlanner(OpenpilotTestCase):
     old_set = self.cruise.v_cruise_kph
     self.cruise.update_v_cruise(self.cs, True, True, map_enabled=self.slc_enabled,
                               map_speed=None if self.limit is None else self.limit/3.6, map_gps_time=self.now,
-                              now=self.now, automatic_e2e=self.slc_enabled, e2e_ready=ready)
+                              now=self.now, automatic_e2e=self.conditional_selected(), e2e_ready=ready)
     if self.cruise.v_cruise_kph == 105 and old_set != 105:
       self.assertTrue(ready, 'SET rose before a fresh native planner acknowledgement')
     self.cs.vCruise = self.cruise.v_cruise_kph
+
+  def conditional_selected(self):
+    return automatic_e2e_selected(self.params, self.cruise.CP, self.params.get_bool('ExperimentalMode'))
 
   def plan_step(self, set_override=None):
     events = {s: messaging.new_message(s, valid=True, logMonoTime=int(self.now*1e9)) for s in self.sm.services}
@@ -56,7 +65,8 @@ class TestSLCPlanner(OpenpilotTestCase):
     events['carControl'].carControl.longActive = True
     events['controlsState'].controlsState.longControlState = 'pid'
     sd = events['selfdriveState'].selfdriveState
-    sd.enabled, sd.conditionalExperimental, sd.personality = True, self.slc_enabled, 'standard'
+    sd.enabled, sd.conditionalExperimental, sd.personality = True, self.conditional_selected(), 'standard'
+    sd.experimentalMode = self.params.get_bool('ExperimentalMode')
     model = events['modelV2'].modelV2
     times = ModelConstants.T_IDXS
     model.velocity.x = [self.cs.vEgo] * len(times) if self.model_complete else []
@@ -167,3 +177,40 @@ class TestSLCPlanner(OpenpilotTestCase):
     self.tick(5)
     self.assertFalse(self.ack['longitudinalPlan'].conditionalExperimental.e2eEnabled)
     self.assertEqual(self.ack['longitudinalPlan'].conditionalExperimental.state, 'off')
+
+  def test_slc_alone_keeps_regular_mode_for_junction_and_missing_speed(self):
+    set_longitudinal_mode(self.params, LongitudinalMode.voacc)
+    self.junction = 40.
+    self.tick(220)
+    self.assertTrue(self.params.get_bool('MapCruiseEnabled'))
+    self.assertEqual(self.cs.vCruise, 50)
+    self.assertFalse(self.ack['longitudinalPlan'].conditionalExperimental.e2eEnabled)
+    self.limit = None
+    self.tick(150)
+    self.assertFalse(self.cruise.map_cruise.e2e_fallback)
+    self.assertFalse(self.ack['longitudinalPlan'].conditionalExperimental.e2eEnabled)
+    self.assertEqual(self.cs.vCruise, 50)
+    self.limit = 30.
+    self.tick(220)
+    self.assertEqual(self.cs.vCruise, 30)  # SLC continues in ordinary mode
+
+  def test_conditional_toggle_controls_both_conditions_without_disabling_slc(self):
+    set_longitudinal_mode(self.params, LongitudinalMode.voacc)
+    self.junction = 40.
+    self.tick(220)
+    set_longitudinal_mode(self.params, LongitudinalMode.conditional)
+    self.tick(120)
+    self.assertTrue(self.ack['longitudinalPlan'].conditionalExperimental.e2eEnabled)
+    self.assertEqual(self.ack['longitudinalPlan'].conditionalExperimental.reason, 'junction')
+    self.junction, self.limit = 0., None
+    self.tick(115)
+    self.assertEqual(self.cs.vCruise, 105)
+    self.assertEqual(self.ack['longitudinalPlan'].conditionalExperimental.reason, 'noSpeedLimit')
+    set_longitudinal_mode(self.params, LongitudinalMode.voacc)
+    self.tick(5)
+    self.assertTrue(self.params.get_bool('MapCruiseEnabled'))
+    self.assertFalse(self.cruise.map_cruise.e2e_fallback)
+    self.assertFalse(self.ack['longitudinalPlan'].conditionalExperimental.e2eEnabled)
+    self.limit = 40.
+    self.tick(220)
+    self.assertEqual(self.cs.vCruise, 40)

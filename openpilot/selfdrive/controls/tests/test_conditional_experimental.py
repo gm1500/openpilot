@@ -453,7 +453,7 @@ class TestSLCState(unittest.TestCase):
     for args in ({'state': 'off'}, {'state': 'unsupported'}, {'automaticE2e': False}):
       self.assertEqual(slc_fallback_request(self.sm(**args), 100.0, True), (False, False))
 
-  def test_slc_is_master_switch_and_full_mode_is_explicit_override(self):
+  def test_conditional_requires_opt_in_and_mode_cycle_preserves_slc(self):
     class Params:
       def __init__(self):
         self.values = {'ExperimentalMode': False, 'ConditionalExperimentalMode': False, 'MapCruiseEnabled': True, 'ExperimentalModeConfirmed': True}
@@ -470,13 +470,18 @@ class TestSLCState(unittest.TestCase):
 
     p = Params()
     cp = NS(openpilotLongitudinalControl=True, pcmCruise=False, notCar=False, passive=False)
-    self.assertTrue(automatic_e2e_selected(p, cp, False))
-    for mode in (LongitudinalMode.voacc, LongitudinalMode.conditional, LongitudinalMode.experimental, LongitudinalMode.voacc):
-      set_longitudinal_mode(p, mode)
-      full = p.get_bool('ExperimentalMode')
-      automatic = automatic_e2e_selected(p, cp, full)
-      self.assertEqual(selected_mode(full, automatic), mode)
-    p.put_bool('MapCruiseEnabled', True)  # the SLC sign alone enables automatic mode
+    self.assertFalse(automatic_e2e_selected(p, cp, False))  # SLC alone is ordinary ACC
+    for slc in (True, False):
+      p.put_bool('MapCruiseEnabled', slc)
+      for mode in (LongitudinalMode.voacc, LongitudinalMode.conditional, LongitudinalMode.experimental, LongitudinalMode.voacc):
+        set_longitudinal_mode(p, mode)
+        full = p.get_bool('ExperimentalMode')
+        automatic = automatic_e2e_selected(p, cp, full)
+        self.assertEqual(selected_mode(full, automatic), mode)
+        self.assertEqual(p.get_bool('MapCruiseEnabled'), slc)
+    p.put_bool('MapCruiseEnabled', True)
+    self.assertFalse(automatic_e2e_selected(p, cp, False))
+    set_longitudinal_mode(p, LongitudinalMode.conditional)
     self.assertTrue(automatic_e2e_selected(p, cp, False))
     p.put_bool('ExperimentalModeConfirmed', False)
     self.assertFalse(automatic_e2e_selected(p, cp, False))

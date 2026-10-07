@@ -15,20 +15,17 @@ def selected_mode(experimental: bool, conditional: bool) -> LongitudinalMode:
 
 
 def automatic_e2e_selected(params, CP, experimental: bool) -> bool:
+  # Selection is independent of SLC; card requires SLC for automatic activation.
   return (map_cruise_supported(CP) and not experimental and params.get_bool('ExperimentalModeConfirmed') and
-          params.get('MapCruiseEnabled', return_default=True))
+          params.get_bool('ConditionalExperimentalMode'))
 
 
 def set_longitudinal_mode(params, mode: LongitudinalMode):
-  # SLC owns automatic E2E. Keep the legacy conditional parameter coherent for
-  # older checkouts, while full ExperimentalMode remains an explicit override.
+  # Mode selection never changes the separate SLC toggle. Clear the previous
+  # mode first so intermediate reads cannot accidentally select full E2E.
   if mode == LongitudinalMode.experimental:
     params.put_bool('ConditionalExperimentalMode', False, block=True)
     params.put_bool('ExperimentalMode', True, block=True)
   else:
-    if mode == LongitudinalMode.voacc:
-      params.put_bool('MapCruiseEnabled', False, block=True)
     params.put_bool('ExperimentalMode', False, block=True)
     params.put_bool('ConditionalExperimentalMode', mode == LongitudinalMode.conditional, block=True)
-    if mode == LongitudinalMode.conditional:
-      params.put_bool('MapCruiseEnabled', True, block=True)
