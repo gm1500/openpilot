@@ -4,25 +4,30 @@ Branch: `boat-anchor-conditional-e2e-poc`, based on `boat-anchor` at
 `ec919f529c63cf324517602199513689441357af`. The opendbc pin and vehicle tune are unchanged.
 
 The on-road button cycles **VOACC → conditional → full experimental → VOACC**.
-VOACC retains the existing lead slowing assistance. Conditional adds a junction
-attention window in which sustained model slowing can contribute. Full
+VOACC retains the existing lead slowing assistance. Conditional directly enables
+the E2E acceleration/stop candidate inside a qualified junction window. Full
 experimental retains its existing planner behavior. The selection persists;
 experimental confirmation and longitudinal capability checks still apply.
 
 ## HUD
 
-The approved icon retains its existing size, colours and thick rings, without text.
+The native vector icon combines the approved perspective intersection, a stop
+sign on the near-left roadside corner and a signal on the opposite corner.
+The lower-left road edge is continuous; the signal retains clear separation
+from the road. All three signal lamps are neutral symbols, not observed phases.
+The button has exactly two conditional appearances:
 
 | Appearance | Meaning |
 | --- | --- |
-| White glyph | Conditional selected; no qualified junction in range |
-| Cyan glyph and ring | A connected intersection, split or merge is in range |
-| Amber glyph and ring | The junction helper contributes to the selected slowing/stop command |
+| White glyph | Conditional selected, E2E currently inactive |
+| Orange glyph and ring | Conditional E2E enabled, even without extra braking |
 
-Cyan does not require model slowing, engagement, or an unpressed brake pedal.
-Driver intervention or invalid model data immediately clears assistance while
-preserving qualified map awareness. Lead-only E2E assistance does not turn this
-icon amber. Stale planner/state messages clear the indication.
+The model may request acceleration, cruising, slowing or stopping while orange.
+The stronger ordinary constraint can still win without changing the icon.
+Disengagement, a pedal override, invalid model data, or stale HUD messages make
+it white immediately. Qualified map awareness can remain latched internally
+while the driver overrides, allowing direct re-entry when control resumes.
+Lead-only E2E assistance cannot turn this icon orange.
 
 ## Range from current SET speed
 
@@ -82,64 +87,92 @@ advancing GPS observations of the same target are required before arming;
 projection cannot manufacture confirmations. A restored parking checkpoint
 without fresh GPS cannot arm the helper.
 
-Release on a missing/changed target, lost map validity, or passage more than 12 m
-beyond the target. A passed-target latch resists rearming from position jitter.
-Closely spaced junctions can briefly clear cyan while the new target confirms.
-Road-match dropouts still clear it. This change does not modify the existing
-position estimator or its output selection between GPS updates.
+## Junction continuity
 
-## Model confirmation and arbitration
+Initial entry still requires two advancing real-GPS observations of the same
+junction. Once qualified, retain the old attention window while a nearby new
+junction confirms, or through a fresh explicit `noRoadMatch`, `roadAlignment`,
+`ambiguousRoad` or `ambiguousFork` interruption. A hold has all three bounds:
 
-The shortened rendered path alone is not stopping evidence. Use the model's
-actual desired acceleration, stop request, predicted velocity and position.
+- At most **2.25 seconds** since the last qualified match, measured by monotonic
+  elapsed time rather than a count of planner updates.
+- At most **40 metres** of integrated vehicle travel during the interruption.
+- The latest validated actual GPS observation must remain **at most 3 seconds
+  old**. Repeated messages and projected positions cannot renew that timestamp.
 
-Entry requires a sustained trajectory speed reduction, model acceleration at or
-below −0.2 m/s² and at least 0.15 m/s² below the ordinary boat-anchor proposal,
-confirmed for 0.25 s. Speed magnitude avoids interpreting a turn's reduced forward
-component as slowing. Predicted stop distance remains logged, but is no longer
-required to end before the map target: a split/merge is an attention landmark,
-not a stop line, and the light or queue may lie beyond it.
+The new candidate must itself be in range. Two advancing observations qualify
+it before it replaces the held target. Changing candidate IDs does not renew
+the hold budget. A recovered previously qualified target need not start its
+initial confirmation again while the hold remains valid.
 
-Choose the lower of the ordinary and accepted junction E2E acceleration. Stronger
-ordinary braking wins. A sustained model go request releases assistance; the
-return toward acceleration is softened at 1 m/s³. Conditional never sets the
-full `ExperimentalMode` flag.
+A definite clear road, a new out-of-range target, stale/missing messages,
+expired map cache, missing position, backwards timestamps, or an expired hold
+releases the window. An interruption cannot create a new approach. Both mapd
+look-behind and policy passage now use **20 m**, removing the previous 12/20 m
+mismatch. The passed-target latch still prevents position jitter from rearming
+an already passed node. The position estimator and speed-limit matcher are
+unchanged.
 
-Driver override, disengagement, invalid model data and leaving conditional mode
-clear assistance. Map loss while moving releases the extra constraint. A stop
-already established may remain held through map loss while a fresh, valid model
-continues requesting a stop at rest; map loss cannot create a stop request.
+## Direct E2E candidate and arbitration
+
+A qualified junction directly enables the valid model acceleration and stop
+proposal. The old 0.25-second model-slowing confirmation, speed-drop threshold
+and acceleration-difference threshold no longer gate entry. The model's speed
+reduction and predicted stop distance remain logged as diagnostics.
+
+Choose the lower of the ordinary boat-anchor acceleration and the model
+candidate. A positive model acceleration may participate too, while the normal
+cruise/turn limits and stronger ordinary braking still win. An enabled model
+stop request joins the ordinary stop request immediately. The map supplies
+eligibility, never a stop command or right-of-way classification. Conditional
+does not set the full `ExperimentalMode` flag or change its cruise-acceleration
+limits. Leaving the window removes the candidate; the return toward ordinary
+acceleration retains the 1 m/s³ upward slew limit.
+
+Driver override, disengagement and invalid model data clear assistance
+immediately. A stop already requested by E2E may remain held at rest through
+map loss while a fresh valid model continues to request it. Map loss cannot
+create a stop request, and a model go request ends that stationary hold.
 
 ## Logging and validation
 
 The existing `mapTrafficControl` service carries `kind=junction`, target node/way,
 signed distance, matched road, actual GPS age, projection status and lookup reason.
-Legacy stop/light enum values remain readable in old logs but cannot arm this
-new policy. `longitudinalPlan.conditionalExperimental` additionally logs the valid
-SET speed used as `activationSpeed` in m/s, alongside activation distance, target
-distance, model intent, both acceleration proposals, arming and contribution.
+`longitudinalPlan.conditionalExperimental` records SET-based activation speed and
+distance, target, model intent, both acceleration proposals, arming and actual
+contribution. New `e2eEnabled` and `state=active` distinguish model participation
+from additional braking; legacy state enum values remain readable. Reasons
+`junctionHandoff` and `mapHold` identify continuity holds while control is eligible.
 
-Validation: **192 tests and 51 subtests passed**, plus lint and an isolated test
-of actual planner update/publish and Cap'n Proto serialization. The map tests use
-the Python reference transformations in place of the unavailable native extension.
-Tests cover untagged intersections, shallow forks, merges, ordinary way boundaries,
-bridges, duplicate edges, parallel-road ambiguity, freshness, SET/profile changes,
-standstill, invalid SET sentinels, model confirmation and stronger ordinary braking.
+Validation: **153 tests and 19 subtests passed**, covering policy, map topology/
+matching, lead assistance and HUD state; actual planner update/publish with Cap'n Proto serialization; and
+native HUD drawing at 192 px and 82 px button sizes. The integration harness
+substitutes unavailable native IPC and the MPC solver. Map tests use the Python
+reference transformations in place of the unavailable native extension.
 
-Recorded-input replay covers 11 segments and 13,178 planner frames using a
-city-wide OSM download, locally cropped for replay. All three newest bookmarks
-are cyan. The formerly late first approach arms about 12.2 seconds earlier and
-permits 82 frames (4.1 s) of additional model-requested slowing before driver
-brake override, up to about 1.07 m/s² below the ordinary proposal. Other replayed
-segments have no selected-acceleration changes. The target is now the nearest
-road junction, so distances are not directly comparable with previous distances
-to tagged signals. Brief map/target-confirmation gaps remain.
+Recorded-input replay covers **17 segments and 19,743 planner frames**. The six
+new `2c3` segments use their actual recorded junction messages; the baseline
+reproduces 99.97% of recorded armed states (two frame-boundary differences).
+All **eight short detection gaps during engaged driving** disappear in this
+replay. Four were target-ID confirmation restarts, two were road-match losses,
+and two included the mismatched passage threshold. Longer matching outages
+still release. Three short internal qualification gaps remain while control
+is ineligible; the new HUD would already be white in those periods.
 
-Replay supplies the map snapshot directly rather than emulating original cache
-or network timing, and applies logged vehicle/model inputs rather than simulating
-the vehicle's response to changed braking. These are offline results, not a full
-device build or a demonstrated stop. Map proximity does not establish right of
-way or guarantee that the model sees a light, stop sign or conflicting traffic.
+In `2c3`, conditional E2E becomes enabled for about **74 seconds** and changes
+the selected acceleration for **29.1 seconds**, including 10.5 seconds with
+negative selected acceleration. Maximum additional deceleration compared with
+the previous policy is about **0.93 m/s²**. The model does not request a stop
+in eligible windows of this route, so this replay is not a demonstrated stop.
+Stronger ordinary braking wins in every replayed frame, and no conditional
+contribution occurs while control is ineligible.
+
+The other 11 segments use the previously validated topology replay from a
+public city-wide OSM snapshot, because their original logs predate junction
+lookup. Both policies receive identical map/vehicle/model inputs. These replays
+hold recorded trajectories fixed: they do not simulate how the vehicle or
+model would respond to changed acceleration, and are not a full device build
+or on-road validation.
 
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
 under the [ODbL](https://opendatacommons.org/licenses/odbl/).

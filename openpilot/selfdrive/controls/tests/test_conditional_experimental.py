@@ -31,10 +31,13 @@ class FakeSM(dict):
 class TestConditionalExperimental(unittest.TestCase):
   def setUp(self):
     self.policy = ConditionalExperimental(.05, .5)
+    self.now = 101.
 
   def step(self, **kwargs):
-    args = {'enabled': True, 'eligible': True, 'approach': MapApproach(True, 10, 80., 101.), 'model': model(),
-            'v_ego': 15., 'v_set': 15., 'personality': 1, 'regular_accel': .5, 'regular_stop': False, 'e2e_accel': -1., 'e2e_stop': False}
+    self.now += .05
+    args = {'enabled': True, 'eligible': True, 'approach': MapApproach(True, 10, 80., 101.), 'now': self.now,
+            'model': model(), 'v_ego': 15., 'v_set': 15., 'personality': 1,
+            'regular_accel': .5, 'regular_stop': False, 'e2e_accel': -1., 'e2e_stop': False}
     args.update(kwargs)
     return self.policy.update(**args)
 
@@ -42,46 +45,116 @@ class TestConditionalExperimental(unittest.TestCase):
     self.step(approach=MapApproach(True, 10, 80., 100.), e2e_accel=0.)
     return self.step(**kwargs)
 
-  def enter(self, **kwargs):
-    self.arm(**kwargs)
-    for _ in range(6):
-      result = self.step(**kwargs)
-    return result
+  def test_direct_entry_without_model_slowing_or_brake_delay(self):
+    self.assertEqual(self.arm(e2e_accel=.2, model=model(brake=0)), (.2, False, True))
+    self.assertTrue(self.policy.active)
+    self.assertEqual(self.policy.state, 'active')
+    self.assertFalse(self.policy.intent.slowing)
+    self.assertEqual(self.step(), (-1., False, True))
 
-  def test_map_range_and_model_evidence_are_separate(self):
-    self.arm(e2e_accel=.2, model=model(brake=0))
-    self.assertTrue(self.policy.armed)
-    self.assertEqual(self.policy.state, 'inRange')
-    for _ in range(100):
-      self.assertEqual(self.step(e2e_accel=.2, model=model(brake=0)), (.5, False, False))
+  def test_enabled_is_independent_of_contribution(self):
+    self.assertEqual(self.arm(regular_accel=-3), (-3, False, False))
+    self.assertTrue(self.policy.active)
+    self.assertEqual(self.policy.state, 'active')
+    self.assertEqual(self.step(regular_accel=-3, e2e_stop=True), (-3, True, True))
+    self.assertEqual(self.step(regular_accel=-3, regular_stop=True, e2e_stop=True), (-3, True, False))
 
-  def test_two_advancing_map_observations_required(self):
+  def test_two_advancing_map_observations_required_for_initial_entry(self):
     for _ in range(100):
       self.assertEqual(self.step(), (.5, False, False))
     self.assertFalse(self.policy.armed)
     self.step(approach=MapApproach(True, 10, 80., 102.))
-    self.assertTrue(self.policy.armed)
+    self.assertTrue(self.policy.active)
 
-  def test_sustained_model_slowing_and_material_difference_required(self):
-    self.arm(e2e_accel=0)
-    self.assertEqual(self.step(), (.5, False, False))
-    self.step(e2e_accel=0)
-    for _ in range(10):
-      self.assertEqual(self.step(regular_accel=-.9), (-.9, False, False))
-    self.assertEqual(self.enter(), (-1., False, True))
-    self.assertEqual(self.policy.state, 'assisting')
+  def test_nearby_junction_handoff_keeps_e2e_while_new_target_confirms(self):
+    self.arm()
+    self.now = 102.
+    for _ in range(20):
+      self.step(approach=MapApproach(True, 20, 60., 102.))
+      self.assertTrue(self.policy.active)
+      self.assertEqual(self.policy.target_id, 10)
+      self.assertEqual(self.policy.reason, 'junctionHandoff')
+    self.step(approach=MapApproach(True, 20, 45., 103.))
+    self.assertTrue(self.policy.active)
+    self.assertEqual(self.policy.target_id, 20)
+    self.assertEqual(self.policy.gap_time, 0.)
 
-  def test_always_preserves_stronger_regular_braking(self):
-    self.enter()
-    self.assertEqual(self.step(regular_accel=-3), (-3, False, False))
-    self.assertEqual(self.policy.state, 'inRange')
+  def test_handoff_after_one_second_match_dropout_stays_continuous(self):
+    self.arm()
+    for _ in range(20):
+      self.step(approach=MapApproach(can_hold=True))
+      self.assertTrue(self.policy.active)
+    for _ in range(20):
+      self.step(approach=MapApproach(True, 20, 60., 102.))
+      self.assertTrue(self.policy.active)
+    self.step(approach=MapApproach(True, 20, 45., 103.))
+    self.assertTrue(self.policy.active)
+    self.assertEqual(self.policy.target_id, 20)
 
-  def test_range_latches_as_speed_and_distance_shrink(self):
-    self.enter()
+  def test_matching_interruption_cannot_arm_or_create_stop(self):
+    for _ in range(100):
+      self.assertEqual(self.step(approach=MapApproach(can_hold=True), e2e_stop=True), (.5, False, False))
+      self.assertFalse(self.policy.armed)
+
+  def test_hold_expires_and_cannot_be_extended_by_alternating_candidates(self):
+    for changing in (False, True):
+      self.setUp()
+      self.arm()
+      for i in range(50):
+        approach = MapApproach(True, 20+i%2, 60., self.now+.05) if changing else MapApproach(can_hold=True)
+        self.step(approach=approach, v_ego=1.)
+        if i < 35:
+          self.assertTrue(self.policy.armed)
+      self.assertFalse(self.policy.armed)
+      self.assertFalse(self.policy.active)
+
+  def test_hold_distance_and_real_gps_age_are_independent_limits(self):
+    self.arm()
+    for _ in range(25):
+      self.step(approach=MapApproach(can_hold=True), v_ego=35.)
+    self.assertFalse(self.policy.armed)  # more than 40 m, less than 2.25 s
+    self.setUp()
+    self.arm()
+    self.step(approach=MapApproach(can_hold=True), now=104.1)
+    self.assertFalse(self.policy.armed)
+
+  def test_same_target_recovery_does_not_restart_confirmation(self):
+    self.arm()
+    for _ in range(20):
+      self.step(approach=MapApproach(can_hold=True))
+    self.step(approach=MapApproach(True, 10, 50., 102.))
+    self.assertTrue(self.policy.active)
+    self.assertEqual(self.policy.reason, 'junction')
+
+  def test_fresh_candidate_gps_counts_for_position_age_but_not_confirmation(self):
+    self.arm()
+    self.step(now=102.4)  # established target, real GPS still at 101
+    self.step(approach=MapApproach(True, 20, 60., 102.5), now=102.6)
+    self.step(approach=MapApproach(True, 20, 60., 102.5), now=104.3, v_ego=1.)
+    self.assertTrue(self.policy.active)
+    self.assertEqual(self.policy.target_id, 10)  # new target still unconfirmed
+    self.step(approach=MapApproach(True, 20, 60., 102.5), now=104.7, v_ego=1.)
+    self.assertFalse(self.policy.active)  # repeated observation cannot renew grace
+
+  def test_hold_uses_elapsed_time_even_if_planner_updates_are_delayed(self):
+    self.arm()
+    self.step(approach=MapApproach(can_hold=True), now=103.4, v_ego=0.)
+    self.assertFalse(self.policy.active)
+
+  def test_definite_clear_road_far_target_and_stale_input_clear_without_grace(self):
+    for approach in (MapApproach(), MapApproach(True), MapApproach(True, 20, 300., 102.)):
+      self.setUp()
+      self.arm()
+      self.step(approach=approach, e2e_stop=True)
+      self.assertFalse(self.policy.armed)
+      self.assertFalse(self.policy.active)
+      self.assertFalse(self.policy.stop_requested)
+
+  def test_range_latches_as_speed_and_set_shrink(self):
+    self.arm()
     self.step(v_ego=2., v_set=2., model=model(speed=2), approach=MapApproach(True, 10, 35., 102.))
     self.assertLess(self.policy.activation_distance, 35.)
-    self.assertTrue(self.policy.armed)
-    self.assertTrue(self.policy.braking)
+    self.assertTrue(self.policy.active)
 
   def test_set_speed_keeps_range_during_slowing_and_standstill(self):
     for speed in (15., 8., 0.):
@@ -89,8 +162,7 @@ class TestConditionalExperimental(unittest.TestCase):
       for timestamp in (100., 101.):
         self.step(v_ego=speed, v_set=60 / 3.6, personality=0, model=model(speed=speed, brake=0),
                   approach=MapApproach(True, 10, 100., timestamp), e2e_accel=.2)
-      self.assertTrue(self.policy.armed)
-      self.assertEqual(self.policy.state, 'inRange')
+      self.assertTrue(self.policy.active)
       self.assertAlmostEqual(self.policy.activation_distance, activation_distance(60 / 3.6, 0., 0, .5))
 
   def test_current_set_speed_and_profile_determine_entry_range(self):
@@ -98,118 +170,89 @@ class TestConditionalExperimental(unittest.TestCase):
       with self.subTest(set_speed=set_speed, profile=profile):
         self.policy.reset()
         for timestamp in (100., 101.):
-          self.step(v_ego=5., v_set=set_speed / 3.6, personality=profile, approach=MapApproach(True, 10, 100., timestamp))
+          self.step(v_set=set_speed / 3.6, personality=profile, approach=MapApproach(True, 10, 100., timestamp))
         self.assertEqual(self.policy.armed, expected)
         self.assertEqual(self.policy.activation_speed, set_speed / 3.6)
 
   def test_unavailable_set_speed_clears_arming_and_assistance(self):
     for v_set in (None, 0., -1., math.nan, math.inf, 255.):
-      with self.subTest(v_set=v_set):
-        self.enter()
-        self.assertEqual(self.step(v_set=v_set), (.5, False, False))
-        self.assertEqual(self.policy.reason, 'invalidSetSpeed')
-        self.assertFalse(self.policy.armed)
-        self.assertFalse(self.policy.braking)
-        self.assertEqual(self.policy.activation_speed, 0.)
+      self.arm()
+      self.assertEqual(self.step(v_set=v_set), (.5, False, False))
+      self.assertEqual(self.policy.reason, 'invalidSetSpeed')
+      self.assertFalse(self.policy.armed)
+      self.assertFalse(self.policy.active)
 
-  def test_model_go_releases_and_slews_return_to_acceleration(self):
-    previous, _, _ = self.enter()
+  def test_model_go_remains_enabled_and_slews_return_to_acceleration(self):
+    previous, _, _ = self.arm()
     for _ in range(50):
       current, stop, _ = self.step(e2e_accel=.3, model=model(brake=0))
       self.assertLessEqual(current - previous, .05 + 1e-8)
       self.assertFalse(stop)
-      if current > 0:
-        self.assertNotEqual(self.policy.state, 'assisting')
+      self.assertTrue(self.policy.active)
       previous = current
-    self.assertEqual(current, .5)
-    self.assertFalse(self.policy.braking)
-    self.assertTrue(self.policy.armed)
+    self.assertEqual(current, .3)
 
-  def test_stop_holds_on_map_dropout_only_with_fresh_model_request(self):
-    self.enter()
-    for _ in range(50):
-      _, stop, active = self.step(v_ego=0, model=model(speed=0), e2e_accel=0., e2e_stop=True, approach=MapApproach())
+  def test_stop_holds_on_map_loss_only_while_model_still_requests_it_at_rest(self):
+    self.arm(v_ego=0., model=model(speed=0), e2e_accel=0., e2e_stop=True)
+    for _ in range(100):
+      _, stop, active = self.step(v_ego=0., model=model(speed=0), e2e_accel=0., e2e_stop=True, approach=MapApproach())
       self.assertTrue(stop)
       self.assertTrue(active)
-    _, stop, _ = self.step(v_ego=0, model=model(speed=0), e2e_accel=.3, e2e_stop=False, approach=MapApproach())
+      self.assertTrue(self.policy.active)
+    _, stop, _ = self.step(v_ego=0., model=model(speed=0), e2e_accel=.3, e2e_stop=False, approach=MapApproach())
     self.assertFalse(stop)
+    self.assertFalse(self.policy.active)
 
   def test_map_loss_while_moving_releases_and_cannot_create_stop(self):
-    self.enter()
-    previous = -1.
+    previous, _, _ = self.arm()
     for _ in range(50):
       current, stop, _ = self.step(approach=MapApproach(), e2e_stop=True)
       self.assertFalse(stop)
       self.assertLessEqual(current - previous, .05 + 1e-8)
       previous = current
     self.assertEqual(current, .5)
-    self.assertFalse(self.policy.armed)
+    self.assertFalse(self.policy.active)
 
-  def test_override_or_invalid_model_clear_assistance_but_preserve_map_awareness(self):
+  def test_override_or_invalid_model_immediately_clear_assistance(self):
     bad = model()
     bad.velocity.x[3] = math.nan
     for args in ({'eligible': False}, {'model': bad}, {'e2e_accel': math.inf}):
-      self.enter()
+      self.arm()
       self.assertEqual(self.step(**args), (.5, False, False))
-      self.assertFalse(self.policy.braking)
+      self.assertFalse(self.policy.active)
       self.assertTrue(self.policy.armed)
       self.assertEqual(self.policy.state, 'inRange')
-      # Assistance must reconfirm after eligibility/model validity returns.
-      self.assertEqual(self.step(), (.5, False, False))
+      self.assertEqual(self.step(), (-1., False, True))
 
   def test_disabled_or_invalid_kinematics_clear_all_state(self):
-    for args in ({'enabled': False}, {'v_ego': math.nan}, {'v_ego': -1.}):
-      self.enter()
+    for args in ({'enabled': False}, {'v_ego': math.nan}, {'v_ego': -1.}, {'now': math.nan}):
+      self.arm()
       self.assertEqual(self.step(**args), (.5, False, False))
-      self.assertFalse(self.policy.braking)
+      self.assertFalse(self.policy.active)
       self.assertFalse(self.policy.armed)
 
-  def test_map_qualifies_without_control_or_model_then_clears_on_map_loss(self):
-    bad = model()
-    bad.velocity.x = []
-    for args in ({'eligible': False}, {'model': bad}):
-      self.policy.reset()
-      for timestamp in (100., 101.):
-        self.assertEqual(self.step(approach=MapApproach(True, 10, 80., timestamp), **args), (.5, False, False))
-      self.assertTrue(self.policy.armed)
-      self.assertEqual(self.policy.state, 'inRange')
-      self.step(approach=MapApproach(), **args)
-      self.assertFalse(self.policy.armed)
-      self.assertEqual(self.policy.target_id, 0)
-
-  def test_passed_changed_or_missing_target_releases(self):
-    for approach in (MapApproach(True, 10, -15., 102.), MapApproach(True, 20, 70., 102.), MapApproach(True)):
-      self.policy.reset()
-      self.enter()
-      self.step(approach=approach)
-      self.assertFalse(self.policy.braking)
+  def test_pass_distance_matches_map_lookbehind_and_jitter_cannot_rearm(self):
+    self.arm()
+    for distance in (-12.1, -19.9, -20.):
+      self.step(approach=MapApproach(True, 10, distance, 102.))
+      self.assertTrue(self.policy.active)
+    self.step(approach=MapApproach(True, 10, -20.1, 103.))
+    self.assertFalse(self.policy.armed)
+    for i in range(50):
+      self.step(approach=MapApproach(True, 10, 2., 104.+i))
       self.assertFalse(self.policy.armed)
 
-  def test_cannot_enter_for_target_out_of_range_or_already_passed(self):
+  def test_cannot_enter_for_target_out_of_range_or_already_behind(self):
     for distance in (300., -1.):
       self.policy.reset()
       for timestamp in range(100, 120):
         self.assertEqual(self.step(approach=MapApproach(True, 10, distance, timestamp)), (.5, False, False))
 
-  def test_passed_target_cannot_rearm_from_position_jitter(self):
-    self.enter()
-    self.step(approach=MapApproach(True, 10, -15., 102.))
-    for i in range(100):
-      self.step(approach=MapApproach(True, 10, 2., 103. + i))
-      self.assertFalse(self.policy.armed)
-      self.assertFalse(self.policy.braking)
-
-  def test_older_map_observation_discards_qualification(self):
-    self.enter()
+  def test_older_observation_discards_qualification_without_grace(self):
+    self.arm()
     self.step(approach=MapApproach(True, 10, 50., 100.5))
     self.assertFalse(self.policy.armed)
-    self.assertFalse(self.policy.braking)
-
-  def test_junction_is_not_a_stop_line_model_can_stop_beyond_it(self):
-    self.arm(approach=MapApproach(True, 10, 5., 101.), model=model(brake=1.8))
-    for _ in range(10):
-      result = self.step(approach=MapApproach(True, 10, 5., 101.), model=model(brake=1.8))
-    self.assertEqual(result, (-1., False, True))
+    self.assertFalse(self.policy.active)
 
 
 class TestDistanceAndIntent(unittest.TestCase):
@@ -272,11 +315,11 @@ class TestDistanceAndIntent(unittest.TestCase):
 class TestMapFreshnessAndHUD(unittest.TestCase):
   def test_only_topological_junction_targets_arm_new_policy(self):
     for kind in ('stopSign', 'trafficLight', 'junction'):
-      msg = NS(kind=kind, nodeId=7, distance=50., gpsMonoTime=int(99e9), positionMonoTime=int(99e9))
+      msg = NS(kind=kind, nodeId=7, distance=50., gpsMonoTime=int(99e9), positionMonoTime=int(99e9), reason='target')
       self.assertEqual(map_approach(FakeSM(mapTrafficControl=msg), 100.).valid, kind == 'junction')
 
   def test_map_health_is_independent_of_speed_limit(self):
-    msg = NS(kind='junction', nodeId=7, distance=50., gpsMonoTime=int(99e9), positionMonoTime=int(99e9))
+    msg = NS(kind='junction', nodeId=7, distance=50., gpsMonoTime=int(99e9), positionMonoTime=int(99e9), reason='target')
     sm = FakeSM(mapTrafficControl=msg, mapSpeedLimit=NS())
     sm.valid['mapSpeedLimit'] = False
     self.assertEqual(map_approach(sm, 100.), MapApproach(True, 7, 50., 99.))
@@ -290,20 +333,35 @@ class TestMapFreshnessAndHUD(unittest.TestCase):
     self.assertFalse(map_approach(sm, 100.).valid)
     self.assertFalse(map_approach(FakeSM(), 100.).valid)
 
-  def test_only_junction_contribution_shows_amber(self):
-    policy = NS(armed=True, contributing=False, state='inRange')
+  def test_fresh_matching_interruption_is_the_only_holdable_missing_target(self):
+    for reason in ('noRoadMatch', 'roadAlignment', 'ambiguousRoad', 'ambiguousFork',
+                   'noPosition', 'gpsStale', 'cacheUnavailable', 'noJunction'):
+      msg = NS(kind='none', nodeId=0, distance=0., gpsMonoTime=0, positionMonoTime=0, reason=reason)
+      sm = FakeSM(mapTrafficControl=msg)
+      sm.valid['mapTrafficControl'] = False
+      approach = map_approach(sm, 100.)
+      self.assertFalse(approach.valid)
+      self.assertEqual(approach.can_hold, reason in ('noRoadMatch', 'roadAlignment', 'ambiguousRoad', 'ambiguousFork'))
+      self.assertFalse(map_approach(sm, 102.).can_hold)
+
+  def test_only_enabled_conditional_e2e_shows_orange(self):
+    policy = NS(armed=True, contributing=False, e2eEnabled=False, state='inRange')
     sm = FakeSM(longitudinalPlan=NS(conditionalExperimental=policy, e2eAssistActive=True),
                 selfdriveState=NS(conditionalExperimental=True, experimentalMode=False, enabled=True),
                 carControl=NS(longActive=True), carState=NS(gasPressed=False, brakePressed=False))
-    self.assertEqual(conditional_ring_state(sm, 1, 100.), 'inRange')
-    policy.contributing, policy.state = True, 'assisting'
-    self.assertEqual(conditional_ring_state(sm, 1, 100.), 'assisting')
+    self.assertEqual(conditional_ring_state(sm, 1, 100.), 'ready')
+    policy.e2eEnabled, policy.state = True, 'active'
+    self.assertEqual(conditional_ring_state(sm, 1, 100.), 'active')
     self.assertEqual(conditional_ring_state(sm, 1, 101.), 'ready')
     sm['carState'].gasPressed = True
-    self.assertEqual(conditional_ring_state(sm, 1, 100.), 'inRange')
+    self.assertEqual(conditional_ring_state(sm, 1, 100.), 'ready')
+    sm['carState'].gasPressed = False
+    sm['carState'].brakePressed = True
+    self.assertEqual(conditional_ring_state(sm, 1, 100.), 'ready')
+    sm['carState'].brakePressed = False
     sm['selfdriveState'].enabled = False
     sm.valid['carControl'] = False
-    self.assertEqual(conditional_ring_state(sm, 1, 100.), 'inRange')
+    self.assertEqual(conditional_ring_state(sm, 1, 100.), 'ready')
     sm['selfdriveState'].experimentalMode = True
     self.assertEqual(conditional_ring_state(sm, 1, 100.), 'ready')
 

@@ -1,4 +1,4 @@
-"""Map-gated E2E slowing. The map sizes an attention window, never a brake command."""
+"""A qualified junction enables the model candidate; the map never commands a stop."""
 import math
 from dataclasses import dataclass
 
@@ -7,10 +7,10 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 # Aggressive, standard, relaxed. These size entry distance only, not actuator limits.
 COMFORT_BRAKE = (2.2, 1.8, 1.4)  # m/s^2
 COMFORT_JERK = (1.2, 1.0, .8)  # m/s^3
-BRAKE_CONFIRM = .25
-GO_CONFIRM = .3
 RELEASE_JERK = 1.0
-PASS_DISTANCE = 12.0
+PASS_DISTANCE = 20.0  # Matches mapd's signed junction look-behind.
+MAP_GRACE = 2.25  # One missed GPS match plus confirmation of the next junction.
+MAP_GRACE_DISTANCE = 40.0
 
 
 def activation_distance(v_ego: float, a_ego: float, personality: int, actuator_delay: float) -> float:
@@ -40,6 +40,7 @@ class MapApproach:
   node_id: int = 0
   distance: float = 0.
   observation_time: float = 0.
+  can_hold: bool = False
 
 
 def map_approach(sm, now: float) -> MapApproach:
@@ -48,12 +49,19 @@ def map_approach(sm, now: float) -> MapApproach:
     return MapApproach()
   msg = sm[service]
   times = (sm.recv_time[service], sm.logMonoTime[service] * 1e-9)
-  if (not sm.valid[service] or not all(0 <= now - t <= 1. for t in times) or
-      not 0 <= now - msg.gpsMonoTime * 1e-9 <= 3. or
+  if not all(0 <= now - t <= 1. for t in times):
+    return MapApproach()
+  # mapd reports noRoadMatch with an invalid match and zero position fields.
+  # Only a fresh, explicit matching interruption may retain an OLD approach;
+  # the policy also bounds age of the last validated real GPS observation.
+  can_hold = msg.reason in ('noRoadMatch', 'roadAlignment', 'ambiguousRoad', 'ambiguousFork')
+  if not sm.valid[service]:
+    return MapApproach(can_hold=can_hold)
+  if (not 0 <= now - msg.gpsMonoTime * 1e-9 <= 3. or
       not 0 <= now - msg.positionMonoTime * 1e-9 <= 3.):
     return MapApproach()
   if str(msg.kind) == 'none':
-    return MapApproach(valid=True)
+    return MapApproach(valid=True, observation_time=msg.gpsMonoTime * 1e-9, can_hold=can_hold)
   if str(msg.kind) != 'junction' or msg.nodeId == 0 or not math.isfinite(msg.distance):
     return MapApproach()
   return MapApproach(True, msg.nodeId, msg.distance, msg.gpsMonoTime * 1e-9)
@@ -108,7 +116,10 @@ class ConditionalExperimental:
     self._clear_assistance()
     self.target_id = self.candidate_id = self.candidate_samples = 0
     self.passed_id = 0
-    self.last_observation = 0.
+    self.last_observation = self.last_position_observation = 0.
+    self.last_qualified_time = 0.
+    self.last_update_time = None
+    self.gap_time = self.gap_distance = 0.
     self.state, self.reason = 'off', 'disabled'
     self.activation_distance = self.target_distance = 0.
     self.activation_speed = 0.
@@ -116,11 +127,66 @@ class ConditionalExperimental:
     self.map_valid = False
 
   def _clear_assistance(self):
-    self.braking = self.contributing = False
-    self.brake_time = self.go_time = 0.
+    self.active = self.contributing = self.stop_requested = False
     self.accel_limit = None
 
-  def update(self, *, enabled, eligible, approach, model, v_ego, v_set, personality,
+  def _update_approach(self, approach, now, v_ego):
+    elapsed = 0. if self.last_update_time is None else now - self.last_update_time
+    self.last_update_time = now
+    self.map_valid = approach.valid
+    has_target = approach.valid and approach.node_id != 0
+    regressed = has_target and approach.observation_time < self.last_observation
+    if approach.valid:
+      self.last_position_observation = max(self.last_position_observation, approach.observation_time)
+    qualified = False
+    self.reason = 'noTarget' if approach.valid else 'mapLost'
+    if has_target:
+      if approach.node_id != self.candidate_id or regressed:
+        self.candidate_id, self.candidate_samples = approach.node_id, 1
+        self.last_observation = approach.observation_time
+      elif approach.observation_time > self.last_observation:
+        self.candidate_samples += 1
+        self.last_observation = approach.observation_time
+      if approach.node_id == self.passed_id and approach.distance > max(60., self.activation_distance):
+        self.passed_id = 0
+      if self.armed and approach.node_id == self.target_id and approach.distance < -PASS_DISTANCE:
+        self.passed_id = approach.node_id
+      in_range = 0 <= approach.distance <= self.activation_distance and approach.node_id != self.passed_id
+      # An established approach stays qualified while slowing or changing SET.
+      same_approach = self.armed and approach.node_id == self.target_id and approach.distance >= -PASS_DISTANCE
+      qualified = not regressed and (same_approach or self.candidate_samples >= 2 and in_range)
+      if qualified:
+        self.armed, self.target_id = True, approach.node_id
+        self.target_distance = approach.distance
+        self.reason = 'junction'
+      else:
+        self.reason = ('targetPassed' if approach.node_id == self.passed_id else
+                       'targetUnconfirmed' if self.candidate_samples < 2 else 'outsideRange')
+    else:
+      in_range = False
+
+    if qualified:
+      self.gap_time = self.gap_distance = 0.
+      self.last_qualified_time = now
+    else:
+      self.gap_time = now - self.last_qualified_time
+      self.gap_distance += max(v_ego, 0.) * elapsed
+      # Keep the OLD qualified window while a nearby successor confirms, or
+      # through an explicit matching interruption. Candidate changes never
+      # refresh this budget. No grace for stale data or a definite clear road.
+      hold = (self.armed and not regressed and (in_range or approach.can_hold) and
+              self.gap_time <= MAP_GRACE and self.gap_distance <= MAP_GRACE_DISTANCE and
+              0 <= now - self.last_position_observation <= 3.)
+      if hold:
+        self.reason = 'junctionHandoff' if has_target else 'mapHold'
+      else:
+        self.armed = False
+        self.target_id = 0
+        self.target_distance = approach.distance if has_target else 0.
+        if not has_target:
+          self.candidate_id = self.candidate_samples = 0
+
+  def update(self, *, enabled, eligible, approach, now, model, v_ego, v_set, personality,
              regular_accel, regular_stop, e2e_accel, e2e_stop):
     if not enabled:
       self.reset()
@@ -129,100 +195,42 @@ class ConditionalExperimental:
       self.reset()
       self.state, self.reason = 'ready', 'invalidSetSpeed'
       return regular_accel, False, False
-    # The cruise set speed sizes this awareness window. Actual deceleration
-    # cannot make the threshold retreat as we approach a junction.
     self.activation_speed = v_set
     self.activation_distance = activation_distance(v_set, 0., personality, self.actuator_delay)
     self.intent = model_intent(model, v_ego)
-    if self.activation_distance <= 0 or not math.isfinite(v_ego) or not -.1 <= v_ego <= 75:
+    if (self.activation_distance <= 0 or not math.isfinite(v_ego) or not -.1 <= v_ego <= 75 or not math.isfinite(now) or
+        self.last_update_time is not None and now < self.last_update_time):
       self.reset()
       self.state, self.reason = 'ready', 'invalidKinematics'
       return regular_accel, False, False
 
-    self.map_valid = approach.valid
     can_assist = eligible and self.intent.valid and all(math.isfinite(x) for x in (regular_accel, e2e_accel))
-    holding = can_assist and self.braking and v_ego < .3 and e2e_stop
-    self.reason = 'armed' if self.armed else 'noTarget'
-    has_target = approach.valid and approach.node_id != 0
-    if has_target:
-      self.target_distance = approach.distance
-      if approach.node_id != self.candidate_id or approach.observation_time < self.last_observation:
-        self.reason = 'targetUnconfirmed'
-        self.armed = False
-        self.candidate_id, self.candidate_samples = approach.node_id, 1
-        self.last_observation = approach.observation_time
-        self.brake_time = self.go_time = 0.
-        if not holding:
-          self.braking = False
-      elif approach.observation_time > self.last_observation:
-        self.candidate_samples += 1
-        self.last_observation = approach.observation_time
-      if self.armed and (approach.node_id != self.target_id or approach.distance < -PASS_DISTANCE):
-        self.armed = False
-        self.reason = 'targetPassed' if approach.node_id == self.target_id else 'targetChanged'
-        if approach.node_id == self.target_id:
-          self.passed_id = approach.node_id
-      if approach.node_id == self.passed_id and approach.distance > max(60., self.activation_distance):
-        self.passed_id = 0  # a genuinely new approach after leaving the junction
-      if (not self.armed and approach.node_id != self.passed_id and self.candidate_samples >= 2 and
-          0 <= approach.distance <= self.activation_distance):
-        self.armed, self.target_id = True, approach.node_id
-        self.reason = 'armed'
-      elif not self.armed and self.reason == 'noTarget':
-        self.reason = 'targetPassed' if approach.node_id == self.passed_id else 'targetUnconfirmed' if self.candidate_samples < 2 else 'outsideRange'
-    else:
-      self.armed = False
-      self.candidate_id = self.candidate_samples = 0
-      self.target_id = 0
-      self.target_distance = 0.
-      self.reason = 'mapLost' if not approach.valid else 'noTarget'
-
-    # Cyan is map awareness. A pedal override, disengagement, or unusable model
-    # clears assistance immediately without erasing a qualified mapped approach.
+    # A stop already requested by E2E may remain held at rest across map loss.
+    # Loss of the map cannot create a new stop request.
+    holding = can_assist and self.stop_requested and v_ego < .3 and e2e_stop
+    self._update_approach(approach, now, v_ego)
     if not can_assist:
       self._clear_assistance()
-      if not self.armed:
-        self.target_id = 0
       self.state = 'inRange' if self.armed else 'ready'
       self.reason = 'inactive' if not eligible else 'invalidModel'
       return regular_accel, False, False
 
-    # Latch range eligibility through deceleration; recomputing a shorter
-    # stopping distance must not chatter between ordinary and conditional mode.
-    if not self.armed and not holding:
-      self.braking = False
-      self.brake_time = self.go_time = 0.
-      self.target_id = 0
-    elif self.armed:
-      # A split/merge node is an attention landmark, not a stop line. The
-      # model's stop may legitimately lie beyond it at the next signal/queue.
-      slowing = self.intent.slowing and e2e_accel <= -.2 and e2e_accel <= regular_accel - .15
-      stop_at_rest = e2e_stop and v_ego < .3 and e2e_accel < .1
-      self.brake_time = self.brake_time + self.dt if slowing or stop_at_rest else 0.
-      if self.brake_time >= BRAKE_CONFIRM:
-        self.braking = True
-      elif self.brake_time > 0 and not self.braking:
-        self.reason = 'confirmingModel'
-      go = not e2e_stop and (e2e_accel > .1 or not self.intent.slowing and e2e_accel > -.05)
-      self.go_time = self.go_time + self.dt if go else 0.
-      if self.go_time >= GO_CONFIRM:
-        self.braking = False
-        self.reason = 'modelGo'
-
-    junction_stop = self.braking and e2e_stop
-    if self.braking:
-      target = min(e2e_accel, 0.)
-      self.reason = 'holdingStop' if junction_stop and v_ego < .3 else 'slowing'
-    else:
-      target = regular_accel
-    # Preserve stronger regular braking, and soften only the return to gas.
+    # Map qualification directly enables the E2E candidate, including a go or
+    # positive-acceleration proposal. No second model-slowing confirmation gate.
+    self.active = self.armed or holding
+    junction_stop = self.active and e2e_stop
+    target = min(regular_accel, e2e_accel) if self.active else regular_accel
+    # Preserve stronger regular braking and soften only the return to gas.
     if self.accel_limit is not None:
       target = min(target, self.accel_limit + RELEASE_JERK * self.dt)
     selected = min(regular_accel, target)
     self.contributing = selected < regular_accel - .01 or junction_stop and not regular_stop
-    self.accel_limit = selected if selected < regular_accel or self.braking and self.accel_limit is not None else None
-    self.state = 'assisting' if self.contributing and (selected < 0 or junction_stop) else 'inRange' if self.armed else 'ready'
-    if self.contributing and not self.braking:
+    self.accel_limit = selected if selected < regular_accel else None
+    self.stop_requested = junction_stop
+    self.state = 'active' if self.active else 'inRange' if self.armed else 'ready'
+    if holding and not self.armed:
+      self.reason = 'holdingStop'
+    elif self.contributing and not self.active:
       self.reason = 'releasing'
     return selected, junction_stop, self.contributing
 
@@ -241,3 +249,4 @@ class ConditionalExperimental:
     msg.mapValid = self.map_valid
     msg.armed = self.armed
     msg.contributing = self.contributing
+    msg.e2eEnabled = self.active

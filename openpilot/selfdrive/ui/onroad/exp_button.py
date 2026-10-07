@@ -57,7 +57,7 @@ class ExpButton(Widget):
       state = conditional_ring_state(ui_state.sm, ui_state.started_frame, time.monotonic())
       color = self._white_color
       if state != 'ready':
-        color = rl.Color(255, 190, 0, self._white_color.a) if state == 'assisting' else rl.Color(0, 220, 255, self._white_color.a)
+        color = rl.Color(255, 152, 0, self._white_color.a)
         radius = self._rect.width * .49
         width = self._rect.width * .04
         rl.draw_ring(rl.Vector2(center_x, center_y), radius - width, radius, 0, 360, 96, color)

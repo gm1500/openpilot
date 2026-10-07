@@ -73,11 +73,13 @@ struct ConditionalExperimentalState {
   armed @11 :Bool;
   contributing @12 :Bool; # actual additional junction slowing/stop constraint
   activationSpeed @13 :Float32; # current valid cruise set speed used for range, m/s; zero when unavailable
+  e2eEnabled @14 :Bool; # qualified conditional model candidate, independent of contribution
   enum State {
     off @0;
     ready @1;
     inRange @2;
-    assisting @3;
+    assisting @3; # legacy slowing-only state
+    active @4;
   }
 }
 
