@@ -127,9 +127,29 @@ class TestTrafficControls(unittest.TestCase):
     self.assertIsNone(self.target([r], replace(fix, latitude=point(0, 75)[0])))
 
   def test_only_requested_control_types(self):
-    for tags in ({'highway': 'give_way'}, {'railway': 'level_crossing'}, {'highway': 'crossing', 'crossing': 'traffic_signals'}):
+    for tags in ({'highway': 'give_way'}, {'railway': 'level_crossing'}, {'highway': 'crossing', 'crossing': 'uncontrolled'},
+                 {'highway': 'crossing', 'crossing': 'marked'}, {'highway': 'footway', 'crossing': 'traffic_signals'}):
       r = road([(0, -100), (0, 50), (0, 200)], [1, 2, 3], {2: tags}, oneway='yes')
       self.assertIsNone(self.target([r]))
+
+  def test_signal_controlled_crossing_on_two_way_road(self):
+    tags = {'highway': 'crossing', 'crossing': 'traffic_signals', 'crossing:markings': 'zebra'}
+    r = road([(0, -100), (0, 50), (0, 200)], [1, 2, 3], {2: tags})
+    reverse = replace(self.fix, latitude=point(0, 100)[0], bearing=180.)
+    for fix in (self.fix, reverse):
+      result = self.target([r], fix)
+      self.assertEqual(result.kind, 'trafficLight')
+      self.assertEqual(result.node_id, 2)
+      self.assertAlmostEqual(result.distance, 50., places=3)
+    directed = replace(r, control_tags={2: {**tags, 'traffic_signals:direction': 'backward'}})
+    self.assertIsNone(self.target([directed]))
+    self.assertIsNotNone(self.target([directed], reverse))
+
+  def test_signal_controlled_crossing_must_belong_to_current_road(self):
+    main = road([(0, -100), (0, 50), (0, 200)], [1, 2, 3])
+    side = road([(-100, 50), (0, 50), (100, 50)], [4, 2, 5],
+                {4: {'highway': 'crossing', 'crossing': 'traffic_signals'}}, way_id=2)
+    self.assertIsNone(self.target([main, side]))
 
   def test_optional_provider_rejects_stale_cache_and_estimated_position(self):
     r = road([(0, -100), (0, 50), (0, 200)], [1, 2, 3], {2: {'highway': 'stop', 'direction': 'forward'}})
@@ -156,19 +176,23 @@ class TestTrafficControls(unittest.TestCase):
       {'type': 'way', 'id': 11, 'nodes': [1, 2, 3], 'geometry': [{'lat': y, 'lon': 0} for y in (-.001, .0005, .002)],
        'tags': {'highway': 'residential'}},
       {'type': 'node', 'id': 2, 'lat': .0005, 'lon': 0, 'tags': {'highway': 'stop', 'direction': 'forward'}},
-      {'type': 'node', 'id': 999, 'tags': {'highway': 'traffic_signals'}},
+      {'type': 'node', 'id': 999, 'tags': {'highway': 'crossing', 'crossing': 'traffic_signals'}},
     ]}
     response = Mock()
     response.iter_content.return_value = [json.dumps(payload).encode()]
     context = Mock()
     context.__enter__ = Mock(return_value=response)
     context.__exit__ = Mock(return_value=False)
-    with patch.object(osm.requests, 'post', return_value=context) as post:
-      roads = osm.fetch_roads(self.fix)
-    self.assertIn('node(w.roads)', post.call_args.kwargs['data']['data'])
-    self.assertEqual(set(roads[0].control_tags), {2})
-    self.assertEqual(roads[0].node_ids, (1, 2, 3))
-    self.assertIsNotNone(self.target(roads))
+    for tags in ({'highway': 'stop', 'direction': 'forward'}, {'highway': 'crossing', 'crossing': 'traffic_signals'}):
+      with self.subTest(tags=tags):
+        payload['elements'][1]['tags'] = tags
+        response.iter_content.return_value = [json.dumps(payload).encode()]
+        with patch.object(osm.requests, 'post', return_value=context) as post:
+          roads = osm.fetch_roads(self.fix)
+        self.assertIn('node(w.roads)["highway"="crossing"]["crossing"="traffic_signals"]', post.call_args.kwargs['data']['data'])
+        self.assertEqual(set(roads[0].control_tags), {2})
+        self.assertEqual(roads[0].node_ids, (1, 2, 3))
+        self.assertIsNotNone(self.target(roads))
 
 
 if __name__ == '__main__':

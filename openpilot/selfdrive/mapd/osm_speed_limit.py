@@ -200,6 +200,14 @@ def allowed_directions(road: Road) -> tuple[bool, ...]:
   return (True,) if oneway in ('yes', '1', 'true') else (False,) if oneway == '-1' else (True, False)
 
 
+def control_kind(tags: dict[str, str]) -> str | None:
+  if tags.get('highway') == 'stop':
+    return 'stopSign'
+  if tags.get('highway') == 'traffic_signals' or (tags.get('highway') == 'crossing' and tags.get('crossing') == 'traffic_signals'):
+    return 'trafficLight'
+  return None
+
+
 class RoadTracker:
   """Compare bounded connected paths across fresh fixes before selecting a limit."""
   def __init__(self):
@@ -449,12 +457,17 @@ class RoadTracker:
 
   def _control_applies(self, road: Road, node: NodeKey, forward: bool) -> bool:
     tags = road.control_tags.get(node, {})
-    kind = tags.get('highway')
-    if kind not in ('stop', 'traffic_signals'):
+    kind = control_kind(tags)
+    if kind is None:
       return False
-    direction = tags.get('stop:direction' if kind == 'stop' else 'traffic_signals:direction', tags.get('direction', ''))
+    direction = tags.get('stop:direction' if kind == 'stopSign' else 'traffic_signals:direction', tags.get('direction', ''))
     if direction:
       return direction == 'both' or direction == ('forward' if forward else 'backward')
+    # This node marks the signal-controlled crossing on the drivable way,
+    # not a particular signal head. Both approaches need map awareness unless
+    # explicitly restricted. Footway-only nodes are excluded during the fetch.
+    if tags.get('highway') == 'crossing':
+      return True
     if len(allowed_directions(road)) == 1:
       return True
     # A central junction signal applies to the incoming roads. Undirected
@@ -466,7 +479,7 @@ class RoadTracker:
         if key == node:
           neighbours.update(nodes[max(0, index - 1):index])
           neighbours.update(nodes[index + 1:index + 2])
-    return len(neighbours) >= 3 and (kind == 'traffic_signals' or tags.get('stop') == 'all')
+    return len(neighbours) >= 3 and (kind == 'trafficLight' or tags.get('stop') == 'all')
 
   def _junction_bearing(self, road: Road, forward: bool, along: float, outgoing: bool) -> float | None:
     """Use up to 15 m of geometry on the requested side of a connected node."""
@@ -517,7 +530,7 @@ class RoadTracker:
         if total > maximum:
           return None, 'lookaheadLimit'
         if self._control_applies(road, node, forward):
-          kind = 'stopSign' if road.control_tags[node]['highway'] == 'stop' else 'trafficLight'
+          kind = control_kind(road.control_tags[node])
           return TrafficControl(node, road.way_id, kind, total), 'target'
         if node in road.control_tags:
           reason = 'controlDirection'
@@ -617,7 +630,8 @@ class RoadTracker:
 def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
   query = f'[out:json][timeout:10][maxsize:16777216];way(around:{QUERY_RADIUS:.0f},{fix.latitude:.6f},{fix.longitude:.6f})'
   query += f'["highway"~"^({"|".join(ROAD_TYPES)})$"]->.roads;.roads out body geom;'
-  query += 'node(w.roads)["highway"~"^(stop|traffic_signals)$"];out body;'
+  query += '(node(w.roads)["highway"~"^(stop|traffic_signals)$"];'
+  query += 'node(w.roads)["highway"="crossing"]["crossing"="traffic_signals"];);out body;'
   deadline = time.monotonic() + 20
   # One request at a time, bounded response size, no identifiers or route history.
   with requests.post(OVERPASS_URL, data={"data": query}, timeout=(3.05, 12), stream=True,
@@ -636,7 +650,7 @@ def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
   roads = []
   controls = {element['id']: element['tags'] for element in data['elements']
               if element.get('type') == 'node' and isinstance(element.get('id'), int) and
-              isinstance(element.get('tags'), dict) and element['tags'].get('highway') in ('stop', 'traffic_signals') and
+              isinstance(element.get('tags'), dict) and control_kind(element['tags']) is not None and
               all(isinstance(k, str) and isinstance(v, str) for k, v in element['tags'].items())}
   for element in data["elements"]:
     tags = element.get("tags", {})

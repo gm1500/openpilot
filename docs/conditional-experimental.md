@@ -55,8 +55,12 @@ limits or force the model to deliver a comfortable stop.
 
 ## OSM targeting
 
-Fetch `highway=stop` and `highway=traffic_signals` nodes belonging to the cached
-drivable ways. Measure distance along the matched directed road and connected
+Fetch `highway=stop`, `highway=traffic_signals`, and
+`highway=crossing` + `crossing=traffic_signals` nodes belonging to the cached
+drivable ways. Signal-controlled crossing nodes use the traffic-light target
+type; they describe the crossing rather than one signal head, so both road
+approaches qualify unless explicit direction tags restrict them.
+Measure distance along the matched directed road and connected
 continuations, up to 1,000 m and 16 ways. A side street does not block a clear
 straight continuation: its heading change must be at most 25°, and at least 30°
 better than every alternative. Shallow splits and ambiguous forks remain blocked;
@@ -67,8 +71,8 @@ cross-street signs, and grade-separated crossings are not radial targets.
 Respect `direction`, `stop:direction`, and `traffic_signals:direction`. Accept
 undirected controls on one-way roads, central junction signals, and explicit
 all-way stops. Ambiguous undirected two-way approach signs are skipped. Separate
-roadside sign objects, pedestrian-only crossing tags, yields, ramps, and railway
-crossings are outside this POC.
+roadside sign objects, footway-only signals, unsignalized crossings, yields,
+ramps, and railway crossings are outside this POC.
 
 Require two advancing GPS observations of the same target before arming. Speed
 limit availability is independent. Both message and GPS freshness are checked;
@@ -119,27 +123,36 @@ Focused tests cover the stopping-distance calculation against numerical
 integration, profile ordering, map direction/topology, stale/estimated positions,
 mode cycling, model confirmation, holding/release, target passage, overrides,
 and HUD contribution semantics. Existing map/SLC/lead regression suites also run.
-Local result: **189 tests and 33 subtests passed**, plus lint and Python syntax
+Local result: **191 tests and 35 subtests passed**, plus lint and Python syntax
 checks. The map regressions used the Python reference transformations in place
 of the unavailable native extension.
 An isolated harness exercises the real planner update/publish with real Cap'n
 Proto messages and substitutes the native IPC/MPC dependencies. Another checks
 the actual button's rapid taps and captures its drawing primitives at both sizes.
 
-Recorded-input replay of five first-drive segments covers 5,987 planner frames.
-With the recorded map targets held fixed, the updated policy restores 104 frames
-of map-only cyan during driver intervention, with no change to the selected
-acceleration. This replay cannot validate newly discoverable map targets: the
-logs contain the selected target, not the downloaded OSM road/node snapshot, and
-live OSM retrieval was unavailable during this investigation. Straight-road
-lookahead is covered by topology tests, including continued rejection of shallow
-forks, cross-street controls, disconnected geometry, and competing parallel roads.
+Recorded-input replay of eight drive segments covers 9,581 planner frames using
+a freshly retrieved OSM snapshot. The old lookup reproduces the three latest
+bookmarked misses; the updated lookup finds signal-controlled crossing nodes on
+the matched road and reaches `inRange` at all three (approximately 32 m, 35 m,
+and 47 m from the respective crossings). Model go requests keep these cases cyan
+without extra braking. The replay changes no selected acceleration in these
+recorded segments. The live production query also returns all three target nodes
+within the existing response-size limit. Older bookmarks outside the calculated
+range, at ambiguous forks, or without a current road match remain unarmed.
+
+The replay supplies the public map snapshot directly rather than reproducing
+the device's original download timing/cache contents; the original OSM response
+is not in the logs. Road matches agree with the logs on 98–100% of map frames
+(rounded), including all three latest bookmarked locations. Topology tests also
+cover continued rejection of shallow forks, cross-street controls, disconnected
+geometry, and competing parallel roads.
 
 These are offline checks, not a full device build or closed-loop road validation.
 OSM completeness and model perception limit coverage. OSM supplies no live signal
 phase here, and this helper cannot guarantee a stop or determine right of way.
 
-Tag references: [stop nodes](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dstop)
-and [traffic signals](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtraffic_signals).
+Tag references: [stop nodes](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dstop),
+[traffic signals](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtraffic_signals),
+and [signal-controlled crossings](https://wiki.openstreetmap.org/wiki/Tag:crossing%3Dtraffic_signals).
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
 under the [ODbL](https://opendatacommons.org/licenses/odbl/).
