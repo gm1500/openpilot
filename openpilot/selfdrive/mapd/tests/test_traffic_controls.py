@@ -103,6 +103,46 @@ class TestTrafficControls(unittest.TestCase):
     self.assertIsNone(tracker.traffic_control(match))
     self.assertEqual(tracker.control_reason, 'ambiguousFork')
 
+  def test_named_through_road_continues_past_shallow_exit_links(self):
+    # The recorded misses were 1/21, 0/14 and 4/11 degree through/ramp splits.
+    for through_angle, link_angle in ((1., 21.), (0., 14.), (-4., 11.)):
+      for reverse in (False, True):
+        with self.subTest(through=through_angle, link=link_angle, reverse=reverse):
+          first = road([(0, -100), (0, 50)], [1, 2], highway='secondary', name='Main Road', oneway='yes')
+          x, y = 100 * math.sin(math.radians(through_angle)), 50 + 100 * math.cos(math.radians(through_angle))
+          points, nodes = [(0, 50), (x, y)], [2, 3]
+          if reverse:
+            points.reverse()
+            nodes.reverse()
+          onward = road(points, nodes, {3: {'highway': 'traffic_signals'}}, way_id=2,
+                        highway='secondary', name='Main Road', oneway='-1' if reverse else 'yes')
+          link = road([(0, 50), (100 * math.sin(math.radians(link_angle)), 50 + 100 * math.cos(math.radians(link_angle)))],
+                      [2, 4], way_id=3, highway='motorway_link', oneway='yes')
+          result = self.target([first, onward, link])
+          self.assertEqual(result.node_id, 3)
+          self.assertAlmostEqual(result.distance, 150., places=3)
+          # After the ramp is taken, its own directed path cannot borrow the light.
+          tracker = osm.RoadTracker()
+          tracker._set_roads((first, onward, link))
+          ramp_match = osm.RoadMatch(link, 0., None, 0., 60., True, link.geometry[0], link_angle)
+          self.assertIsNone(tracker.traffic_control(ramp_match))
+
+  def test_exit_link_exception_requires_name_class_and_clear_geometry(self):
+    first = road([(0, -100), (0, 50)], [1, 2], highway='secondary', name='Main Road')
+    onward = road([(0, 50), (0, 150)], [2, 3], {3: {'highway': 'traffic_signals', 'direction': 'forward'}},
+                  way_id=2, highway='secondary', name='Main Road')
+    link = road([(0, 50), (20, 150)], [2, 4], way_id=3, highway='secondary_link', oneway='yes')
+    self.assertIsNotNone(self.target([first, onward, link]))
+    for tags in ({'name': 'Other Road'}, {'name': ''}, {'highway': 'primary'}, {'highway': 'secondary_link'}):
+      with self.subTest(tags=tags):
+        self.assertIsNone(self.target([first, replace(onward, tags={**onward.tags, **tags}), link]))
+    self.assertIsNone(self.target([replace(first, tags={**first.tags, 'name': ''}), onward, link]))
+    self.assertIsNone(self.target([first, onward, replace(link, tags={**link.tags, 'highway': 'secondary', 'name': 'Main Road'})]))
+    # An almost parallel ramp, or a through road bending too far, is unresolved.
+    self.assertIsNone(self.target([first, onward, replace(link, geometry=(point(0, 50), point(5, 150)))]))
+    bent = replace(onward, geometry=(point(0, 50), point(-25, 150)))
+    self.assertIsNone(self.target([first, bent, link]))
+
   def test_control_rejection_reason_distinguishes_direction_and_missing_data(self):
     tracker = osm.RoadTracker()
     for tags, reason in (({'highway': 'stop'}, 'controlDirection'), ({}, 'noControl')):

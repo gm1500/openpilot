@@ -88,7 +88,11 @@ subtypes, and explicitly inactive controls are outside this junction POC.
 Measure distance along the matched directed road and connected
 continuations, up to 1,000 m and 16 ways. A side street does not block a clear
 straight continuation: its heading change must be at most 25°, and at least 30°
-better than every alternative. Shallow splits and ambiguous forks remain blocked;
+better than every alternative. A narrow exception follows a named through road
+past shallow exit links: the best-aligned continuation must retain the exact road
+name and highway class, bend at most 10°, beat every alternative by at least 5°,
+and every alternative must be explicitly tagged as a `*_link` road. Ordinary
+shallow splits, unnamed continuations and ambiguous forks remain blocked;
 the lookup does not select a turn at a branching junction. A control at the
 junction itself can qualify. Nearby parallel roads,
 cross-street signs, and grade-separated crossings are not radial targets.
@@ -153,7 +157,7 @@ Focused tests cover the stopping-distance calculation against numerical
 integration, profile ordering, map direction/topology, stale/estimated positions,
 mode cycling, model confirmation, holding/release, target passage, overrides,
 and HUD contribution semantics. Existing map/SLC/lead regression suites also run.
-Local result: **200 tests and 122 subtests passed**, plus lint and Python syntax
+Local result: **202 tests and 131 subtests passed**, plus lint and Python syntax
 checks. The map regressions used the Python reference transformations in place
 of the unavailable native extension.
 An isolated harness exercises the real planner update/publish with real Cap'n
@@ -185,6 +189,19 @@ qualify while the north/south arms remain rejected. No selected acceleration
 changes in these eight recorded-input segments. Added tests cover sign-code
 lists, directional overrides, named crossings, explicit exclusions, all-way
 beacons, all 16 compass points, ambiguous arms, and way-end stop isolation.
+
+The exit-link correction was replayed against a separately downloaded city-wide
+OSM snapshot for three further segments. The preceding code reproduces their
+late target acquisition. The correction follows all three through approaches
+past the mapped ramps; two activate cyan earlier (about 110 m instead of 44 m,
+and 92 m instead of 19 m). The third now acquires the target early but still
+does not arm until 16 m: deceleration shrinks its activation threshold before
+the reported target distance enters it. This is a remaining range/position-timing
+limitation, not a claim that every late indication is resolved. A brief road-match
+dropout also remains in the first improved approach. These three segments plus
+the preceding eight total 13,178 planner frames, with no selected acceleration
+changes from the exit-link correction. The replay retains the recorded GPS
+output-selection behavior and does not emulate original download timing.
 
 These are offline checks, not a full device build or closed-loop road validation.
 OSM completeness and model perception limit coverage. OSM supplies no live signal

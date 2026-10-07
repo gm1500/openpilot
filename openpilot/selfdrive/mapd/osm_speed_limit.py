@@ -533,7 +533,19 @@ class RoadTracker:
         return None
       ranked.append((abs((bearing - incoming + 180) % 360 - 180), (exit_road, direction, entry)))
     ranked.sort(key=lambda item: item[0])
-    return ranked[0][1] if ranked[0][0] <= 25 and ranked[1][0] - ranked[0][0] >= 30 else None
+    if ranked[0][0] <= 25 and ranked[1][0] - ranked[0][0] >= 30:
+      return ranked[0][1]
+    # A shallow exit ramp is not an equally plausible continuation of the
+    # named through road. Retain that road only with corroborating geometry,
+    # name and class, and only when every alternative is explicitly a link.
+    # Ordinary shallow forks (including two named through ways) stay blocked.
+    onward = ranked[0][1][0]
+    name, highway = road.tags.get('name'), road.tags.get('highway', '')
+    if (name and not highway.endswith('_link') and onward.tags.get('name') == name and
+        onward.tags.get('highway') == highway and ranked[0][0] <= 10 and ranked[1][0] - ranked[0][0] >= 5 and
+        all(r.tags.get('highway', '').endswith('_link') for _, (r, _, _) in ranked[1:])):
+      return ranked[0][1]
+    return None
 
   def _next_control(self, match: RoadMatch, maximum: float = 1000.) -> tuple[TrafficControl | None, str]:
     road, forward, along = match.road, match.forward, match.along
