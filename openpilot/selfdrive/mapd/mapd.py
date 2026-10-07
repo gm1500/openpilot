@@ -40,8 +40,8 @@ def main():
       msg.mapSpeedLimit.headingValid = fix.bearing is not None
       msg.mapSpeedLimit.distanceAhead = ahead
     pm.send('mapSpeedLimit', msg)
-    # Independent validity: an untagged speed limit must not hide a well-matched
-    # traffic control, and optional map health never disables ordinary control.
+    # Independent validity: a missing speed limit must not hide a connected
+    # junction, and optional map health never disables ordinary control.
     control_msg = messaging.new_message('mapTrafficControl')
     control_msg.valid = sample is not None and provider.control_match is not None
     control_msg.mapTrafficControl.reason = provider.control_reason

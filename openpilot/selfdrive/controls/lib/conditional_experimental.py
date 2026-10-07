@@ -54,7 +54,7 @@ def map_approach(sm, now: float) -> MapApproach:
     return MapApproach()
   if str(msg.kind) == 'none':
     return MapApproach(valid=True)
-  if str(msg.kind) not in ('stopSign', 'trafficLight') or msg.nodeId == 0 or not math.isfinite(msg.distance):
+  if str(msg.kind) != 'junction' or msg.nodeId == 0 or not math.isfinite(msg.distance):
     return MapApproach()
   return MapApproach(True, msg.nodeId, msg.distance, msg.gpsMonoTime * 1e-9)
 
@@ -111,6 +111,7 @@ class ConditionalExperimental:
     self.last_observation = 0.
     self.state, self.reason = 'off', 'disabled'
     self.activation_distance = self.target_distance = 0.
+    self.activation_speed = 0.
     self.intent = ModelIntent()
     self.map_valid = False
 
@@ -119,14 +120,21 @@ class ConditionalExperimental:
     self.brake_time = self.go_time = 0.
     self.accel_limit = None
 
-  def update(self, *, enabled, eligible, approach, model, v_ego, a_ego, personality,
+  def update(self, *, enabled, eligible, approach, model, v_ego, v_set, personality,
              regular_accel, regular_stop, e2e_accel, e2e_stop):
     if not enabled:
       self.reset()
       return regular_accel, False, False
-    self.activation_distance = activation_distance(v_ego, a_ego, personality, self.actuator_delay)
+    if v_set is None or not math.isfinite(v_set) or not 0 < v_set <= 75:
+      self.reset()
+      self.state, self.reason = 'ready', 'invalidSetSpeed'
+      return regular_accel, False, False
+    # The cruise set speed sizes this awareness window. Actual deceleration
+    # cannot make the threshold retreat as we approach a junction.
+    self.activation_speed = v_set
+    self.activation_distance = activation_distance(v_set, 0., personality, self.actuator_delay)
     self.intent = model_intent(model, v_ego)
-    if self.activation_distance <= 0:
+    if self.activation_distance <= 0 or not math.isfinite(v_ego) or not -.1 <= v_ego <= 75:
       self.reset()
       self.state, self.reason = 'ready', 'invalidKinematics'
       return regular_accel, False, False
@@ -186,8 +194,9 @@ class ConditionalExperimental:
       self.brake_time = self.go_time = 0.
       self.target_id = 0
     elif self.armed:
-      plausible_stop = self.intent.stop_distance < 0 or self.intent.stop_distance <= max(0., approach.distance) + max(20., .25 * approach.distance)
-      slowing = self.intent.slowing and plausible_stop and e2e_accel <= -.2 and e2e_accel <= regular_accel - .15
+      # A split/merge node is an attention landmark, not a stop line. The
+      # model's stop may legitimately lie beyond it at the next signal/queue.
+      slowing = self.intent.slowing and e2e_accel <= -.2 and e2e_accel <= regular_accel - .15
       stop_at_rest = e2e_stop and v_ego < .3 and e2e_accel < .1
       self.brake_time = self.brake_time + self.dt if slowing or stop_at_rest else 0.
       if self.brake_time >= BRAKE_CONFIRM:
@@ -223,6 +232,7 @@ class ConditionalExperimental:
     msg.targetId = self.target_id
     msg.targetDistance = self.target_distance
     msg.activationDistance = self.activation_distance
+    msg.activationSpeed = self.activation_speed
     msg.modelStopDistance = self.intent.stop_distance
     msg.regularAcceleration = regular_accel
     msg.modelAcceleration = e2e_accel

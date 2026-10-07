@@ -171,7 +171,10 @@ class LongitudinalPlanner:
                str(sm['carState'].gearShifter) in ('drive', 'low', 'sport')),
       eligible=assist_eligible and str(sm['carState'].gearShifter) in ('drive', 'low', 'sport'),
       approach=map_approach(sm, time.monotonic()), model=sm['modelV2'],
-      v_ego=v_ego, a_ego=sm['carState'].aEgo, personality=sm['selfdriveState'].personality.raw,
+      v_ego=v_ego,
+      v_set=(sm['carState'].vCruise * CV.KPH_TO_MS if math.isfinite(sm['carState'].vCruise) and
+             0 < sm['carState'].vCruise <= V_CRUISE_MAX else None),
+      personality=sm['selfdriveState'].personality.raw,
       regular_accel=self.regular_accel, regular_stop=self.output_should_stop,
       e2e_accel=float(np.clip(output_a_target_e2e, ACCEL_MIN, ACCEL_MAX)), e2e_stop=output_should_stop_e2e)
     self.output_should_stop |= junction_stop

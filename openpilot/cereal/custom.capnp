@@ -49,11 +49,12 @@ struct MapTrafficControl @0xf35cc4560bbf6ec2 {
   gpsMonoTime @5 :UInt64;
   positionMonoTime @6 :UInt64;
   positionEstimated @7 :Bool; # short motion bridge only while the real GPS anchor remains fresh
-  reason @8 :Text; # target, noControl, controlDirection, ambiguousFork/Road, roadAlignment, or unavailable input
+  reason @8 :Text; # target, noJunction, ambiguousFork/Road, roadAlignment, or unavailable input
   enum Kind {
     none @0;
     stopSign @1;
     trafficLight @2;
+    junction @3; # connected intersection, split or merge; no control tags required
   }
 }
 
@@ -71,6 +72,7 @@ struct ConditionalExperimentalState {
   mapValid @10 :Bool;
   armed @11 :Bool;
   contributing @12 :Bool; # actual additional junction slowing/stop constraint
+  activationSpeed @13 :Float32; # current valid cruise set speed used for range, m/s; zero when unavailable
   enum State {
     off @0;
     ready @1;

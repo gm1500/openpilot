@@ -1,223 +1,145 @@
-# Conditional experimental stopping POC
+# Conditional experimental junction POC
 
 Branch: `boat-anchor-conditional-e2e-poc`, based on `boat-anchor` at
 `ec919f529c63cf324517602199513689441357af`. The opendbc pin and vehicle tune are unchanged.
 
-The on-road mode button cycles **VOACC → conditional → full experimental → VOACC**.
-VOACC retains boat-anchor's existing lead slowing assistance. Conditional adds the
-map-gated junction helper; full experimental keeps the existing experimental
-planner behavior. The selection persists. The existing experimental confirmation
-and openpilot longitudinal capability checks still apply. Settings that explicitly
-choose full experimental or ordinary mode clear conditional selection.
+The on-road button cycles **VOACC → conditional → full experimental → VOACC**.
+VOACC retains the existing lead slowing assistance. Conditional adds a junction
+attention window in which sustained model slowing can contribute. Full
+experimental retains its existing planner behavior. The selection persists;
+experimental confirmation and longitudinal capability checks still apply.
 
 ## HUD
 
-The approved stop-sign and traffic-light icon has no text. On comma 3/3X it uses
-the existing 192 px button and 144 px artwork footprint. The shared control is
-also available at the smaller comma 4 HUD scale.
+The approved icon retains its existing size, colours and thick rings, without text.
 
 | Appearance | Meaning |
 | --- | --- |
-| White glyph | Conditional mode selected; no armed approach |
-| Cyan glyph and thick ring | Qualified mapped approach is within the activation distance, independently of E2E slowing intent |
-| Amber glyph and thick ring | Junction assistance contributes to the selected slowing or stop command |
+| White glyph | Conditional selected; no qualified junction in range |
+| Cyan glyph and ring | A connected intersection, split or merge is in range |
+| Amber glyph and ring | The junction helper contributes to the selected slowing/stop command |
 
-Map proximity, a model proposal, and the existing lead-only assist cannot by
-themselves produce amber. A positive-acceleration handoff is not shown as active
-slowing. Cyan remains available with conditional mode selected during driver
-braking, disengagement, or invalid model trajectory data. Those conditions clear
-assistance and amber immediately; re-entry requires fresh model confirmation.
-Stale planner/state messages clear the indicator. Both coloured rings use 4% of
-button width (7.7 px on the 192 px button), with matching coloured artwork.
+Cyan does not require model slowing, engagement, or an unpressed brake pedal.
+Driver intervention or invalid model data immediately clears assistance while
+preserving qualified map awareness. Lead-only E2E assistance does not turn this
+icon amber. Stale planner/state messages clear the indication.
 
-## Activation distance
+## Range from current SET speed
 
-Use `carState.vEgo`, `carState.aEgo`, the current longitudinal personality, and the
-vehicle's longitudinal actuator delay. Calculate distance through:
+Use the current valid `carState.vCruise` in km/h, converted to m/s. The range is
+calculated at that speed with **zero assumed acceleration**, using the selected
+personality and vehicle actuator delay:
 
-1. One second of qualification/response allowance plus actuator delay, at current acceleration.
-2. A gradual acceleration ramp, using the profile's comfortable jerk, into comfortable braking.
+1. One second of qualification/response allowance plus actuator delay.
+2. A gradual acceleration ramp into comfortable braking.
 3. Constant comfortable braking to zero speed.
-4. A 12 m margin, with a minimum activation distance of 20 m.
+4. A 12 m allowance, with a minimum activation distance of 20 m.
 
-| Profile | Comfortable deceleration | Transition jerk | At 50 km/h | At 100 km/h |
-| --- | ---: | ---: | ---: | ---: |
-| Aggressive | 2.2 m/s² | 1.2 m/s³ | 89 m | 254 m |
-| Standard | 1.8 m/s² | 1.0 m/s³ | 99 m | 293 m |
-| Relaxed | 1.4 m/s² | 0.8 m/s³ | 114 m | 353 m |
+| Profile | Comfortable deceleration | Transition jerk | SET 50 km/h | SET 60 km/h | SET 100 km/h |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Aggressive | 2.2 m/s² | 1.2 m/s³ | 89 m | 115 m | 254 m |
+| Standard | 1.8 m/s² | 1.0 m/s³ | 99 m | 129 m | 293 m |
+| Relaxed | 1.4 m/s² | 0.8 m/s³ | 114 m | 151 m | 353 m |
 
-Examples assume zero current acceleration and a 0.5 s actuator delay. Positive
-acceleration increases the distance. Existing deceleration reduces it, but the
-calculation never assumes braking stronger than the selected comfort level will
-persist. Tiny signed-speed filter noise down to −0.1 m/s is treated as standstill;
-the caller still requires a forward gear. These constants size the attention window; they do not change actuator
-limits or force the model to deliver a comfortable stop.
+Examples use a 0.5 s actuator delay. Slowing, braking or stopping does not shrink
+this entry range while SET is unchanged. Changing SET or personality recalculates
+it. An already armed approach remains latched through a reduction in SET until
+its normal release conditions occur. The planner's temporary `forceDecel` speed
+request does not replace the driver's SET value for map awareness.
 
-## OSM targeting
+Unset, zero, negative, nonfinite or out-of-range SET values do not arm the helper.
+The 255 km/h unset sentinel is rejected before conversion, not clamped into a
+valid SET. Current vehicle speed still informs model-intent and standstill checks;
+SET sizes the attention window only. Neither this calculation nor map proximity
+changes actuator limits or commands a stop.
 
-Fetch and normalize controls belonging to the cached drivable ways:
+## Targets from road connectivity
 
-| Encoding | Interpretation |
-| --- | --- |
-| `highway=stop`, with `stop=all/minor` or no subtype | Stop sign; approach direction still has to be established |
-| `highway=traffic_signals` | Traffic light, subject to the subtype exclusions below |
-| `highway=crossing` with `crossing=traffic_signals` or `crossing:signals=yes` | Signal-controlled crossing, including marked and unmarked variants |
-| `highway=crossing` with `crossing_ref=pelican/puffin/toucan/pegasus` | Named signal-controlled crossing, unless explicit tags say unsignalized |
-| `traffic_sign`, `traffic_sign:id`, `traffic_sign:forward/backward` | Exact stop-sign names/codes, including comma/semicolon lists and omitted repeated country prefixes |
-| `highway=stop` with compass lists such as `stop=E;W` | Stop only on the named incoming arms; the letters describe the side of the junction, not the vehicle's travel heading |
-| `stop=yes/-1/both` on a drivable way | Legacy stop at the last/first/both endpoints, applying only to that way |
+Stop/light tags are no longer queried or interpreted by this policy. The OSM
+request fetches drivable ways, node IDs and geometry. Road type and one-way tags
+still establish drivable roads and travel direction; speed-limit tags still serve
+the separate speed-limit feature.
 
-The sign parser recognizes `stop`, `US:R1-1`, `DE:206`, Canadian `CA:RA-1`
-and provincial `CA:<province>:RA-1`, `CA:BC:R-001`, and Quebec
-`CA:QC:P-010/P-010A`. These are an explicit supported code set, not a claim to
-recognize every country's sign catalogue. `US:R1-3P` and `CA:AB:RA-1-T` identify
-all-way stops only when combined with a stop sign. Tabs alone, stop-ahead signs,
-unknown IDs and qualified IDs such as `US:R1-1[100 m]` are not stop targets.
+A node connected to **at least three distinct neighbouring road nodes** is a
+junction target. This includes T junctions, crossroads, shallow splits, slip roads,
+exit ramps and merges, including an incoming merge with only one forward exit.
+Service-road connections count. No road-name, angular-continuation or traffic
+control classification is required to identify the junction.
 
-Signal-controlled crossing nodes use the traffic-light target type; they describe
-the crossing rather than one signal head, so both road approaches qualify unless
-explicit direction tags restrict them. `crossing:signals=no` rejects a crossing
-even if an older crossing tag disagrees. Zebra markings or a `pxo` reference alone
-do not establish traffic signals. Standard, pedestrian/cyclist, HAWK, secondary,
-and normally blinking full signals are included through `highway=traffic_signals`.
-`traffic_signals=stop` is an all-way stop beacon. A generic `blinker` has ambiguous
-red/yellow approach semantics and is excluded unless `stop=all` establishes a
-stop requirement. Continuous-green, ramp-meter, railway and bridge signal
-subtypes, and explicitly inactive controls are outside this junction POC.
+Two-neighbour way boundaries, bends and speed-tag changes are not intersections.
+Duplicate edges do not add arms. A shared coordinate without a shared node ID
+does not connect an overpass, underpass or nearby road. A standalone stop/light
+or pedestrian crossing with no road branch is not independently targeted.
 
-Measure distance along the matched directed road and connected
-continuations, up to 1,000 m and 16 ways. A side street does not block a clear
-straight continuation: its heading change must be at most 25°, and at least 30°
-better than every alternative. A narrow exception follows a named through road
-past shallow exit links: the best-aligned continuation must retain the exact road
-name and highway class, bend at most 10°, beat every alternative by at least 5°,
-and every alternative must be explicitly tagged as a `*_link` road. Ordinary
-shallow splits, unnamed continuations and ambiguous forks remain blocked;
-the lookup does not select a turn at a branching junction. A control at the
-junction itself can qualify. Nearby parallel roads,
-cross-street signs, and grade-separated crossings are not radial targets.
+Measure distance along the matched directed road to the first junction, following
+unique continuations across ordinary way boundaries, up to 1,000 m and 16 ways.
+The junction itself is the target: the lookup does not choose a turn beyond a
+fork. Missing connectivity and conflicting plausible road matches remain rejected.
 
-Respect `direction`, `stop:direction`, `traffic_sign:direction`, directional
-sign keys, and `traffic_signals:direction`; conflicting explicit restrictions
-reject the approach. Compass stops support all 16 compass points. A named
-incoming arm must be within 35° and at least 15° closer than every competing arm.
-Legacy way-end stops retain real endpoint node IDs and never spread to a crossing
-road. Explicit node controls take precedence over an implied way-end stop. Accept
-undirected controls on one-way roads, central junction signals, and explicit
-all-way stops. Ambiguous undirected two-way approach signs are skipped. Separate
-roadside sign objects, footway-only signals, unsignalized crossings, yields,
-ramps, and railway crossings are outside this POC.
+Map-message and real-GPS freshness checks remain. A brief projected position is
+allowed only while its actual GPS anchor is at most three seconds old. Two
+advancing GPS observations of the same target are required before arming;
+projection cannot manufacture confirmations. A restored parking checkpoint
+without fresh GPS cannot arm the helper.
 
-Require two advancing GPS observations of the same target before arming. Speed
-limit availability is independent. Both message and GPS freshness are checked;
-brief motion projection is allowed only while the real GPS anchor is at most
-three seconds old. Projected positions do not count as new GPS confirmations.
-A restored parking checkpoint with no fresh GPS cannot arm the helper.
-
-Once armed, keep that approach armed as its computed activation distance shrinks.
-Release for a changed/missing target, lost map validity, or passage more than 12 m
-beyond the node. A passed-node latch prevents near-junction position jitter from
-immediately rearming the same control.
+Release on a missing/changed target, lost map validity, or passage more than 12 m
+beyond the target. A passed-target latch resists rearming from position jitter.
+Closely spaced junctions can briefly clear cyan while the new target confirms.
+Road-match dropouts still clear it. This change does not modify the existing
+position estimator or its output selection between GPS updates.
 
 ## Model confirmation and arbitration
 
-The rendered path endpoint is not a stop detector: the UI also clips the path
-around leads. Inspect the model's actual desired acceleration, stop request,
-predicted velocity, and predicted position instead.
+The shortened rendered path alone is not stopping evidence. Use the model's
+actual desired acceleration, stop request, predicted velocity and position.
 
-Entry requires a sustained trajectory speed reduction plus model acceleration
-at or below −0.2 m/s² and at least 0.15 m/s² below the existing boat-anchor
-request, confirmed for 0.25 s. Speed magnitude avoids treating a turn's smaller
-forward component as a stop. A stop forecast is derived only when predicted
-speed remains below 0.5 m/s for at least 0.75 s. If visible, its path distance
-must not lie substantially beyond the mapped target. Earlier stops, including
-queues, are allowed. A complete stop need not already be visible in the model's
-finite horizon to accept sustained slowing.
+Entry requires a sustained trajectory speed reduction, model acceleration at or
+below −0.2 m/s² and at least 0.15 m/s² below the ordinary boat-anchor proposal,
+confirmed for 0.25 s. Speed magnitude avoids interpreting a turn's reduced forward
+component as slowing. Predicted stop distance remains logged, but is no longer
+required to end before the map target: a split/merge is an attention landmark,
+not a stop line, and the light or queue may lie beyond it.
 
-Select the lower of the existing boat-anchor command and accepted junction E2E
-command. Stronger regular braking always wins. Conditional mode never sets the
-full `ExperimentalMode` flag. A sustained model go request releases assistance;
-only the return toward acceleration is softened, at 1 m/s³. Driver override,
-disengagement, invalid model data, and leaving conditional mode clear assistance immediately.
-Map loss while moving releases the additional constraint. An already established
-stop can remain held through map loss while a fresh, valid model continues to
-request stopping at rest; map loss cannot create a new stop request.
+Choose the lower of the ordinary and accepted junction E2E acceleration. Stronger
+ordinary braking wins. A sustained model go request releases assistance; the
+return toward acceleration is softened at 1 m/s³. Conditional never sets the
+full `ExperimentalMode` flag.
+
+Driver override, disengagement, invalid model data and leaving conditional mode
+clear assistance. Map loss while moving releases the extra constraint. A stop
+already established may remain held through map loss while a fresh, valid model
+continues requesting a stop at rest; map loss cannot create a stop request.
 
 ## Logging and validation
 
-`mapTrafficControl` records target type/IDs, matched way, signed path distance,
-real GPS age, and projection status independently of `mapSpeedLimit`. Its `reason`
-field distinguishes no control, direction rejection, an ambiguous fork or road,
-poor alignment, stale GPS, missing position, and an unavailable map cache.
-`longitudinalPlan.conditionalExperimental` records activation distance, target
-distance, predicted stop distance, both acceleration proposals, stop intent,
-arming, actual contribution, state, and transition reason.
+The existing `mapTrafficControl` service carries `kind=junction`, target node/way,
+signed distance, matched road, actual GPS age, projection status and lookup reason.
+Legacy stop/light enum values remain readable in old logs but cannot arm this
+new policy. `longitudinalPlan.conditionalExperimental` additionally logs the valid
+SET speed used as `activationSpeed` in m/s, alongside activation distance, target
+distance, model intent, both acceleration proposals, arming and contribution.
 
-Focused tests cover the stopping-distance calculation against numerical
-integration, profile ordering, map direction/topology, stale/estimated positions,
-mode cycling, model confirmation, holding/release, target passage, overrides,
-and HUD contribution semantics. Existing map/SLC/lead regression suites also run.
-Local result: **202 tests and 131 subtests passed**, plus lint and Python syntax
-checks. The map regressions used the Python reference transformations in place
-of the unavailable native extension.
-An isolated harness exercises the real planner update/publish with real Cap'n
-Proto messages and substitutes the native IPC/MPC dependencies. Another checks
-the actual button's rapid taps and captures its drawing primitives at both sizes.
+Validation: **192 tests and 51 subtests passed**, plus lint and an isolated test
+of actual planner update/publish and Cap'n Proto serialization. The map tests use
+the Python reference transformations in place of the unavailable native extension.
+Tests cover untagged intersections, shallow forks, merges, ordinary way boundaries,
+bridges, duplicate edges, parallel-road ambiguity, freshness, SET/profile changes,
+standstill, invalid SET sentinels, model confirmation and stronger ordinary braking.
 
-Recorded-input replay of eight drive segments covers 9,581 planner frames using
-a freshly retrieved OSM snapshot. The old lookup reproduces the three latest
-bookmarked misses; the updated lookup finds signal-controlled crossing nodes on
-the matched road and reaches `inRange` at all three (approximately 32 m, 35 m,
-and 47 m from the respective crossings). Model go requests keep these cases cyan
-without extra braking. The replay changes no selected acceleration in these
-recorded segments. The live production query also returns all three target nodes
-within the existing response-size limit. Older bookmarks outside the calculated
-range, at ambiguous forks, or without a current road match remain unarmed.
+Recorded-input replay covers 11 segments and 13,178 planner frames using a
+city-wide OSM download, locally cropped for replay. All three newest bookmarks
+are cyan. The formerly late first approach arms about 12.2 seconds earlier and
+permits 82 frames (4.1 s) of additional model-requested slowing before driver
+brake override, up to about 1.07 m/s² below the ordinary proposal. Other replayed
+segments have no selected-acceleration changes. The target is now the nearest
+road junction, so distances are not directly comparable with previous distances
+to tagged signals. Brief map/target-confirmation gaps remain.
 
-The replay supplies the public map snapshot directly rather than reproducing
-the device's original download timing/cache contents; the original OSM response
-is not in the logs. Road matches agree with the logs on 98–100% of map frames
-(rounded), including all three latest bookmarked locations. Topology tests also
-cover continued rejection of shallow forks, cross-street controls, disconnected
-geometry, and competing parallel roads.
+Replay supplies the map snapshot directly rather than emulating original cache
+or network timing, and applies logged vehicle/model inputs rather than simulating
+the vehicle's response to changed braking. These are offline results, not a full
+device build or a demonstrated stop. Map proximity does not establish right of
+way or guarantee that the model sees a light, stop sign or conflicting traffic.
 
-The encoding expansion was separately replayed against the preceding crossing
-fix across the same 9,581 frames. The three latest light approaches retain the
-same targets and states. A previously ignored `stop=E;W` node now adds 46 cyan
-planner frames (about 2.3 s) in the older route's segment 5; its east/west arms
-qualify while the north/south arms remain rejected. No selected acceleration
-changes in these eight recorded-input segments. Added tests cover sign-code
-lists, directional overrides, named crossings, explicit exclusions, all-way
-beacons, all 16 compass points, ambiguous arms, and way-end stop isolation.
-
-The exit-link correction was replayed against a separately downloaded city-wide
-OSM snapshot for three further segments. The preceding code reproduces their
-late target acquisition. The correction follows all three through approaches
-past the mapped ramps; two activate cyan earlier (about 110 m instead of 44 m,
-and 92 m instead of 19 m). The third now acquires the target early but still
-does not arm until 16 m: deceleration shrinks its activation threshold before
-the reported target distance enters it. This is a remaining range/position-timing
-limitation, not a claim that every late indication is resolved. A brief road-match
-dropout also remains in the first improved approach. These three segments plus
-the preceding eight total 13,178 planner frames, with no selected acceleration
-changes from the exit-link correction. The replay retains the recorded GPS
-output-selection behavior and does not emulate original download timing.
-
-These are offline checks, not a full device build or closed-loop road validation.
-OSM completeness and model perception limit coverage. OSM supplies no live signal
-phase here, and this helper cannot guarantee a stop or determine right of way.
-
-Tag references: [stop nodes](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dstop),
-[traffic signals](https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtraffic_signals),
-and [signal-controlled crossings](https://wiki.openstreetmap.org/wiki/Tag:crossing%3Dtraffic_signals).
-Additional encoding references: [crossing signals](https://wiki.openstreetmap.org/wiki/Key:crossing:signals),
-[named crossings](https://wiki.openstreetmap.org/wiki/Key:crossing_ref),
-[stop variants](https://wiki.openstreetmap.org/wiki/Key:stop),
-[traffic signs and directions](https://wiki.openstreetmap.org/wiki/Key:traffic_sign),
-[signal subtypes](https://wiki.openstreetmap.org/wiki/Key:traffic_signals),
-[Canadian signs](https://wiki.openstreetmap.org/wiki/Canada/Road_signs/Regulatory),
-[Alberta signs](https://wiki.openstreetmap.org/wiki/Canada/Road_signs/Alberta/Regulatory),
-[US stop signs](https://wiki.openstreetmap.org/wiki/Tag:traffic_sign%3DUS:R1-1),
-and [German stop signs](https://wiki.openstreetmap.org/wiki/Tag:traffic_sign%3DDE:206).
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
 under the [ODbL](https://opendatacommons.org/licenses/odbl/).

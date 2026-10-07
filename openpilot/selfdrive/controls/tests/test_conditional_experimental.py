@@ -34,7 +34,7 @@ class TestConditionalExperimental(unittest.TestCase):
 
   def step(self, **kwargs):
     args = {'enabled': True, 'eligible': True, 'approach': MapApproach(True, 10, 80., 101.), 'model': model(),
-            'v_ego': 15., 'a_ego': 0., 'personality': 1, 'regular_accel': .5, 'regular_stop': False, 'e2e_accel': -1., 'e2e_stop': False}
+            'v_ego': 15., 'v_set': 15., 'personality': 1, 'regular_accel': .5, 'regular_stop': False, 'e2e_accel': -1., 'e2e_stop': False}
     args.update(kwargs)
     return self.policy.update(**args)
 
@@ -78,10 +78,39 @@ class TestConditionalExperimental(unittest.TestCase):
 
   def test_range_latches_as_speed_and_distance_shrink(self):
     self.enter()
-    self.step(v_ego=2., model=model(speed=2), approach=MapApproach(True, 10, 35., 102.))
+    self.step(v_ego=2., v_set=2., model=model(speed=2), approach=MapApproach(True, 10, 35., 102.))
     self.assertLess(self.policy.activation_distance, 35.)
     self.assertTrue(self.policy.armed)
     self.assertTrue(self.policy.braking)
+
+  def test_set_speed_keeps_range_during_slowing_and_standstill(self):
+    for speed in (15., 8., 0.):
+      self.policy.reset()
+      for timestamp in (100., 101.):
+        self.step(v_ego=speed, v_set=60 / 3.6, personality=0, model=model(speed=speed, brake=0),
+                  approach=MapApproach(True, 10, 100., timestamp), e2e_accel=.2)
+      self.assertTrue(self.policy.armed)
+      self.assertEqual(self.policy.state, 'inRange')
+      self.assertAlmostEqual(self.policy.activation_distance, activation_distance(60 / 3.6, 0., 0, .5))
+
+  def test_current_set_speed_and_profile_determine_entry_range(self):
+    for set_speed, profile, expected in ((40., 0, False), (60., 0, True), (50., 0, False), (50., 2, True)):
+      with self.subTest(set_speed=set_speed, profile=profile):
+        self.policy.reset()
+        for timestamp in (100., 101.):
+          self.step(v_ego=5., v_set=set_speed / 3.6, personality=profile, approach=MapApproach(True, 10, 100., timestamp))
+        self.assertEqual(self.policy.armed, expected)
+        self.assertEqual(self.policy.activation_speed, set_speed / 3.6)
+
+  def test_unavailable_set_speed_clears_arming_and_assistance(self):
+    for v_set in (None, 0., -1., math.nan, math.inf, 255.):
+      with self.subTest(v_set=v_set):
+        self.enter()
+        self.assertEqual(self.step(v_set=v_set), (.5, False, False))
+        self.assertEqual(self.policy.reason, 'invalidSetSpeed')
+        self.assertFalse(self.policy.armed)
+        self.assertFalse(self.policy.braking)
+        self.assertEqual(self.policy.activation_speed, 0.)
 
   def test_model_go_releases_and_slews_return_to_acceleration(self):
     previous, _, _ = self.enter()
@@ -129,7 +158,7 @@ class TestConditionalExperimental(unittest.TestCase):
       self.assertEqual(self.step(), (.5, False, False))
 
   def test_disabled_or_invalid_kinematics_clear_all_state(self):
-    for args in ({'enabled': False}, {'a_ego': math.nan}, {'v_ego': -1.}):
+    for args in ({'enabled': False}, {'v_ego': math.nan}, {'v_ego': -1.}):
       self.enter()
       self.assertEqual(self.step(**args), (.5, False, False))
       self.assertFalse(self.policy.braking)
@@ -176,10 +205,11 @@ class TestConditionalExperimental(unittest.TestCase):
     self.assertFalse(self.policy.armed)
     self.assertFalse(self.policy.braking)
 
-  def test_much_later_predicted_stop_does_not_confirm_this_target(self):
+  def test_junction_is_not_a_stop_line_model_can_stop_beyond_it(self):
     self.arm(approach=MapApproach(True, 10, 5., 101.), model=model(brake=1.8))
     for _ in range(10):
-      self.assertEqual(self.step(approach=MapApproach(True, 10, 5., 101.), model=model(brake=1.8)), (.5, False, False))
+      result = self.step(approach=MapApproach(True, 10, 5., 101.), model=model(brake=1.8))
+    self.assertEqual(result, (-1., False, True))
 
 
 class TestDistanceAndIntent(unittest.TestCase):
@@ -240,8 +270,13 @@ class TestDistanceAndIntent(unittest.TestCase):
 
 
 class TestMapFreshnessAndHUD(unittest.TestCase):
+  def test_only_topological_junction_targets_arm_new_policy(self):
+    for kind in ('stopSign', 'trafficLight', 'junction'):
+      msg = NS(kind=kind, nodeId=7, distance=50., gpsMonoTime=int(99e9), positionMonoTime=int(99e9))
+      self.assertEqual(map_approach(FakeSM(mapTrafficControl=msg), 100.).valid, kind == 'junction')
+
   def test_map_health_is_independent_of_speed_limit(self):
-    msg = NS(kind='stopSign', nodeId=7, distance=50., gpsMonoTime=int(99e9), positionMonoTime=int(99e9))
+    msg = NS(kind='junction', nodeId=7, distance=50., gpsMonoTime=int(99e9), positionMonoTime=int(99e9))
     sm = FakeSM(mapTrafficControl=msg, mapSpeedLimit=NS())
     sm.valid['mapSpeedLimit'] = False
     self.assertEqual(map_approach(sm, 100.), MapApproach(True, 7, 50., 99.))

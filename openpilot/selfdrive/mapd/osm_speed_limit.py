@@ -9,9 +9,6 @@ from itertools import pairwise
 
 import requests
 
-from openpilot.selfdrive.mapd.control_tags import (COMPASS, SIGN_KEYS, SIGNAL_CROSSINGS, all_way_stop, control_kind,
-                                                 road_controls, signal_crossing, stop_sign_direction)
-
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 QUERY_RADIUS = 1500.0  # metres; prefetch again after travelling 700 m
 QUERY_INTERVAL = 30.0
@@ -49,7 +46,6 @@ class Road:
   tags: dict[str, str]
   way_id: int = 0
   node_ids: tuple[int, ...] = ()
-  control_tags: dict[int, dict[str, str]] = field(default_factory=dict)
   bounds: tuple[float, float, float, float] = field(init=False, repr=False)
 
   def __post_init__(self):
@@ -214,6 +210,7 @@ class RoadTracker:
     self._roads: tuple[Road, ...] = ()
     self._connections: dict[NodeKey, list[tuple[Road, bool, float]]] = {}
     self._nodes: dict[int, list[tuple[NodeKey, float]]] = {}
+    self._junctions: set[int] = set()
     self._processed: GpsFix | None = None
     self._result: RoadMatch | None = None
     self._stop_anchor: GpsFix | None = None
@@ -233,6 +230,19 @@ class RoadTracker:
       for node, along in self._nodes[id(road)]:
         for forward in allowed_directions(road):
           self._connections.setdefault(node, []).append((road, forward, along))
+
+    # Shared node IDs establish connectivity. A way boundary has only two
+    # distinct neighbouring nodes; a crossing/split/merge has at least three.
+    # Coordinate coincidence alone never connects an overpass or parallel road.
+    neighbours: dict[int, set[int]] = {}
+    for road in roads:
+      if len(road.node_ids) != len(road.geometry):
+        continue
+      for first, second in pairwise(road.node_ids):
+        if first != second:
+          neighbours.setdefault(first, set()).add(second)
+          neighbours.setdefault(second, set()).add(first)
+    self._junctions = {node for node, arms in neighbours.items() if len(arms) >= 3}
 
     def refresh(previous: RoadMatch, fix: GpsFix) -> RoadMatch | None:
       old = previous.road
@@ -450,108 +460,11 @@ class RoadTracker:
         return limit, distance
     return None, 0.
 
-  def _control_applies(self, road: Road, node: NodeKey, forward: bool) -> bool:
-    tags = road.control_tags.get(node, {})
-    kind = control_kind(tags)
-    if kind is None:
-      return False
-    directed = stop_sign_direction(tags, forward) if kind == 'stopSign' else None
-    # Conflicting explicit directions reject the approach rather than allowing
-    # whichever spelling happened to be checked first to override the others.
-    keys = (('stop:direction', 'traffic_sign:direction', 'traffic_signals:direction', 'direction') if kind == 'stopSign'
-            else ('traffic_signals:direction', 'direction'))
-    directions = [tags[k].strip() for k in keys if tags.get(k)]
-    if directed is False or any(value not in ('both', 'forward' if forward else 'backward') for value in directions):
-      return False
-    if kind == 'stopSign' and tags.get('stop', '') not in ('', 'all', 'minor'):
-      return self._compass_stop_applies(road, node, forward, tags['stop'])
-    if directions or directed is True:
-      return True
-    # This node marks the signal-controlled crossing on the drivable way,
-    # not a particular signal head. Both approaches need map awareness unless
-    # explicitly restricted. Footway-only nodes are excluded during the fetch.
-    if kind == 'trafficLight' and signal_crossing(tags):
-      return True
-    if len(allowed_directions(road)) == 1:
-      return True
-    # A central junction signal applies to the incoming roads. Undirected
-    # two-way approach nodes are ambiguous; do not borrow the opposing stop.
-    neighbours = set()
-    for other, _, _ in self._connections.get(node, ()):
-      nodes = other.node_ids
-      for index, key in enumerate(nodes):
-        if key == node:
-          neighbours.update(nodes[max(0, index - 1):index])
-          neighbours.update(nodes[index + 1:index + 2])
-    return len(neighbours) >= 3 and (kind == 'trafficLight' or all_way_stop(tags))
-
-  def _compass_stop_applies(self, road: Road, node: NodeKey, forward: bool, value: str) -> bool:
-    # stop=E;W names the arms EAST/WEST OF the node, not the direction of
-    # travel. Choose each named incoming arm uniquely; do not borrow a stop
-    # from a nearby shallow branch with an equally plausible compass bearing.
-    names = [name.strip().upper() for name in value.split(';')]
-    if not names or any(name not in COMPASS for name in names):
-      return False
-    arms = []
-    for other, direction, along in self._connections.get(node, ()):
-      incoming = self._junction_bearing(other, direction, along, False)
-      if incoming is not None:
-        arms.append(((incoming + 180) % 360, other, direction))
-    for name in names:
-      ranked = sorted(((abs((bearing - COMPASS[name] + 180) % 360 - 180), r, d) for bearing, r, d in arms),
-                      key=lambda entry: entry[0])
-      if (ranked and ranked[0][0] <= 35 and (len(ranked) == 1 or ranked[1][0] - ranked[0][0] >= 15) and
-          ranked[0][1] is road and ranked[0][2] == forward):
-        return True
-    return False
-
-  def _junction_bearing(self, road: Road, forward: bool, along: float, outgoing: bool) -> float | None:
-    """Use up to 15 m of geometry on the requested side of a connected node."""
-    nodes = self._nodes[id(road)]
-    index = next(i for i, (_, position) in enumerate(nodes) if abs(position - along) < .01)
-    origin = GpsFix(*road.geometry[index], None, 0., 0.)
-    step = 1 if forward == outgoing else -1
-    for other in range(index + step, len(nodes) if step > 0 else -1, step):
-      x, y = offset_metres(*road.geometry[other], origin)
-      if math.hypot(x, y) >= 3:
-        if abs(nodes[other][1] - along) >= 15 or other in (0, len(nodes) - 1):
-          return math.degrees(math.atan2(x, y)) % 360 if outgoing else math.degrees(math.atan2(-x, -y)) % 360
-    return None
-
-  def _control_continuation(self, road, forward, position, exits):
-    if len(exits) <= 1:
-      return exits[0] if exits else None
-    # A side street must not hide a signal on the clearly continuing road.
-    # Shallow splits, turns, and roundabouts still require a known route.
-    incoming = self._junction_bearing(road, forward, position, False)
-    if incoming is None or any(r.tags.get('junction') == 'roundabout' for r, _, _ in exits):
-      return None
-    ranked = []
-    for exit_road, direction, entry in exits:
-      bearing = self._junction_bearing(exit_road, direction, entry, True)
-      if bearing is None:
-        return None
-      ranked.append((abs((bearing - incoming + 180) % 360 - 180), (exit_road, direction, entry)))
-    ranked.sort(key=lambda item: item[0])
-    if ranked[0][0] <= 25 and ranked[1][0] - ranked[0][0] >= 30:
-      return ranked[0][1]
-    # A shallow exit ramp is not an equally plausible continuation of the
-    # named through road. Retain that road only with corroborating geometry,
-    # name and class, and only when every alternative is explicitly a link.
-    # Ordinary shallow forks (including two named through ways) stay blocked.
-    onward = ranked[0][1][0]
-    name, highway = road.tags.get('name'), road.tags.get('highway', '')
-    if (name and not highway.endswith('_link') and onward.tags.get('name') == name and
-        onward.tags.get('highway') == highway and ranked[0][0] <= 10 and ranked[1][0] - ranked[0][0] >= 5 and
-        all(r.tags.get('highway', '').endswith('_link') for _, (r, _, _) in ranked[1:])):
-      return ranked[0][1]
-    return None
-
-  def _next_control(self, match: RoadMatch, maximum: float = 1000.) -> tuple[TrafficControl | None, str]:
+  def _next_junction(self, match: RoadMatch, maximum: float = 1000.) -> tuple[TrafficControl | None, str]:
+    """Stop at the first physical branch; no traffic-control tags or turn choice."""
     road, forward, along = match.road, match.forward, match.along
     distance = 0.
     visited = set()
-    reason = 'noControl'
     for hop in range(16):
       if forward is None or id(road) in visited:
         return None, 'lookaheadLimit'
@@ -565,15 +478,10 @@ class RoadTracker:
         total = distance + step
         if total > maximum:
           return None, 'lookaheadLimit'
-        if self._control_applies(road, node, forward):
-          kind = control_kind(road.control_tags[node])
-          return TrafficControl(node, road.way_id, kind, total), 'target'
-        if node in road.control_tags:
-          reason = 'controlDirection'
-        if step < -.1:
+        if node in self._junctions:
+          return TrafficControl(node, road.way_id, 'junction', total), 'target'
+        if step < -.1 or hop > 0 and abs(step) < .1:
           continue
-        if hop > 0 and abs(step) < .1:
-          continue  # this entry node's outgoing direction was selected on the previous way
         exits = []
         if (nodes[-1][1] - position if forward else position) > .1:
           exits.append((road, forward, position))
@@ -581,31 +489,30 @@ class RoadTracker:
           remaining = self._nodes[id(other)][-1][1] - entry if direction else entry
           if other != road and id(other) not in visited and remaining > .1:
             exits.append((other, direction, entry))
-        continuation = self._control_continuation(road, forward, position, exits)
-        if len(exits) > 1 and continuation is None:
-          return None, 'ambiguousFork'
-        if continuation is not None and continuation[0] != road:
-          next_road = continuation
+        if len(exits) > 1:
+          return None, 'ambiguousFork'  # malformed/duplicate geometry, not a known junction
+        if exits and exits[0][0] != road:
+          next_road = exits[0]
           distance = total
           break
       if next_road is None:
-        return None, reason
+        return None, 'noJunction'
       road, forward, along = next_road
     return None, 'lookaheadLimit'
 
-  def traffic_control(self, match: RoadMatch) -> TrafficControl | None:
-    result, self.control_reason = self._next_control(match)
+  def junction_ahead(self, match: RoadMatch) -> TrafficControl | None:
+    result, self.control_reason = self._next_junction(match)
     if match.distance > 20 or match.heading_error is None or match.heading_error > 20:
       self.control_reason = 'roadAlignment'
       return None
     if result is None:
       return None
-    # Speed-limit equality does not make two roads equivalent for stopping.
-    # Require plausible competing paths to agree on the control as well.
+    # Speed-limit equality does not make two roads share a junction.
+    # Require plausible competing paths to agree on the target as well.
     best_score = min((p[1] for p in self._paths), default=0.)
     for other, score, _, _ in self._paths:
       if score <= best_score + 2. and other != match:
-        alternative, _ = self._next_control(other)
+        alternative, _ = self._next_junction(other)
         if alternative is None or alternative.node_id != result.node_id or abs(alternative.distance - result.distance) > 20:
           self.control_reason = 'ambiguousRoad'
           return None
@@ -666,14 +573,6 @@ class RoadTracker:
 def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
   query = f'[out:json][timeout:10][maxsize:16777216];way(around:{QUERY_RADIUS:.0f},{fix.latitude:.6f},{fix.longitude:.6f})'
   query += f'["highway"~"^({"|".join(ROAD_TYPES)})$"]->.roads;.roads out body geom;'
-  query += '(node(w.roads)["highway"~"^(stop|traffic_signals)$"];'
-  query += 'node(w.roads)["highway"="crossing"]["crossing"="traffic_signals"];'
-  query += 'node(w.roads)["highway"="crossing"]["crossing:signals"="yes"];'
-  query += f'node(w.roads)["highway"="crossing"]["crossing_ref"~"^({"|".join(SIGNAL_CROSSINGS)})$"];'
-  # Retrieve full sign lists; exact code parsing happens locally, including
-  # omitted repeated country prefixes. These remain nodes of drivable ways.
-  query += ''.join(f'node(w.roads)["{key}"];' for key in SIGN_KEYS)
-  query += 'node(w.roads)["highway"="give_way"];);out body;'
   deadline = time.monotonic() + 20
   # One request at a time, bounded response size, no identifiers or route history.
   with requests.post(OVERPASS_URL, data={"data": query}, timeout=(3.05, 12), stream=True,
@@ -690,10 +589,6 @@ def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
   if not isinstance(data, dict) or "remark" in data or not isinstance(data.get("elements"), list):
     raise ValueError("Incomplete OSM response")
   roads = []
-  controls = {element['id']: element['tags'] for element in data['elements']
-              if element.get('type') == 'node' and isinstance(element.get('id'), int) and
-              isinstance(element.get('tags'), dict) and
-              all(isinstance(k, str) and isinstance(v, str) for k, v in element['tags'].items())}
   for element in data["elements"]:
     tags = element.get("tags", {})
     if element.get("type") != "way" or tags.get("highway") not in ROAD_TYPES:
@@ -705,7 +600,7 @@ def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
       continue
     nodes = element.get('nodes', [])
     node_ids = tuple(nodes) if len(nodes) == len(geometry) and all(isinstance(node, int) and node > 0 for node in nodes) else ()
-    roads.append(Road(geometry, tags, int(element.get('id', 0)), node_ids, road_controls(node_ids, tags, controls)))
+    roads.append(Road(geometry, tags, int(element.get('id', 0)), node_ids))
   return tuple(roads)
 
 
@@ -754,7 +649,7 @@ class OSMSpeedLimit:
     self.control_reason = 'noRoadMatch' if match is None else 'gpsStale'
     if match is not None and match.forward is not None and gps_time > 0 and 0 <= now - gps_time <= GPS_MAX_AGE:
       self.control_match = match
-      self.control = self._tracker.traffic_control(match)
+      self.control = self._tracker.junction_ahead(match)
       self.control_reason = self._tracker.control_reason
     speed = match.speed if match is not None else None
     advisory = match.advisory_speed if match is not None else None
