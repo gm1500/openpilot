@@ -46,6 +46,11 @@ class TestCameraTransition(unittest.TestCase):
     view.frame, view.client = NS(width=1928, height=1208), FrameClient()
     view._target_client = view._target_stream_type = None
     view._switching = False
+    view._fade = None
+    view._crossfade_enabled = True
+    view._last_frame_at = 100.
+    view._texture_needs_update = True
+    view.egl_images = {}
     view._initialize_textures = lambda: None  # no GPU context needed for stream/projection checks
     view._camera_zoom = CameraZoom()
     view.device_camera = DEVICE_CAMERAS[device, 'ar0231']

@@ -127,8 +127,17 @@ through the calibrated lens rotation (`wideFromDeviceEuler`). Its corresponding
 position in the wide image anchors the start/end of the zoom. The crop then
 eases toward normal wide framing, including the portrait layout's vertical
 offset. This prevents independently centred crops from jumping at the switch.
-The image remains live; this is not a frozen-frame fade. Lens distortion and
-parallax from nearby objects can still leave a small residual mismatch.
+At both lens handoffs, a **200 ms crossfade** overlaps two live VisionIPC
+streams. The incoming image fills the background while the outgoing image's
+opacity falls with smooth easing; their effective weights sum to one. The
+outgoing crop follows the incoming crop's calibrated centre and magnification,
+including while wide begins zooming out. Model/UI overlays render only once.
+Each stream owns its textures and EGL images independently, even when their
+buffer indices coincide. The outgoing client/resources are released after the
+fade, on offroad, or if its frames stop arriving for 150 ms. Reversing during
+the fade reuses the same two clients and preserves their current blend weights.
+These are live frames, not a frozen screenshot. Lens distortion and parallax
+from nearby objects can still leave a small residual mismatch during overlap.
 
 ## Recovery after a missed shallow exit
 

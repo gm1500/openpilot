@@ -13,6 +13,7 @@ from openpilot.selfdrive.ui.mici.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.mici.onroad.confidence_ball import ConfidenceBall
 from openpilot.selfdrive.ui.mici.onroad.cameraview import CameraView
 from openpilot.selfdrive.ui.onroad.camera_zoom import CameraZoom, experimental_camera_active
+from openpilot.selfdrive.ui.onroad.camera_fade import aligned_camera_matrix
 from openpilot.system.ui.lib.application import FontWeight, gui_app, MousePos, MouseEvent, TextAlignment, TextAlignmentVertical
 from openpilot.system.ui.widgets.label import UnifiedLabel
 from openpilot.system.ui.widgets import Widget
@@ -132,6 +133,7 @@ class AugmentedRoadView(CameraView):
   def __init__(self, bookmark_callback=None, stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_NARROW_ROAD):
     super().__init__("camerad", stream_type)
     self._camera_zoom = CameraZoom()
+    self._crossfade_enabled = True
     self._bookmark_callback = bookmark_callback
     self._set_placeholder_color(rl.BLACK)
 
@@ -278,6 +280,16 @@ class AugmentedRoadView(CameraView):
     if hasattr(calib, 'wideFromDeviceEuler') and len(calib.wideFromDeviceEuler) == 3:
       wide_from_device = rot_from_euler(calib.wideFromDeviceEuler)
       self.view_from_wide_calib = view_frame_from_device_frame @ wide_from_device @ device_from_calib
+
+  def _calc_fade_matrix(self, rect, transform):
+    device = self.device_camera or DEFAULT_DEVICE_CAMERA
+    active_wide = self.stream_type == WIDE_CAM
+    other_wide = self._fade.stream_type == WIDE_CAM
+    return aligned_camera_matrix(transform,
+      device.wide_road if active_wide else device.narrow_road,
+      self.view_from_wide_calib if active_wide else self.view_from_calib,
+      device.wide_road if other_wide else device.narrow_road,
+      self.view_from_wide_calib if other_wide else self.view_from_calib, rect.width, rect.height)
 
   def _calc_frame_matrix(self, rect: rl.Rectangle) -> np.ndarray:
     transition = self._camera_zoom.update(self.stream_type == WIDE_CAM, time.monotonic())
