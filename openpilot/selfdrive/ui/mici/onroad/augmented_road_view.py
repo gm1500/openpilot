@@ -1,5 +1,6 @@
 import numpy as np
 import pyray as rl
+import time
 from openpilot.cereal import log
 from opendbc.car.structs import car
 from openpilot.cereal.visionipc import VisionStreamType
@@ -11,6 +12,8 @@ from openpilot.selfdrive.ui.mici.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.mici.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.mici.onroad.confidence_ball import ConfidenceBall
 from openpilot.selfdrive.ui.mici.onroad.cameraview import CameraView
+from openpilot.selfdrive.ui.onroad.camera_zoom import CameraZoom, experimental_camera_active
+from openpilot.selfdrive.ui.onroad.camera_fade import aligned_camera_matrix
 from openpilot.system.ui.lib.application import FontWeight, gui_app, MousePos, MouseEvent, TextAlignment, TextAlignmentVertical
 from openpilot.system.ui.widgets.label import UnifiedLabel
 from openpilot.system.ui.widgets import Widget
@@ -30,9 +33,6 @@ class BookmarkState(IntEnum):
   HIDDEN = 0
   DRAGGING = 1
   TRIGGERED = 2
-
-WIDE_CAM_MAX_SPEED = 5.0  # m/s (11 mph)
-ROAD_CAM_MIN_SPEED = 10.0  # m/s (22 mph)
 
 CAM_Y_OFFSET = 20
 
@@ -132,6 +132,8 @@ class BookmarkIcon(Widget):
 class AugmentedRoadView(CameraView):
   def __init__(self, bookmark_callback=None, stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_NARROW_ROAD):
     super().__init__("camerad", stream_type)
+    self._camera_zoom = CameraZoom()
+    self._crossfade_enabled = True
     self._bookmark_callback = bookmark_callback
     self._set_placeholder_color(rl.BLACK)
 
@@ -245,20 +247,19 @@ class AugmentedRoadView(CameraView):
     self._bookmark_icon.render(self.rect)
 
   def _switch_stream_if_needed(self, sm):
-    if sm['selfdriveState'].experimentalMode and WIDE_CAM in self.available_streams:
-      v_ego = sm['carState'].vEgo
-      if v_ego < WIDE_CAM_MAX_SPEED:
-        target = WIDE_CAM
-      elif v_ego > ROAD_CAM_MIN_SPEED:
-        target = NARROW_ROAD_CAM
-      else:
-        # Hysteresis zone - keep current stream
-        target = self.stream_type
-    else:
-      target = NARROW_ROAD_CAM
+    now = time.monotonic()
+    if WIDE_CAM not in self.available_streams:
+      self._refresh_available_streams(now)
+    wide_available = WIDE_CAM in self.available_streams
+    self._camera_zoom.request(experimental_camera_active(sm, ui_state.started_frame, now),
+                              sm['carState'].vEgo, wide_available, now)
+    can_animate = wide_available and self.frame is not None and self.client.is_connected()
+    use_wide = self._camera_zoom.use_wide_stream(self.stream_type == WIDE_CAM, can_animate)
+    self.switch_stream(WIDE_CAM if use_wide else NARROW_ROAD_CAM)
 
-    if self.stream_type != target:
-      self.switch_stream(target)
+  def _offroad_transition(self):
+    super()._offroad_transition()
+    self._camera_zoom.reset()
 
   def _update_calibration(self):
     # Update device camera if not already set
@@ -283,13 +284,25 @@ class AugmentedRoadView(CameraView):
       wide_from_device = rot_from_euler(calib.wideFromDeviceEuler)
       self.view_from_wide_calib = view_frame_from_device_frame @ wide_from_device @ device_from_calib
 
+  def _calc_fade_matrix(self, rect, transform):
+    device = self.device_camera or DEFAULT_DEVICE_CAMERA
+    active_wide = self.stream_type == WIDE_CAM
+    other_wide = self._fade.stream_type == WIDE_CAM
+    return aligned_camera_matrix(transform,
+      device.wide_road if active_wide else device.narrow_road,
+      self.view_from_wide_calib if active_wide else self.view_from_calib,
+      device.wide_road if other_wide else device.narrow_road,
+      self.view_from_wide_calib if other_wide else self.view_from_calib, rect.width, rect.height)
+
   def _calc_frame_matrix(self, rect: rl.Rectangle) -> np.ndarray:
+    transition = self._camera_zoom.update(self.stream_type == WIDE_CAM, time.monotonic())
     cache_key = (
       ui_state.sm.recv_frame['extrinsicsCalibration'],
       int(self._content_rect.width),
       int(self._content_rect.height),
       self.stream_type,
       round(ui_state.sm['carState'].vEgo, 1),
+      transition,
     )
 
     if cache_key == self._matrix_cache_key and self._cached_matrix is not None:
@@ -300,37 +313,12 @@ class AugmentedRoadView(CameraView):
     is_wide_camera = self.stream_type == WIDE_CAM
     intrinsic = device_camera.wide_road.intrinsics if is_wide_camera else device_camera.narrow_road.intrinsics
     calibration = self.view_from_wide_calib if is_wide_camera else self.view_from_calib
-    if is_wide_camera:
-      zoom = 0.7 * 1.5
-    else:
-      zoom = np.interp(ui_state.sm['carState'].vEgo, [10, 30], [0.8, 1.0])
-
-    # Calculate transforms for vanishing point
-    inf_point = np.array([1000.0, 0.0, 0.0])
+    zoom, x_offset, y_offset = self._camera_zoom.framing(
+      is_wide_camera, device_camera, self.view_from_calib, self.view_from_wide_calib,
+      np.interp(ui_state.sm['carState'].vEgo, [10, 30], [0.8, 1.0]), 0.7 * 1.5, self._content_rect.width, self._content_rect.height, CAM_Y_OFFSET)
     calib_transform = intrinsic @ calibration
-    kep = calib_transform @ inf_point
-
-    # Calculate center points and dimensions
     w, h = self._content_rect.width, self._content_rect.height
     cx, cy = intrinsic[0, 2], intrinsic[1, 2]
-
-    # Ensure zoom views the whole area
-    zoom = max(zoom, w / (2 * cx), h / (2 * cy))
-
-    # Calculate max allowed offsets with margins
-    margin = 5
-    max_x_offset = max(0.0, cx * zoom - w / 2 - margin)
-    max_y_offset = max(0.0, cy * zoom - h / 2 - margin)
-
-    # Calculate and clamp offsets to prevent out-of-bounds issues
-    try:
-      if abs(kep[2]) > 1e-6:
-        x_offset = np.clip((kep[0] / kep[2] - cx) * zoom, -max_x_offset, max_x_offset)
-        y_offset = np.clip((kep[1] / kep[2] - cy) * zoom + CAM_Y_OFFSET, -max_y_offset, max_y_offset)
-      else:
-        x_offset, y_offset = 0, 0
-    except (ZeroDivisionError, OverflowError):
-      x_offset, y_offset = 0, 0
 
     # Cache the computed transformation matrix to avoid recalculations
     self._matrix_cache_key = cache_key

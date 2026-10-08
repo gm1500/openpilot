@@ -56,5 +56,42 @@ Acknowledged no-speed E2E replaces the map number with the experimental icon,
 orange border and OVERRIDE caption, retaining actual SET underneath. Recovery
 restores the map number. Green pulses indicate mapped-speed adjustments only.
 
+## C3x UI
+
+Speed-based camera zoom operates whenever conditional or full experimental mode
+is selected, including while conditional E2E is inactive. Calibrated alignment
+and a 200 ms live two-stream crossfade work in both directions. Brief invalid
+inputs retain the request; missing streams are retried. Offroad resets animation.
+The existing camera behavior is retained on comma 4.
+
+The comma 3/3X border shows a red center segment across one quarter of the top
+for pedal braking or applied openpilot friction braking. This is braking feedback;
+GM does not currently decode physical brake-lamp status. Stale actuator messages
+cannot light it. Coasting does not trigger it.
+
+Blind-spot detection paints orange side brackets matching the alert hue, wrapping
+onto the top and bottom with short fades. Signaling toward an occupied side
+flashes that bracket red at 2 Hz. Indicators also work during manual driving.
+Lead triangles have lightly rounded corners.
+
+A cyan MODEL STOP flag marks the model's predicted future front-bumper position
+in conditional or full experimental mode, including while driving manually.
+Its post sits at the right edge of the path ribbon, with its label extending
+outward. The ground crossbar follows the calibrated camera/path projection at
+the same stopping distance; the sideways display shift does not change the
+model prediction or remaining travel. The
+label is approximate remaining travel in metres or feet, not distance from the
+camera to the flag. It uses the first sustained near-zero-speed prediction and
+does not represent the final planner's stop or a detected stop line.
+
+The display adds a forward offset to the predicted model-reference position,
+rotated by the future heading/pitch. `ModelStopFrontOffset` is a persistent float
+in metres, read when the UI starts (valid range 0–5). Its 1.52 m default matches
+the fork's nominal model-to-front lead conversion; it is not a measured Sierra
+bumper offset. The ~ label remains until this approximation can be checked.
+Short smoothing compensates for vehicle travel; large target changes update
+immediately. Stale/no-stop predictions, non-forward gears and invalid calibration
+hide the marker. Flag positioning itself is display-only.
+
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
 under the [ODbL](https://opendatacommons.org/licenses/odbl/).
