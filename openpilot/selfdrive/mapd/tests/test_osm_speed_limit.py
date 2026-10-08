@@ -300,6 +300,70 @@ class TestOSMSpeedLimit(unittest.TestCase):
         self.assertIsNotNone(match, i)
         self.assertEqual(match.road.way_id, 1, i)
 
+  def test_committed_highway_recovers_a_missed_shallow_exit_with_measured_departure(self):
+    main = polyline([(0, -100), (0, 0), (0, 500)], '100', way_id=1, oneway='yes')
+    ramp = polyline([(0, 0), (20, 70), (35, 370)], None, way_id=2, highway='motorway_link',
+                    oneway='yes', **{'maxspeed:advisory': '80'})
+    heading = math.degrees(math.atan2(15, 300))
+    tracker = osm.RoadTracker()
+    tracker.update((main,), osm.GpsFix(*point(19.5, 60), heading, 15., 100., motion_bearing=heading, speed=30.))
+    roads = (main, ramp)
+    for i, y in enumerate((90, 120, 150), 1):
+      fix = osm.GpsFix(*point(20 + (y - 70) / 20, y), heading, 15., 100. + i, motion_bearing=heading, speed=30.)
+      result = tracker.update(roads, fix)
+      self.assertEqual(result.road.way_id, 2 if i == 3 else 1)
+      # Polling the same fix cannot count as repeated departure evidence.
+      for _ in range(10):
+        self.assertEqual(tracker.update(roads, fix), result)
+    self.assertAlmostEqual(result.advisory_speed, 80 / 3.6)
+
+  def test_missed_exit_recovery_requires_motion_topology_and_recent_fork(self):
+    main = polyline([(0, -100), (0, 0), (0, 1000)], '100', way_id=1, oneway='yes')
+    ramp = polyline([(0, 0), (20, 70), (65, 970)], '80', way_id=2, highway='motorway_link', oneway='yes')
+    heading = math.degrees(math.atan2(45, 900))
+    cases = ((ramp, 0., False, 0), (ramp, None, False, 0), (ramp, heading, True, 0),
+             (replace(ramp, node_ids=(91, 92, 93)), heading, False, 0), (ramp, heading, False, 350))
+    for alternative, motion, estimated, offset in cases:
+      with self.subTest(motion=motion, estimated=estimated, offset=offset, nodes=alternative.node_ids):
+        if offset:
+          main = polyline([(0, -500), (0, -350), (0, 0), (0, 1000)], '100', way_id=1, oneway='yes')
+          alternative = polyline([(0, -350), (20, 70), (65, 970)], '80', way_id=2, oneway='yes')
+        tracker = osm.RoadTracker()
+        tracker.update((main,), osm.GpsFix(*point(19.5, 60), heading, 15., 100., speed=30.))
+        roads = (main, alternative)
+        for i, y in enumerate((90, 120, 150), 1):
+          fix = osm.GpsFix(*point(20 + (y - 70) / 20, y), heading, 15., 100. + i,
+                           motion_bearing=motion, speed=30., estimated=estimated)
+          result = tracker.update(roads, fix)
+          self.assertNotEqual(result.road.way_id if result else 0, 2)
+
+  def test_exit_recovery_cannot_count_frozen_positions_with_advancing_timestamps(self):
+    main = polyline([(0, -100), (0, 0), (0, 500)], '100', way_id=1, oneway='yes')
+    ramp = polyline([(0, 0), (20, 70), (35, 370)], '80', way_id=2, oneway='yes')
+    heading = math.degrees(math.atan2(15, 300))
+    tracker = osm.RoadTracker()
+    tracker.update((main,), osm.GpsFix(*point(19.5, 60), heading, 15., 100., speed=30.,
+                                     odometer=0., motion_epoch=100.))
+    roads = (main, ramp)
+    for i in range(1, 5):
+      fix = osm.GpsFix(*point(21, 90), heading, 15., 100. + i, motion_bearing=heading, speed=30.,
+                       odometer=30. * i, motion_epoch=100.)
+      result = tracker.update(roads, fix)
+      self.assertNotEqual(result.road.way_id if result else 0, 2)
+
+  def test_one_departure_fix_does_not_reopen_a_committed_exit(self):
+    main = polyline([(0, -100), (0, 0), (0, 500)], '100', way_id=1, oneway='yes')
+    ramp = polyline([(0, 0), (20, 70), (35, 370)], '80', way_id=2, oneway='yes')
+    heading = math.degrees(math.atan2(15, 300))
+    tracker = osm.RoadTracker()
+    tracker.update((main,), osm.GpsFix(*point(19.5, 60), heading, 15., 100., speed=30.))
+    roads = (main, ramp)
+    for i, motion in enumerate((heading, 0., heading, heading), 1):
+      y = 60 + i * 30
+      fix = osm.GpsFix(*point(20 + (y - 70) / 20, y), heading, 15., 100. + i, motion_bearing=motion, speed=30.)
+      result = tracker.update(roads, fix)
+      self.assertNotEqual(result.road.way_id if result else 0, 2)
+
   def test_stopped_road_retention_is_bounded_and_releases_on_movement(self):
     main = road('60')
     parallel = road('40', x=12)

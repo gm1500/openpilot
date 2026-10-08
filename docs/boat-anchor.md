@@ -1,5 +1,8 @@
 # boat-anchor
 
+This POC branch adds [conditional experimental stopping](conditional-experimental.md)
+and the three-mode, text-free HUD selector on top of the base below.
+
 Based on comma master `ec95db3f1fa19f76940497fedfdb62e09ea19912`.
 Five feature commits carry the working tune and policies onto that base.
 
