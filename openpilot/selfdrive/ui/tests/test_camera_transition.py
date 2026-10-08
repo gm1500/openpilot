@@ -4,7 +4,7 @@ import os
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace as NS
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pyray as rl
@@ -46,6 +46,9 @@ class TestCameraTransition(unittest.TestCase):
     view.frame, view.client = NS(width=1928, height=1208), FrameClient()
     view._target_client = view._target_stream_type = None
     view._switching = False
+    view.last_connection_attempt = 0.
+    view._last_target_connection_attempt = float('-inf')
+    view._last_stream_check = float('-inf')
     view._fade = None
     view._crossfade_enabled = True
     view._last_frame_at = 100.
@@ -125,10 +128,116 @@ class TestCameraTransition(unittest.TestCase):
         self.assertTrue(view._switching)
         view._target_client.frames.append(view.frame)
         sm['selfdriveState'].experimentalMode = False
+        sm.valid['carState'] = False  # explicit mode-off must bypass the input grace
         step()
         self.assertFalse(view._switching)
         self.assertIsNone(view._target_client)
         self.assertEqual(view.stream_type, mod.NARROW_ROAD_CAM)
+
+  def test_brief_invalid_input_does_not_lose_pending_zoom_in_hysteresis_band(self):
+    for device in ('tici', 'mici'):
+      for service in ('carState', 'selfdriveState'):
+        with self.subTest(device=device, service=service), ExitStack() as stack:
+          view, sm, step, mod = self.make_view(device, stack)
+          step()  # wide requested below 18 km/h, waiting for its first frame
+          target = view._target_client
+          sm['carState'].vEgo = 7.
+          sm.valid[service] = False
+          step()
+          sm.valid[service] = True
+          step()
+          self.assertIs(view._target_client, target)
+          self.assertTrue(view._camera_zoom.wide_requested)
+          target.frames.append(view.frame)
+          step()
+          self.assertEqual(view.stream_type, mod.WIDE_CAM)
+          for _ in range(20):
+            step()
+          self.assertEqual(view._camera_zoom.transition, 0.)
+
+  def test_stale_input_preserves_active_zoom_briefly_then_exits_and_recovers(self):
+    for device in ('tici', 'mici'):
+      with self.subTest(device=device), ExitStack() as stack:
+        view, sm, step, mod = self.make_view(device, stack)
+        step()
+        view._target_client.frames.append(view.frame)
+        step()
+        for _ in range(20):
+          step()
+        sm['carState'].vEgo = 7.
+        step()
+        # Exercise the real freshness gate without refreshing message timestamps.
+        mod.time.monotonic.return_value += .5
+        view._switch_stream_if_needed(sm)
+        view._calc_frame_matrix(view._content_rect)
+        self.assertTrue(view._camera_zoom.wide_requested)
+        self.assertEqual(view._camera_zoom.transition, 0.)
+        step()  # fresh inputs in the hysteresis band retain wide
+        self.assertTrue(view._camera_zoom.wide_requested)
+        mod.time.monotonic.return_value += 1.01
+        view._switch_stream_if_needed(sm)
+        self.assertFalse(view._camera_zoom.wide_requested)
+        for _ in range(22):
+          step()
+        self.assertTrue(view._switching)
+        view._target_client.frames.append(view.frame)
+        step()
+        self.assertEqual(view.stream_type, mod.NARROW_ROAD_CAM)
+        sm['carState'].vEgo = 4.
+        step()
+        view._target_client.frames.append(view.frame)
+        step()
+        self.assertEqual(view.stream_type, mod.WIDE_CAM)
+
+  def test_zero_buffer_connections_retry_for_primary_and_target_streams(self):
+    for device in ('tici', 'mici'):
+      for target in (False, True):
+        with self.subTest(device=device, target=target), ExitStack() as stack:
+          view, _, step, mod = self.make_view(device, stack)
+          frame = view.frame
+          step()
+          client = view._target_client if target else view.client
+          client.num_buffers = 0
+          client.connect = Mock(return_value=True)
+          client.available_streams = Mock(return_value=[mod.NARROW_ROAD_CAM, mod.WIDE_CAM])
+          retry = view._handle_switch if target else view._ensure_connection
+          retry()
+          client.connect.assert_called_once_with(False)
+          retry()
+          self.assertEqual(client.connect.call_count, 1)  # retry is throttled
+          mod.time.monotonic.return_value += .25
+
+          def connected(_, client=client, frame=frame):
+            client.num_buffers = 4
+            client.frames.append(frame)
+            return True
+
+          client.connect.side_effect = connected
+          retry()
+          self.assertEqual(client.connect.call_count, 2)
+          if target:
+            self.assertEqual(view.stream_type, mod.WIDE_CAM)
+            self.assertIs(view.frame, frame)
+          else:
+            self.assertTrue(view._ensure_connection())
+
+  def test_missing_wide_stream_is_rediscovered_without_primary_disconnect(self):
+    for device in ('tici', 'mici'):
+      with self.subTest(device=device), ExitStack() as stack:
+        view, _, step, mod = self.make_view(device, stack)
+        view.available_streams = [mod.NARROW_ROAD_CAM]
+        view.client.available_streams = Mock(side_effect=[[], [mod.NARROW_ROAD_CAM, mod.WIDE_CAM]])
+        step()
+        self.assertFalse(view._switching)
+        self.assertEqual(view.client.available_streams.call_count, 1)
+        step()
+        self.assertEqual(view.client.available_streams.call_count, 1)
+        mod.time.monotonic.return_value += 1.
+        step()
+        self.assertTrue(view._switching)
+        view._target_client.frames.append(view.frame)
+        step()
+        self.assertEqual(view.stream_type, mod.WIDE_CAM)
 
   def test_calibrated_handoff_preserves_the_actual_clamped_narrow_viewport(self):
     for device in ('tici', 'mici'):

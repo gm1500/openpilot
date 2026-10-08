@@ -4,17 +4,23 @@ import numpy as np
 
 WIDE_CAM_MAX_SPEED = 5.0  # m/s (18 km/h)
 ROAD_CAM_MIN_SPEED = 10.0  # m/s (36 km/h)
+CAMERA_INPUT_GRACE = 1.0  # preserve an existing request through brief input gaps
 
 
-def experimental_camera_active(sm, started_frame: int, now: float) -> bool:
-  """Camera behavior follows the selected mode, independently of E2E activation."""
+def experimental_camera_active(sm, started_frame: int, now: float) -> bool | None:
+  """Selected mode; None means temporarily unknown, not explicitly disabled."""
+  if any(sm.recv_frame[service] < started_frame for service in ('selfdriveState', 'carState')):
+    return False  # never carry a request across drives
   for service in ('selfdriveState', 'carState'):
-    if (not sm.valid[service] or sm.recv_frame[service] < started_frame or
+    if (not sm.valid[service] or
         not 0 <= now - sm.recv_time[service] <= .3 or
         not 0 <= now - sm.logMonoTime[service] * 1e-9 <= .3):
-      return False
-  state = sm['selfdriveState']
-  return state.experimentalMode or state.conditionalExperimental
+      return None
+    if service == 'selfdriveState':
+      state = sm[service]
+      if not (state.experimentalMode or state.conditionalExperimental):
+        return False  # a fresh mode-off takes effect even if speed is unavailable
+  return True
 
 
 class CameraZoom:
@@ -26,14 +32,23 @@ class CameraZoom:
     self.transition = 1.0  # wide camera cropped to match the narrow field of view
     self._last_time: float | None = None
     self._was_wide = False
+    self._last_valid_request: float | None = None
 
-  def request(self, enabled: bool, speed: float, wide_available: bool):
-    if not enabled or not wide_available or not math.isfinite(speed):
+  def request(self, enabled: bool | None, speed: float, wide_available: bool, now: float):
+    if enabled is False or not wide_available:
+      self._last_valid_request = None
       self.wide_requested = False
-    elif speed < WIDE_CAM_MAX_SPEED:
-      self.wide_requested = True
-    elif speed > ROAD_CAM_MIN_SPEED:
-      self.wide_requested = False
+    elif enabled is None or not math.isfinite(speed):
+      # Invalid data must not start a transition, or erase the hysteresis latch
+      # after one missed update. Prolonged loss still returns to narrow.
+      if self._last_valid_request is None or not 0 <= now - self._last_valid_request <= CAMERA_INPUT_GRACE:
+        self.wide_requested = False
+    else:
+      self._last_valid_request = now
+      if speed < WIDE_CAM_MAX_SPEED:
+        self.wide_requested = True
+      elif speed > ROAD_CAM_MIN_SPEED:
+        self.wide_requested = False
     # In the hysteresis band retain the requested view, including mid-transition.
 
   def use_wide_stream(self, wide_active: bool, can_animate: bool) -> bool:

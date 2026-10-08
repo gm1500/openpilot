@@ -15,6 +15,7 @@ from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.onroad.camera_fade import FadingCamera, CAMERA_FADE_TIME, CAMERA_FADE_STALE
 
 CONNECTION_RETRY_INTERVAL = 0.2  # seconds between connection attempts
+STREAM_DISCOVERY_INTERVAL = 1.0  # retry discovery when a camera was missing at startup
 
 VERSION = """
 #version 300 es
@@ -129,6 +130,8 @@ class CameraView(Widget):
     self._last_frame_at = 0.
     self._texture_needs_update = True
     self.last_connection_attempt: float = 0.0
+    self._last_target_connection_attempt = float('-inf')
+    self._last_stream_check = float('-inf')
     self.shader = rl.load_shader_from_memory(VERTEX_SHADER, FRAME_FRAGMENT_SHADER)
     self._alpha_loc = rl.get_shader_location(self.shader, "frame_alpha")
     self._alpha_value = rl.ffi.new("float[1]", [1.])
@@ -161,6 +164,8 @@ class CameraView(Widget):
     ui_state.add_offroad_transition_callback(self._offroad_transition)
 
   def _offroad_transition(self):
+    self._last_stream_check = float('-inf')
+    self.available_streams.clear()
     self._clear_fade()
     self._target_client = self._target_stream_type = None
     self._switching = False
@@ -190,6 +195,7 @@ class CameraView(Widget):
     if self._target_client:
       del self._target_client
 
+    self._last_target_connection_attempt = float('-inf')
     self._target_stream_type = stream_type
     self._target_client = (self._fade.client if self._fade is not None and self._fade.stream_type == stream_type
                            else VisionIpcClient(self._name, stream_type, conflate=True))
@@ -357,14 +363,23 @@ class CameraView(Widget):
     rl.set_shader_value(self.shader, self._engaged_loc, self._engaged_val, rl.ShaderUniformDataType.SHADER_UNIFORM_INT)
     rl.set_shader_value(self.shader, self._enhance_driver_loc, self._enhance_driver_val, rl.ShaderUniformDataType.SHADER_UNIFORM_INT)
 
+  def _refresh_available_streams(self, now: float, force: bool = False):
+    if not self.client.is_connected() or not self.client.num_buffers:
+      return
+    if force or now - self._last_stream_check >= STREAM_DISCOVERY_INTERVAL:
+      self._last_stream_check = now
+      self.available_streams = self.client.available_streams(self._name, block=False)
+
   def _ensure_connection(self) -> bool:
-    if not self.client.is_connected():
+    # VisionIPC can report connected after an empty buffer response. It is not
+    # usable until buffers are imported, so retry instead of waiting for frames.
+    if not self.client.is_connected() or not self.client.num_buffers:
       self._clear_fade()
       self.frame = None
       self.available_streams.clear()
 
       # Throttle connection attempts
-      current_time = rl.get_time()
+      current_time = time.monotonic()
       if current_time - self.last_connection_attempt < CONNECTION_RETRY_INTERVAL:
         return False
       self.last_connection_attempt = current_time
@@ -374,7 +389,7 @@ class CameraView(Widget):
 
       cloudlog.debug(f"Connected to {self._name} stream: {self._stream_type}, buffers: {self.client.num_buffers}")
       self._initialize_textures()
-      self.available_streams = self.client.available_streams(self._name, block=False)
+      self._refresh_available_streams(current_time, force=True)
 
     return True
 
@@ -384,7 +399,11 @@ class CameraView(Widget):
       return
 
     # Try to connect target if needed
-    if not self._target_client.is_connected():
+    if not self._target_client.is_connected() or not self._target_client.num_buffers:
+      now = time.monotonic()
+      if now - self._last_target_connection_attempt < CONNECTION_RETRY_INTERVAL:
+        return
+      self._last_target_connection_attempt = now
       if not self._target_client.connect(False) or not self._target_client.num_buffers:
         return
 

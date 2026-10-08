@@ -108,7 +108,11 @@ including between actual E2E activations while the conditional icon is white.
 The camera follows the selected mode independently of the longitudinal planner;
 E2E entering or leaving a junction/no-speed condition does not reset the camera
 request. Regular cruise and SLC alone do not request wide. Current-drive, fresh
-mode and vehicle-speed messages are still required.
+mode and vehicle-speed messages are required to start a request. Brief invalid
+or stale inputs preserve an existing request for up to one second after the
+last valid input check, so a single dropped update cannot erase the speed
+hysteresis latch. Longer gaps return to narrow. A fresh mode-off cancels the
+request immediately, even when speed is invalid; offroad clears the grace.
 
 The existing speed thresholds remain: request wide below **18 km/h**, narrow
 above **36 km/h**, and retain the requested direction between them. On entry,
@@ -117,6 +121,10 @@ On exit, wide zooms back in before switching to live narrow frames. The original
 easing takes about **0.85 seconds** and is normalized for elapsed time, so
 20 Hz and 60 Hz rendering have the same timing. Missing camera streams cannot
 stall a return to narrow; reversing the request cancels a pending stale switch.
+If wide was missing from the initial stream list, discovery retries once per
+second while the primary camera is connected. Empty-buffer connections are
+retried at 200 ms intervals for both primary and pending streams, rather than
+being treated as usable merely because VisionIPC reports connected.
 
 Camera projection and the road overlay use the same animated zoom. The
 projection cache updates on every zoom step. Each layout retains its normal

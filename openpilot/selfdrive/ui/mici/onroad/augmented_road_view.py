@@ -247,9 +247,12 @@ class AugmentedRoadView(CameraView):
     self._bookmark_icon.render(self.rect)
 
   def _switch_stream_if_needed(self, sm):
+    now = time.monotonic()
+    if WIDE_CAM not in self.available_streams:
+      self._refresh_available_streams(now)
     wide_available = WIDE_CAM in self.available_streams
-    self._camera_zoom.request(experimental_camera_active(sm, ui_state.started_frame, time.monotonic()),
-                              sm['carState'].vEgo, wide_available)
+    self._camera_zoom.request(experimental_camera_active(sm, ui_state.started_frame, now),
+                              sm['carState'].vEgo, wide_available, now)
     can_animate = wide_available and self.frame is not None and self.client.is_connected()
     use_wide = self._camera_zoom.use_wide_stream(self.stream_type == WIDE_CAM, can_animate)
     self.switch_stream(WIDE_CAM if use_wide else NARROW_ROAD_CAM)
