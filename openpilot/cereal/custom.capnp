@@ -30,6 +30,9 @@ struct MapCruiseState @0xaedffd8f31e7b55d {
   targetSpeed @1 :Float32; # qualified map target in m/s, zero if unavailable
   pendingSpeedDEPRECATED @2 :Float32;
   adjustingSpeed @3 :Float32; # UI pulse target until ego speed settles; zero if cancelled/complete
+  e2eFallback @4 :Bool; # no usable speed: request E2E before raising SET; clear after recovery SET
+  automaticE2e @5 :Bool; # SLC and conditional mode on, supported and experimental confirmation accepted
+  setSpeed @6 :Float32; # actual applied SET, m/s; lets planner order recovery across services
   enum State {
     off @0;
     armed @1;
@@ -40,7 +43,63 @@ struct MapCruiseState @0xaedffd8f31e7b55d {
   }
 }
 
-struct CustomReserved2 @0xf35cc4560bbf6ec2 {
+struct MapTrafficControl @0xf35cc4560bbf6ec2 {
+  kind @0 :Kind;
+  nodeId @1 :UInt64;
+  wayId @2 :UInt64;
+  distance @3 :Float32; # signed distance along connected road geometry, metres
+  matchedWayId @4 :UInt64;
+  gpsMonoTime @5 :UInt64;
+  positionMonoTime @6 :UInt64;
+  positionEstimated @7 :Bool; # short motion bridge only while the real GPS anchor remains fresh
+  reason @8 :Text; # target, noJunction, ambiguousFork/Road, roadAlignment, or unavailable input
+  enum Kind {
+    none @0;
+    stopSignDEPRECATED @1;
+    trafficLightDEPRECATED @2;
+    junction @3; # connected intersection, split or merge; no control tags required
+  }
+}
+
+struct ConditionalExperimentalState {
+  state @0 :State;
+  reason @1 :Text;
+  targetId @2 :UInt64;
+  targetDistance @3 :Float32;
+  activationDistance @4 :Float32;
+  modelStopDistance @5 :Float32; # -1 if no sustained stop in the model horizon
+  regularAcceleration @6 :Float32; # boat-anchor output before junction assistance
+  modelAcceleration @7 :Float32;
+  modelShouldStop @8 :Bool;
+  modelSlowing @9 :Bool;
+  mapValid @10 :Bool;
+  armed @11 :Bool;
+  contributing @12 :Bool; # actual additional junction slowing/stop constraint
+  activationSpeed @13 :Float32; # current valid cruise set speed used for range, m/s; zero when unavailable
+  e2eEnabled @14 :Bool; # qualified conditional model candidate, independent of contribution
+  enum State {
+    off @0;
+    ready @1;
+    inRange @2;
+    assisting @3; # legacy slowing-only state
+    active @4;
+  }
+}
+
+struct StopTargetState {
+  active @0 :Bool;
+  distance @1 :Float32; # remaining ego travel to the tracked target, -1 when inactive
+  holding @2 :Bool;
+}
+
+# Retained only for reading logs from the earlier virtual-obstacle POC.
+struct ModelStopState {
+  active @0 :Bool;
+  margin @1 :Float32;
+  modelDistance @2 :Float32;
+  targetDistance @3 :Float32;
+  holdingStop @4 :Bool;
+  predictionGrace @5 :Bool;
 }
 
 struct CustomReserved3 @0xda96579883444c35 {
@@ -92,46 +151,4 @@ struct CustomReserved18 @0xc86a3d38d13eb3ef {
 }
 
 struct CustomReserved19 @0xa4f1eb3323f5f582 {
-}
-
-struct ConditionalExperimentalState {
-  state @0 :State;
-  reason @1 :Text;
-  targetId @2 :UInt64;
-  targetDistance @3 :Float32;
-  activationDistance @4 :Float32;
-  modelStopDistance @5 :Float32; # -1 if no sustained stop in the model horizon
-  regularAcceleration @6 :Float32; # boat-anchor output before junction assistance
-  modelAcceleration @7 :Float32;
-  modelShouldStop @8 :Bool;
-  modelSlowing @9 :Bool;
-  mapValid @10 :Bool;
-  armed @11 :Bool;
-  contributing @12 :Bool; # actual additional junction slowing/stop constraint
-  activationSpeed @13 :Float32; # current valid cruise set speed used for range, m/s; zero when unavailable
-  e2eEnabled @14 :Bool; # qualified conditional model candidate, independent of contribution
-  enum State {
-    off @0;
-    ready @1;
-    inRange @2;
-    assisting @3; # legacy slowing-only state
-    active @4;
-  }
-}
-
-
-struct StopTargetState {
-  active @0 :Bool;
-  distance @1 :Float32; # remaining ego travel to the tracked target, -1 when inactive
-  holding @2 :Bool;
-}
-
-
-struct ModelStopState {
-  active @0 :Bool;
-  margin @1 :Float32;
-  modelDistance @2 :Float32;
-  targetDistance @3 :Float32;
-  holdingStop @4 :Bool;
-  predictionGrace @5 :Bool;
 }
