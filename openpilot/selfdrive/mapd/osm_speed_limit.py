@@ -69,6 +69,14 @@ class RoadMatch:
     return road_speed(self.road.tags, self.forward, advisory=True)
 
 
+@dataclass(frozen=True)
+class Junction:
+  node_id: int
+  way_id: int
+  kind: str
+  distance: float
+
+
 def gps_fix(sm, started_frame: int, now: float) -> GpsFix | None:
   fixes = []
   for source in ("gpsLocationExternal", "gpsLocation"):
@@ -202,6 +210,7 @@ class RoadTracker:
     self._roads: tuple[Road, ...] = ()
     self._connections: dict[NodeKey, list[tuple[Road, bool, float]]] = {}
     self._nodes: dict[int, list[tuple[NodeKey, float]]] = {}
+    self._junctions: set[int] = set()
     self._processed: GpsFix | None = None
     self._result: RoadMatch | None = None
     self._stop_anchor: GpsFix | None = None
@@ -210,6 +219,7 @@ class RoadTracker:
     self._winner: Road | None = None
     self._winner_since = self._winner_travel = 0.
     self._branch_recovery: tuple[RoadMatch, GpsFix, float, float, int] | None = None
+    self.control_reason = 'noRoadMatch'
 
   def _set_roads(self, roads: tuple[Road, ...]):
     self._roads = roads
@@ -221,6 +231,19 @@ class RoadTracker:
       for node, along in self._nodes[id(road)]:
         for forward in allowed_directions(road):
           self._connections.setdefault(node, []).append((road, forward, along))
+
+    # Shared node IDs establish connectivity. A way boundary has only two
+    # distinct neighbouring nodes; a crossing/split/merge has at least three.
+    # Coordinate coincidence alone never connects an overpass or parallel road.
+    neighbours: dict[int, set[int]] = {}
+    for road in roads:
+      if len(road.node_ids) != len(road.geometry):
+        continue
+      for first, second in pairwise(road.node_ids):
+        if first != second:
+          neighbours.setdefault(first, set()).add(second)
+          neighbours.setdefault(second, set()).add(first)
+    self._junctions = {node for node, arms in neighbours.items() if len(arms) >= 3}
 
     def refresh(previous: RoadMatch, fix: GpsFix) -> RoadMatch | None:
       old = previous.road
@@ -495,6 +518,64 @@ class RoadTracker:
         return limit, distance
     return None, 0.
 
+  def _next_junction(self, match: RoadMatch, maximum: float = 1000.) -> tuple[Junction | None, str]:
+    """Stop at the first physical branch; no traffic-control tags or turn choice."""
+    road, forward, along = match.road, match.forward, match.along
+    distance = 0.
+    visited = set()
+    for hop in range(16):
+      if forward is None or id(road) in visited:
+        return None, 'lookaheadLimit'
+      visited.add(id(road))
+      nodes = self._nodes[id(road)]
+      next_road = None
+      for node, position in (nodes if forward else reversed(nodes)):
+        step = (position - along) * (1 if forward else -1)
+        if step < (-20. if hop == 0 else -.1):
+          continue
+        total = distance + step
+        if total > maximum:
+          return None, 'lookaheadLimit'
+        if node in self._junctions:
+          return Junction(node, road.way_id, 'junction', total), 'target'
+        if step < -.1 or hop > 0 and abs(step) < .1:
+          continue
+        exits = []
+        if (nodes[-1][1] - position if forward else position) > .1:
+          exits.append((road, forward, position))
+        for other, direction, entry in self._connections.get(node, ()):
+          remaining = self._nodes[id(other)][-1][1] - entry if direction else entry
+          if other != road and id(other) not in visited and remaining > .1:
+            exits.append((other, direction, entry))
+        if len(exits) > 1:
+          return None, 'ambiguousFork'  # malformed/duplicate geometry, not a known junction
+        if exits and exits[0][0] != road:
+          next_road = exits[0]
+          distance = total
+          break
+      if next_road is None:
+        return None, 'noJunction'
+      road, forward, along = next_road
+    return None, 'lookaheadLimit'
+
+  def junction_ahead(self, match: RoadMatch) -> Junction | None:
+    result, self.control_reason = self._next_junction(match)
+    if match.distance > 20 or match.heading_error is None or match.heading_error > 20:
+      self.control_reason = 'roadAlignment'
+      return None
+    if result is None:
+      return None
+    # Speed-limit equality does not make two roads share a junction.
+    # Require plausible competing paths to agree on the target as well.
+    best_score = min((p[1] for p in self._paths), default=0.)
+    for other, score, _, _ in self._paths:
+      if score <= best_score + 2. and other != match:
+        alternative, _ = self._next_junction(other)
+        if alternative is None or alternative.node_id != result.node_id or abs(alternative.distance - result.distance) > 20:
+          self.control_reason = 'ambiguousRoad'
+          return None
+    return result
+
   def update(self, roads: tuple[Road, ...], fix: GpsFix) -> RoadMatch | None:
     refreshed = roads is not self._roads
     if refreshed:
@@ -549,7 +630,7 @@ class RoadTracker:
 
 def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
   query = f'[out:json][timeout:10][maxsize:16777216];way(around:{QUERY_RADIUS:.0f},{fix.latitude:.6f},{fix.longitude:.6f})'
-  query += f'["highway"~"^({"|".join(ROAD_TYPES)})$"];out body geom;'
+  query += f'["highway"~"^({"|".join(ROAD_TYPES)})$"]->.roads;.roads out body geom;'
   deadline = time.monotonic() + 20
   # One request at a time, bounded response size, no identifiers or route history.
   with requests.post(OVERPASS_URL, data={"data": query}, timeout=(3.05, 12), stream=True,
@@ -590,8 +671,13 @@ class OSMSpeedLimit:
     self._tracker = RoadTracker()
     self._thread: threading.Thread | None = None
     self._wake = threading.Event()
+    self.control: Junction | None = None
+    self.control_match: RoadMatch | None = None
+    self.control_reason = 'noPosition'
 
   def update(self, fix: GpsFix | None, now: float) -> tuple[GpsFix, float | None, float | None, float] | None:
+    self.control = self.control_match = None
+    self.control_reason = 'noPosition'
     if fix is not None and (fix.speed < 0 or not 0 <= now - fix.timestamp <= GPS_MAX_AGE):
       fix = None  # reverse heading is retained by MapPosition, not walked as a forward road path
     with self._lock:
@@ -612,10 +698,17 @@ class OSMSpeedLimit:
     # snapshot was read. Its internal completion timestamp is still fresh.
     if now - fetched_at >= CACHE_TTL or distance >= QUERY_RADIUS - 50:
       self._tracker.reset()
+      self.control_reason = 'cacheUnavailable'
       return None
     # Publish the current match in this mapd cycle. No asynchronous grace period
     # or previous-limit hold is needed when GPS heading changes through a turn.
     match = self._tracker.update(roads, fix)
+    gps_time = fix.gps_timestamp if fix.estimated else fix.timestamp
+    self.control_reason = 'noRoadMatch' if match is None else 'gpsStale'
+    if match is not None and match.forward is not None and gps_time > 0 and 0 <= now - gps_time <= GPS_MAX_AGE:
+      self.control_match = match
+      self.control = self._tracker.junction_ahead(match)
+      self.control_reason = self._tracker.control_reason
     speed = match.speed if match is not None else None
     advisory = match.advisory_speed if match is not None else None
     ahead = 0.
