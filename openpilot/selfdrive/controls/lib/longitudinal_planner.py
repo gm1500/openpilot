@@ -14,6 +14,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import Longi
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
 from openpilot.selfdrive.controls.lib.e2e_slowing import E2ESlowingAssist, get_model_lead_speed
+from openpilot.selfdrive.controls.lib.e2e_stop import E2EStopTarget
 from openpilot.selfdrive.controls.lib.conditional_experimental import ConditionalExperimental, map_approach, slc_fallback_request
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
@@ -69,6 +70,7 @@ class LongitudinalPlanner:
     self.output_a_target = init_a
     self.output_should_stop = False
     self.e2e_assist = E2ESlowingAssist(dt)
+    self.stop_target = E2EStopTarget()
     self.e2e_assist_active = False
     self.conditional = ConditionalExperimental(dt, CP.longitudinalActuatorDelay)
     self.slc_fallback = False
@@ -117,9 +119,24 @@ class LongitudinalPlanner:
     # No change cost when user is controlling the speed, or when standstill
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
+    output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
+    output_should_stop_e2e = sm['modelV2'].action.shouldStop
+    assist_eligible = (self.CP.openpilotLongitudinalControl and not reset_state and sm['selfdriveState'].enabled and
+                       not sm['selfdriveState'].experimentalMode and sm['carControl'].longActive and
+                       not (sm['carState'].gasPressed or sm['carState'].brakePressed) and
+                       math.isfinite(output_a_target_e2e) and sm.all_checks())
+    now = time.monotonic()
+    self.stop_target.update(
+      eligible=assist_eligible and str(sm['carState'].gearShifter) in ('drive', 'low', 'sport'),
+      model=sm['modelV2'], now=now, model_time=sm.logMonoTime['modelV2'] * 1e-9, v_ego=v_ego,
+      e2e_accel=output_a_target_e2e, e2e_stop=output_should_stop_e2e)
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
-    self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)
-    self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality)
+    # Do not plan a fixed stop from an optimistic filtered speed when the
+    # truck is still travelling faster than the previous acceleration plan.
+    mpc_speed = max(self.v_desired_filter.x, v_ego) if self.stop_target.active else self.v_desired_filter.x
+    self.mpc.set_cur_state(mpc_speed, self.output_a_target)
+    self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality,
+                    stop_distance=self.stop_target.distance if self.stop_target.active else None)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
@@ -137,8 +154,6 @@ class LongitudinalPlanner:
     output_a_target_mpc = get_accel_from_plan(self.v_desired_trajectory, self.a_desired_trajectory, CONTROL_N_T_IDX,
                                               action_t=action_t)
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
-    output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
-    output_should_stop_e2e = sm['modelV2'].action.shouldStop
 
     self.a_cruise = get_cruise_accel(sm['selfdriveState'].experimentalMode, v_cruise, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
@@ -147,15 +162,11 @@ class LongitudinalPlanner:
 
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
                   (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop)]
-    if sm['selfdriveState'].experimentalMode:
+    if sm['selfdriveState'].experimentalMode or self.stop_target.requested:
       candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
-    self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
-    assist_eligible = (self.CP.openpilotLongitudinalControl and not reset_state and sm['selfdriveState'].enabled and
-                       not sm['selfdriveState'].experimentalMode and sm['carControl'].longActive and
-                       not (sm['carState'].gasPressed or sm['carState'].brakePressed) and
-                       math.isfinite(output_a_target_e2e) and sm.all_checks())
+    self.output_should_stop = self.stop_target.holding or any(should_stop for _, _, should_stop in candidates)
     output_a_target, assist_stop, self.e2e_assist_active = self.e2e_assist.update(
       eligible=assist_eligible, lead=sm['radarState'].leadOne, v_ego=v_ego,
       model_lead_speed=get_model_lead_speed(sm['modelV2'], v_ego),
@@ -167,7 +178,6 @@ class LongitudinalPlanner:
     self.regular_accel = float(output_a_target)
     self.model_accel = float(output_a_target_e2e)
     self.model_stop = bool(output_should_stop_e2e)
-    now = time.monotonic()
     automatic, self.slc_fallback = slc_fallback_request(sm, now, self.slc_fallback)
     automatic = automatic and sm['selfdriveState'].conditionalExperimental and not sm['selfdriveState'].experimentalMode
     if not automatic:
@@ -186,6 +196,7 @@ class LongitudinalPlanner:
     self.e2e_assist_active |= automatic_contribution
     if automatic_contribution:
       self.mpc.source = LongitudinalPlanSource.e2e
+    self.e2e_assist_active |= self.stop_target.requested and self.mpc.source == LongitudinalPlanSource.e2e
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
@@ -213,6 +224,11 @@ class LongitudinalPlanner:
     longitudinalPlan.allowBrake = True
     longitudinalPlan.allowThrottle = bool(self.allow_throttle)
     longitudinalPlan.e2eAssistActive = bool(self.e2e_assist_active)
+    longitudinalPlan.e2eStopActive = bool(self.stop_target.requested)
+    longitudinalPlan.e2eStopDistance = float(self.stop_target.model_distance)
+    longitudinalPlan.stopTarget.active = self.stop_target.active
+    longitudinalPlan.stopTarget.distance = self.stop_target.distance
+    longitudinalPlan.stopTarget.holding = self.stop_target.holding
     self.conditional.publish(longitudinalPlan.conditionalExperimental, self.regular_accel, self.model_accel, self.model_stop)
 
     pm.send('longitudinalPlan', plan_send)

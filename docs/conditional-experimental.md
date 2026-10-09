@@ -46,6 +46,39 @@ When neither model stop nor another CEM condition remains, the existing release
 slew softens the return to acceleration. This condition does not change cruise SET
 or acknowledge the 105 km/h missing-speed handshake.
 
+## Regular ACC stop target
+
+On `boat-anchor-model-stop-poc`, a sustained model stop prediction creates a
+stationary obstacle alongside the two real leads in ordinary/conditional ACC.
+It requires fresh, valid model data, enabled longitudinal control, forward gear
+and no pedal override. SLC, CEM and a real lead are not required. Full experimental
+mode retains its existing model control.
+
+The MPC calculates braking from vehicle speed and the tracked remaining travel.
+The virtual obstacle sits 6 m beyond the target to account for the MPC's existing
+standstill gap; this adds no earlier-stop margin. Real leads retain their normal
+gap policy. Only the virtual target removes the ordinary 25% gap-compression slack.
+Stronger model or real-lead braking still wins. The brake calibration is unchanged.
+
+Remaining travel is reduced by measured vehicle motion. New nearer predictions
+are filtered over 0.2 seconds; the active target cannot recede ahead of the truck.
+A fresh prediction with neither a sustained stop nor `shouldStop` immediately
+removes the target. At rest, a positive model action plus a sustained departure
+trajectory also releases it, even if the trajectory begins with a near-zero prefix.
+A positive action alone cannot cancel a still-predicted future stop. Stale/invalid
+inputs, reverse, disengagement and pedal overrides clear all target history.
+
+A close target holds only below 0.3 m/s; an explicit model `shouldStop` can also
+request hold. An explicit stop without any known position never invents an
+obstacle. The ordinary planner handles the acceleration transition after release.
+Telemetry includes `stopTarget.active`, `stopTarget.distance` (-1 when absent),
+and `stopTarget.holding`; source `stopTarget` distinguishes this from a real lead.
+`e2eStopDistance` retains the raw model prediction for comparison. Legacy POC
+schema fields remain readable but have no control effect.
+
+This remains a POC: the model position is a prediction, not a detected stop line.
+The sustained-stop qualification can occur later than initial model slowing.
+
 ## Display
 
 A white conditional icon means selected but inactive. Orange means the E2E

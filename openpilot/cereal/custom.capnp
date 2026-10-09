@@ -86,6 +86,22 @@ struct ConditionalExperimentalState {
   }
 }
 
+struct StopTargetState {
+  active @0 :Bool;
+  distance @1 :Float32; # remaining ego travel to the tracked target, -1 when inactive
+  holding @2 :Bool;
+}
+
+# Retained only for reading logs from the earlier virtual-obstacle POC.
+struct ModelStopState {
+  active @0 :Bool;
+  margin @1 :Float32;
+  modelDistance @2 :Float32;
+  targetDistance @3 :Float32;
+  holdingStop @4 :Bool;
+  predictionGrace @5 :Bool;
+}
+
 struct CustomReserved3 @0xda96579883444c35 {
 }
 
