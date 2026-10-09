@@ -89,5 +89,50 @@ Acknowledged no-speed E2E replaces the map number with the experimental icon,
 orange border and OVERRIDE caption, retaining actual SET underneath. Recovery
 restores the map number. Green pulses indicate mapped-speed adjustments only.
 
+## C3x UI
+
+Speed-based camera zoom operates in every driving mode, including regular ACC
+and manual driving, independently of CEM activation. Calibrated alignment
+and a 200 ms live two-stream crossfade work in both directions. Brief invalid
+inputs retain the request; missing streams are retried. Offroad resets animation.
+The shared camera policy applies to both comma 3/3X and comma 4.
+
+The comma 3/3X border shows a red center segment across one quarter of the top
+for pedal braking or applied openpilot friction braking. This is braking feedback;
+GM does not currently decode physical brake-lamp status. Stale actuator messages
+cannot light it. Coasting does not trigger it.
+
+Blind-spot detection paints orange side brackets matching the alert hue, wrapping
+onto the top and bottom with short fades. Signaling toward an occupied side
+flashes that bracket red at 2 Hz. Indicators also work during manual driving.
+Lead triangles retain their top profile and have broader rounding on both side
+corners, for the yellow outline and red fill.
+
+During ordinary/conditional ACC, a cyan **STOP TARGET** flag marks the planner's
+tracked stopping point and shows its published remaining travel without a second
+UI filter. It clears when the planner releases the target. Actual vehicles keep
+their rounded yellow triangles. Manual/full E2E driving retains the approximate
+MODEL STOP prediction flag.
+
+The flag post sits at the right edge of the path ribbon; its crossbar marks the
+projected future bumper position. A lateral display shift does not change the
+remaining travel. A target beyond the available path geometry uses the fixed
+status card instead of a fabricated road position.
+
+The display adds a forward offset to the predicted model-reference position,
+rotated by the future heading/pitch. `ModelStopFrontOffset` is a persistent float
+in metres, read when the UI starts (valid range 0–5). Its 1.52 m default matches
+the fork's nominal model-to-front lead conversion; it is not a measured Sierra
+bumper offset. The raw MODEL STOP label retains ~ to identify a prediction.
+The raw prediction uses display smoothing; the planner target is displayed directly. Stale/no-stop predictions, non-forward gears and invalid calibration
+hide the marker. When the road anchor leaves the view or passes close to the
+vehicle, a screen-fixed flag remains visible on the lower right while the fresh
+model still requests a stop. It is labelled OFF SCREEN, with STOPPED added at
+standstill. An explicit stop action without a usable predicted position displays
+STOP REQUEST and POSITION UNAVAILABLE instead of inventing a distance. The
+original road post returns when its projection is visible again. Invalid road
+geometry can retain this status flag when the stop intent itself is valid.
+Bumper projection is display-only; it does not change the planner target or add a braking offset.
+
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
 under the [ODbL](https://opendatacommons.org/licenses/odbl/).

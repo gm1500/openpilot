@@ -10,7 +10,9 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.onroad.e2e_assist import slowing_assist_color
-from openpilot.system.ui.lib.application import gui_app
+from openpilot.selfdrive.ui.onroad.lead_geometry import rounded_triangle
+from openpilot.selfdrive.ui.onroad.model_stop import ModelStop, PATH_HALF_WIDTH, draw_stop_flag
+from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
 from openpilot.system.ui.widgets import Widget
 
@@ -55,6 +57,7 @@ class ModelRenderer(Widget):
     self._road_edge_stds = np.zeros(2, dtype=np.float32)
     self._lead_vehicles = [LeadVehicle(), LeadVehicle()]
     self._path_offset_z = HEIGHT_INIT[0]
+    self._model_stop = ModelStop(Params().get("ModelStopFrontOffset", return_default=True))
 
     # Initialize ModelPoints objects
     self._path = ModelPoints()
@@ -85,6 +88,7 @@ class ModelRenderer(Widget):
 
   def _render(self, rect: rl.Rectangle):
     sm = ui_state.sm
+    self._model_stop.update(sm, ui_state.started_frame, time.monotonic())
 
     # Check if data is up-to-date
     if (sm.recv_frame["extrinsicsCalibration"] < ui_state.started_frame or
@@ -128,6 +132,11 @@ class ModelRenderer(Widget):
     # Draw elements
     self._draw_lane_lines()
     self._draw_path(sm)
+
+    if (self._model_stop.marker is not None and sm.valid['extrinsicsCalibration'] and
+        str(extrinsics_calibration.calStatus) == 'calibrated'):
+      draw_stop_flag(self._model_stop.marker, self._path_offset_z, self._map_to_screen,
+                     rect, gui_app.font(FontWeight.BOLD), ui_state.is_metric)
 
     if render_lead_indicator and radar_state:
       self._draw_lead_indicator()
@@ -184,7 +193,7 @@ class ModelRenderer(Widget):
 
     max_idx = self._get_path_length_idx(path_x_array, max_distance)
     self._path.projected_points = self._map_line_to_polygon(
-      self._path.raw_points, 0.9, self._path_offset_z, max_idx, max_distance, allow_invert=False
+      self._path.raw_points, PATH_HALF_WIDTH, self._path_offset_z, max_idx, max_distance, allow_invert=False
     )
 
     self._update_experimental_gradient()
@@ -256,7 +265,7 @@ class ModelRenderer(Widget):
     glow = [(x + (sz * 1.35) + g_xo, y + sz + g_yo), (x, y - g_yo), (x - (sz * 1.35) - g_xo, y + sz + g_yo)]
     chevron = [(x + (sz * 1.25), y + sz), (x, y), (x - (sz * 1.25), y + sz)]
 
-    return LeadVehicle(glow=glow, chevron=chevron, fill_alpha=int(fill_alpha))
+    return LeadVehicle(glow=rounded_triangle(glow), chevron=rounded_triangle(chevron), fill_alpha=int(fill_alpha))
 
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""
