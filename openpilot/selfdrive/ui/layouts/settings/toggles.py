@@ -1,3 +1,4 @@
+from openpilot.selfdrive.controls.lib.longitudinal_mode import LongitudinalMode, set_longitudinal_mode
 from openpilot.cereal import log
 from openpilot.common.params import Params, UnknownKeyName
 from openpilot.system.ui.widgets import Widget
@@ -177,7 +178,7 @@ class TogglesLayout(Widget):
         self._toggles["ExperimentalMode"].action_item.set_enabled(False)
         self._toggles["ExperimentalMode"].action_item.set_state(False)
         self._long_personality_setting.action_item.set_enabled(False)
-        self._params.remove("ExperimentalMode")
+        set_longitudinal_mode(self._params, LongitudinalMode.voacc)
 
         unavailable = tr("Experimental mode is currently unavailable on this car since the car's stock ACC is used for longitudinal control.")
 
@@ -217,7 +218,7 @@ class TogglesLayout(Widget):
     if state and not confirmed:
       def confirm_callback(result: DialogResult):
         if result == DialogResult.CONFIRM:
-          self._params.put_bool("ExperimentalMode", True, block=True)
+          set_longitudinal_mode(self._params, LongitudinalMode.experimental)
           self._params.put_bool("ExperimentalModeConfirmed", True, block=True)
         else:
           self._toggles["ExperimentalMode"].action_item.set_state(False)
@@ -230,7 +231,7 @@ class TogglesLayout(Widget):
       gui_app.push_widget(dlg)
     else:
       self._update_experimental_mode_icon()
-      self._params.put_bool("ExperimentalMode", state, block=True)
+      set_longitudinal_mode(self._params, LongitudinalMode.experimental if state else LongitudinalMode.voacc)
 
   def _toggle_callback(self, state: bool, param: str):
     if param == "ExperimentalMode":
