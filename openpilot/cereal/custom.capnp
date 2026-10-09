@@ -10,10 +10,34 @@ $Cxx.namespace("cereal");
 # DO rename the structs
 # DON'T change the identifier (e.g. @0x81c2f05a394cf4af)
 
-struct CustomReserved0 @0x81c2f05a394cf4af {
+struct MapSpeedLimit @0x81c2f05a394cf4af {
+  speedLimit @0 :Float32;  # current/merge-approach legal limit in m/s; zero if unavailable, requires Event.valid
+  gpsMonoTime @1 :UInt64; # timestamp of the matched GPS fix, nanoseconds
+  headingValid @2 :Bool;
+  # Retain old ordinals for recorded-log compatibility; no runtime publisher.
+  displaySpeedLimitDEPRECATED @3 :Float32;
+  displayValidDEPRECATED @4 :Bool;
+  displayGpsMonoTimeDEPRECATED @5 :UInt64;
+  displayIsAdvisoryDEPRECATED @6 :Bool;
+  advisorySpeed @7 :Float32; # fresh matched recommendation in m/s; fallback when speedLimit is zero
+  distanceAhead @8 :Float32; # metres to a unique ramp-merge limit; zero on the current road
+  positionEstimated @9 :Bool; # bounded wheel/steering projection, including a recent parked restart
+  positionMonoTime @10 :UInt64; # observation time of the projected position; never rewrite gpsMonoTime
 }
 
-struct CustomReserved1 @0xaedffd8f31e7b55d {
+struct MapCruiseState @0xaedffd8f31e7b55d {
+  state @0 :State;
+  targetSpeed @1 :Float32; # qualified map target in m/s, zero if unavailable
+  pendingSpeedDEPRECATED @2 :Float32;
+  adjustingSpeed @3 :Float32; # UI pulse target until ego speed settles; zero if cancelled/complete
+  enum State {
+    off @0;
+    armed @1;
+    active @2;
+    paused @3;
+    waiting @4;
+    unsupported @5;
+  }
 }
 
 struct CustomReserved2 @0xf35cc4560bbf6ec2 {
