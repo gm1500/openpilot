@@ -1242,6 +1242,12 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
   shouldStop @37: Bool;
   allowThrottle @38: Bool;
   allowBrake @39: Bool;
+  e2eAssistActive @40 :Bool;  # selective assist constrains aTarget; experimental mode is unchanged
+  conditionalExperimental @41 :Custom.ConditionalExperimentalState;
+  modelStopDEPRECATED @42 :Custom.ModelStopState; # read logs from the earlier virtual-obstacle POC
+  e2eStopActive @43 :Bool; # E2E stop candidate enabled in regular/conditional ACC
+  e2eStopDistance @44 :Float32; # unmodified model travel, -1 if no predicted location
+  stopTarget @45 :Custom.StopTargetState;
 
 
   solverExecutionTime @35 :Float32;
@@ -1252,6 +1258,8 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
     lead1 @2;
     lead2 @3;
     e2e @4;
+    modelStopDEPRECATED @5; # earlier virtual-obstacle POC; never selected by this planner
+    stopTarget @6; # stationary model stop obstacle, separate from real vehicles
   }
 
 
