@@ -1,3 +1,4 @@
+from openpilot.selfdrive.controls.lib.longitudinal_mode import LongitudinalMode, set_longitudinal_mode
 from collections.abc import Callable
 
 from openpilot.cereal import log
@@ -127,7 +128,7 @@ class TogglesLayoutMici(NavScroller):
         self._experimental_btn.set_visible(False)
         self._experimental_btn.set_checked(False)
         self._personality_toggle.set_visible(False)
-        ui_state.params.remove("ExperimentalMode")
+        set_longitudinal_mode(ui_state.params, LongitudinalMode.voacc)
 
     # Refresh toggles from params to mirror external changes
     for key, item in self._refresh_toggles:
@@ -140,9 +141,9 @@ class TogglesLayoutMici(NavScroller):
 
       def on_confirm():
         ui_state.params.put_bool("ExperimentalModeConfirmed", True)
-        ui_state.params.put_bool("ExperimentalMode", True)
+        set_longitudinal_mode(ui_state.params, LongitudinalMode.experimental)
         self._experimental_btn.set_checked(True)
 
       gui_app.push_widget(ExperimentalModeConfirmPage(on_confirm))
     else:
-      ui_state.params.put_bool("ExperimentalMode", state)
+      set_longitudinal_mode(ui_state.params, LongitudinalMode.experimental if state else LongitudinalMode.voacc)

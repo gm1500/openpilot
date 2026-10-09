@@ -1,3 +1,4 @@
+from openpilot.selfdrive.controls.lib.longitudinal_mode import LongitudinalMode, set_longitudinal_mode
 from collections.abc import Callable
 from openpilot.common.time_helpers import system_time_valid
 from openpilot.system.ui.widgets.scroller import NavScroller
@@ -180,7 +181,7 @@ class DeveloperLayoutMici(NavScroller):
 
   def _on_lat_maneuver_mode(self, state: bool):
     ui_state.params.put_bool("LateralManeuverMode", state, block=True)
-    ui_state.params.put_bool("ExperimentalMode", False, block=True)
+    set_longitudinal_mode(ui_state.params, LongitudinalMode.voacc)
     ui_state.params.put_bool("JoystickDebugMode", False, block=True)
     self._joystick_toggle.set_checked(False)
     ui_state.params.put_bool("LongitudinalManeuverMode", False, block=True)
