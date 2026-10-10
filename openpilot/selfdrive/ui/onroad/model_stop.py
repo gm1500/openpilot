@@ -33,6 +33,7 @@ class StopMarker:
   standstill: bool = False
   label: str = 'MODEL STOP'
   held: bool = False  # display-only retention; never fed back into the planner
+  trajectory_only: bool = False
 
 
 class ModelStop:
@@ -79,6 +80,10 @@ class ModelStop:
       plan = sm['longitudinalPlan']
       if plan.stopTarget.active and math.isfinite(plan.stopTarget.distance) and plan.stopTarget.distance >= 0.:
         candidate = self.predict_target(sm['modelV2'], speed, plan.stopTarget.distance)
+      elif (getattr(plan.stopTarget, 'approaching', False) and
+            math.isfinite(plan.stopTarget.approachDistance) and plan.stopTarget.approachDistance >= 0.):
+        candidate = self.predict_target(sm['modelV2'], speed, plan.stopTarget.approachDistance)
+        candidate = replace(candidate, label='E2E APPROACH', trajectory_only=True)
       elif plan.e2eStopActive:
         candidate = StopMarker(None, 0., None, speed < .3, 'STOP TARGET')
     else:
@@ -96,7 +101,7 @@ class ModelStop:
       if lead_stop is not None:
         intent = model_intent(sm['modelV2'], speed)
         raw_stop = None
-        if candidate is not None and candidate.label == 'STOP TARGET' and candidate.distance is not None:
+        if candidate is not None and candidate.label in ('STOP TARGET', 'E2E APPROACH') and candidate.distance is not None:
           # The selected detector can qualify geometry before near-zero speed.
           # Compare the planner's raw observation, not a different UI detector.
           raw_stop = getattr(sm['longitudinalPlan'], 'e2eStopDistance', candidate.distance)
@@ -116,7 +121,7 @@ class ModelStop:
     braking = braking_active(sm, started_frame, now) and not getattr(car, 'gasPressed', False)
     # A pedal takeover must not replace the last planner target with a different
     # raw prediction. Keep ONLY its display while any fresh brake source holds.
-    if (previous is not None and braking and
+    if (previous is not None and not previous.trajectory_only and braking and
         (candidate is None or previous.label == 'STOP TARGET' and candidate.label != 'STOP TARGET')):
       distance = previous.distance
       if distance is not None:
@@ -124,7 +129,7 @@ class ModelStop:
         candidate = self.predict_target(sm['modelV2'], speed, distance)
       else:
         candidate = StopMarker(None, previous.yaw, None, speed < .3)
-      candidate = replace(candidate, label=previous.label, held=True)
+      candidate = replace(candidate, label=previous.label, held=True, trajectory_only=previous.trajectory_only)
     elif previous is not None and previous.held and not braking and candidate is not None and candidate.label == 'MODEL STOP':
       candidate = None  # release the held stop on this frame; do not relabel it
 
@@ -198,5 +203,5 @@ def distance_label(marker, metric):
   if marker.distance is None:
     return 'STOP REQUEST'
   distance = marker.distance if metric else marker.distance / .3048
-  prefix = '' if marker.label == 'STOP TARGET' else '~'
+  prefix = '' if marker.label in ('STOP TARGET', 'E2E APPROACH') else '~'
   return f'{prefix}{distance:.1f} {"m" if metric else "ft"}'

@@ -117,6 +117,13 @@ later stop requests in the recorded trace still reapply hold.
 
 ## Stop bar
 
+The E2E approach preview uses a solid green bar at half width (225 px), labeled
+E2E APPROACH. It clears when approach assistance withdraws, even during braking.
+A confirmed virtual stop uses the full-width yellow/dynamic-distance-colour bar,
+labeled STOP TARGET. Its display-only brake retention remains until release.
+Both stages share the same thickness and rounded trapezoid profile. Green
+previews the current endpoint; yellow shows the committed stopping position.
+
 Comma 3/3X draws a solid ground-perspective trapezoid with subtly rounded corners.
 Both edges stay horizontal; the far edge is 80% of the near edge's width, including
 when docked. Its fixed 450 px near-edge width is about 2.5 times
