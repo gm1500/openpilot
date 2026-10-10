@@ -87,6 +87,37 @@ class TestStopBar(unittest.TestCase):
     self.stop.update(self.sm, 1, 100.02)
     self.assertIsNone(self.stop.marker)
 
+  def test_trajectory_style_promotes_on_stop_and_persists_until_brake_release(self):
+    self.set_trajectory_only()
+    self.assertTrue(self.stop.marker.trajectory_only)
+    self.sm['modelV2'].velocity.x = model().velocity.x  # sustained stop point, still no shouldStop flag
+    self.stop.update(self.sm, 1, 100.01)
+    self.assertFalse(self.stop.marker.trajectory_only)
+    self.sm['modelV2'].velocity.x = np.maximum(.7, self.sm['modelV2'].velocity.x)
+    self.stop.update(self.sm, 1, 100.02)
+    self.assertFalse(self.stop.marker.trajectory_only)  # braking retains the stop style
+    self.release_target()
+    self.stop.update(self.sm, 1, 100.03)
+    self.assertTrue(self.stop.marker.held)
+    self.assertFalse(self.stop.marker.trajectory_only)
+    self.sm['carOutput'].actuatorsOutput.brake = 0.
+    self.stop.update(self.sm, 1, 100.04)
+    self.assertIsNone(self.stop.marker)
+
+  def test_planner_hold_promotes_trajectory_style_without_model_stop_flag(self):
+    self.set_trajectory_only()
+    self.assertTrue(self.stop.marker.trajectory_only)
+    self.sm['longitudinalPlan'].stopTarget.holding = True
+    self.stop.update(self.sm, 1, 100.01)
+    self.assertFalse(self.stop.marker.trajectory_only)
+
+  def set_trajectory_only(self):
+    self.sm['modelV2'] = model()
+    self.sm['modelV2'].velocity.x = np.maximum(.7, self.sm['modelV2'].velocity.x)
+    self.sm['longitudinalPlan'].stopTarget.distance = 16.
+    self.stop = ModelStop()
+    self.stop.update(self.sm, 1, 100.)
+
   def test_either_lead_in_overlap_band_clears_live_and_brake_held_bar(self):
     for second in (False, True):
       for held in (False, True):
@@ -240,6 +271,23 @@ class TestStopBar(unittest.TestCase):
       self.assertEqual(text.call_args.args[1], 'STOP TARGET  20.0 m')
       draw_stop_bar(marker, 4., 1.5, self.project, self.rect, None, False)
       self.assertEqual(text.call_args.args[1], 'STOP TARGET  65.6 ft')
+
+  def test_trajectory_bar_is_half_width_green_with_the_same_profile_and_thickness(self):
+    for position in ((21.52, 0., 0.), None):
+      marker = StopMarker(position, 0., 20., label='STOP TARGET', trajectory_only=True)
+      points, _ = stop_bar_geometry(marker, 1.5, self.project, self.rect)
+      full, _ = stop_bar_geometry(StopMarker(position, 0., 20.), 1.5, self.project, self.rect)
+      self.assertAlmostEqual(np.ptp(points[:, 0]), .5 * np.ptp(full[:, 0]))
+      self.assertAlmostEqual(np.ptp(points[:, 1]), np.ptp(full[:, 1]))
+      self.assertEqual(points[0, 1], points[1, 1])
+      self.assertEqual(points[2, 1], points[3, 1])
+      self.assertAlmostEqual(points[1, 0] - points[0, 0], .8 * (points[2, 0] - points[3, 0]))
+      with patch.dict(sys.modules, {'openpilot.system.ui.lib.text_measure': NS(measure_text_cached=lambda *args: NS(x=240., y=30.))}), \
+           patch.object(rl, 'draw_triangle_fan') as polygon, patch.object(rl, 'draw_rectangle_rounded'), patch.object(rl, 'draw_text_ex'):
+        draw_stop_bar(marker, 8., 1.5, self.project, self.rect, None, True)
+        self.assertEqual(polygon.call_count, 1)
+        color = polygon.call_args.args[2]
+        self.assertEqual((color.r, color.g, color.b, color.a), (23, 134, 68, 255))
 
   def test_rounded_bar_fans_face_the_camera_with_either_input_winding(self):
     # raylib DrawTriangleFan submits (center, i, i+1) with back-face culling.

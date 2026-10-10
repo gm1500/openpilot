@@ -1,4 +1,4 @@
-"""Opaque, rounded horizontal stop bar, using the ordinary lead colour response."""
+"""Opaque stop bars: green trajectory cue, ordinary lead colours for stop/hold."""
 import math
 import numpy as np
 
@@ -30,7 +30,7 @@ def stop_bar_geometry(marker, camera_height, project, rect):
 
   # Road curvature and camera roll move the anchor, never rotate the bar.
   # Use the same fixed width and doubled thickness for docked stops.
-  w = min(STOP_BAR_WIDTH, rect.width * .65)
+  w = min(STOP_BAR_WIDTH, rect.width * .65) * (.5 if marker.trajectory_only else 1.)
   far_w = w * STOP_BAR_FAR_WIDTH_RATIO
   points = np.array([(x - far_w / 2, y), (x + far_w / 2, y),
                      (x + w / 2, y + h), (x - w / 2, y + h)])
@@ -46,14 +46,14 @@ def draw_stop_bar(marker, speed, camera_height, project, rect, font, metric):
 
   points, docked = stop_bar_geometry(marker, camera_height, project, rect)
   scale = min(rect.width / 1080., rect.height / 540.)
-  # Identical to a stationary ordinary lead, without making the road visible
-  # through the bar. Red is composited over the solid yellow base.
-  alpha = lead_fill_alpha(marker.distance, -max(0., speed)) if marker.distance is not None else 0
-  yellow = np.array([218., 202., 37.])
+  # Trajectory-only targets stay green. Stop/hold targets retain the regular
+  # lead's yellow outline and dynamic distance/closing-speed fill.
+  alpha = lead_fill_alpha(marker.distance, -max(0., speed)) if marker.distance is not None and not marker.trajectory_only else 0
+  base = np.array([23., 134., 68.]) if marker.trajectory_only else np.array([218., 202., 37.])
   red = np.array([201., 34., 49.])
-  rgb = np.rint(yellow + alpha / 255. * (red - yellow)).astype(int)
+  rgb = np.rint(base + alpha / 255. * (red - base)).astype(int)
   outline = rounded_polygon(points, 4 * scale)
-  rl.draw_triangle_fan(outline, len(outline), rl.Color(218, 202, 37, 255))
+  rl.draw_triangle_fan(outline, len(outline), rl.Color(*map(int, base), 255))
   if alpha:
     center = points.mean(axis=0)
     size = np.ptp(points, axis=0)
