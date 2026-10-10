@@ -33,6 +33,7 @@ class StopMarker:
   standstill: bool = False
   label: str = 'MODEL STOP'
   held: bool = False  # display-only retention; never fed back into the planner
+  trajectory_only: bool = False
 
 
 class ModelStop:
@@ -79,6 +80,10 @@ class ModelStop:
       plan = sm['longitudinalPlan']
       if plan.stopTarget.active and math.isfinite(plan.stopTarget.distance) and plan.stopTarget.distance >= 0.:
         candidate = self.predict_target(sm['modelV2'], speed, plan.stopTarget.distance)
+        stop_action = bool(getattr(getattr(sm['modelV2'], 'action', None), 'shouldStop', False))
+        intent = model_intent(sm['modelV2'], speed)
+        confirmed_stop = intent.valid and intent.stop_distance >= 0.
+        candidate = replace(candidate, trajectory_only=not (confirmed_stop or stop_action or getattr(plan.stopTarget, 'holding', False)))
       elif plan.e2eStopActive:
         candidate = StopMarker(None, 0., None, speed < .3, 'STOP TARGET')
     else:
@@ -124,9 +129,13 @@ class ModelStop:
         candidate = self.predict_target(sm['modelV2'], speed, distance)
       else:
         candidate = StopMarker(None, previous.yaw, None, speed < .3)
-      candidate = replace(candidate, label=previous.label, held=True)
+      candidate = replace(candidate, label=previous.label, held=True, trajectory_only=previous.trajectory_only)
     elif previous is not None and previous.held and not braking and candidate is not None and candidate.label == 'MODEL STOP':
       candidate = None  # release the held stop on this frame; do not relabel it
+
+    if (braking and candidate is not None and candidate.trajectory_only and previous is not None and
+        previous.label == 'STOP TARGET' and not previous.trajectory_only):
+      candidate = replace(candidate, trajectory_only=False)  # keep the stop/hold style while braking
 
     self.marker = candidate
     if candidate is None:

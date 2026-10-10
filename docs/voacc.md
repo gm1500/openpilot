@@ -92,6 +92,13 @@ recorded vehicle motion, not a closed-loop rollout of the new policy.
 
 ## Stop bar
 
+Trajectory-only virtual targets use a solid green bar at half width (225 px).
+A sustained near-zero stop trajectory, immediate model stop request, or planner
+stop hold uses the full-width yellow/dynamic-distance-colour bar. The stop/hold style remains while braking;
+display-only brake retention preserves the last style until release. Both
+stages share the same thickness, rounded trapezoid profile and target position.
+This is visual only; both stages are active virtual stopped leads.
+
 Comma 3/3X draws a solid ground-perspective trapezoid with subtly rounded corners.
 Both edges stay horizontal; the far edge is 80% of the near edge's width, including
 when docked. Its fixed 450 px near-edge width is about 2.5 times
