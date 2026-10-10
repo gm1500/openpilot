@@ -69,3 +69,53 @@ struct CustomReserved18 @0xc86a3d38d13eb3ef {
 
 struct CustomReserved19 @0xa4f1eb3323f5f582 {
 }
+
+struct ConditionalExperimentalState {
+  state @0 :State;
+  reason @1 :Text;
+  targetId @2 :UInt64;
+  targetDistance @3 :Float32;
+  activationDistance @4 :Float32;
+  modelStopDistance @5 :Float32; # -1 if no sustained stop in the model horizon
+  regularAcceleration @6 :Float32; # boat-anchor output before junction assistance
+  modelAcceleration @7 :Float32;
+  modelShouldStop @8 :Bool;
+  modelSlowing @9 :Bool;
+  mapValid @10 :Bool;
+  armed @11 :Bool;
+  contributing @12 :Bool; # actual additional junction slowing/stop constraint
+  activationSpeed @13 :Float32; # current valid cruise set speed used for range, m/s; zero when unavailable
+  e2eEnabled @14 :Bool; # qualified conditional model candidate, independent of contribution
+  enum State {
+    off @0;
+    ready @1;
+    inRange @2;
+    assisting @3; # legacy slowing-only state
+    active @4;
+  }
+}
+
+
+struct StopTargetState {
+  active @0 :Bool;
+  distance @1 :Float32; # remaining ego travel to the tracked target, -1 when inactive
+  holding @2 :Bool;
+  horizonCandidate @3 :Bool;
+  horizonStable @4 :Bool;
+  horizonDistance @5 :Float32; # unshifted candidate stop travel, -1 when absent
+  horizonRemaining @6 :Float32; # seconds of compact trajectory after endpoint onset
+  horizonStableTime @7 :Float32; # observed span within the endpoint spread tolerance
+  horizonSpread @8 :Float32; # motion-compensated endpoint range over the confirmation window
+  approaching @9 :Bool; # E2E approach enabled; no stationary virtual obstacle
+  approachDistance @10 :Float32; # age-compensated endpoint preview, not a committed stop
+}
+
+
+struct ModelStopState {
+  active @0 :Bool;
+  margin @1 :Float32;
+  modelDistance @2 :Float32;
+  targetDistance @3 :Float32;
+  holdingStop @4 :Bool;
+  predictionGrace @5 :Bool;
+}
