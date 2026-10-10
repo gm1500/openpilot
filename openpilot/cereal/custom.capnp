@@ -110,7 +110,18 @@ struct ModelStopState {
   predictionGrace @5 :Bool;
 }
 
-struct CustomReserved3 @0xda96579883444c35 {
+struct ResumeTestRequest @0xda96579883444c35 {
+  requestId @0 :UInt64; # monotonic_ns at initial touch, unchanged for this press
+  held @1 :Bool; # live 20 Hz heartbeat; false or stale cancels
+}
+
+struct ResumeTestState {
+  ready @0 :Bool;
+  active @1 :Bool;
+  holding @2 :Bool; # latched after attempt; physical Resume/pedals/disengage exits
+  requestId @3 :UInt64;
+  remaining @4 :Float32;
+  reason @5 :Text;
 }
 
 struct CustomReserved4 @0x80ae746ee2596b11 {

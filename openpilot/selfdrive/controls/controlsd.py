@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 from numbers import Number
 
 from openpilot.cereal import log
@@ -18,6 +19,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
 from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
+from openpilot.selfdrive.controls.lib.resume_test import ResumeTest
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
@@ -40,7 +42,8 @@ class Controls:
 
     self.sm = messaging.SubMaster(['lateralDelay', 'vehicleParameters', 'lateralTorqueParameters', 'modelV2', 'selfdriveState',
                                    'extrinsicsCalibration', 'deviceMotion', 'longitudinalPlan', 'lateralManeuverPlan', 'carState', 'carOutput',
-                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance'], poll='selfdriveState')
+                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance', 'radarState', 'resumeTestRequest'],
+                                  poll='selfdriveState', ignore_alive=['resumeTestRequest'], ignore_valid=['resumeTestRequest'])
     self.pm = messaging.PubMaster(['carControl', 'controlsState'])
 
     self.steer_limited_by_safety = False
@@ -51,6 +54,8 @@ class Controls:
     self.calibrated_pose: Pose | None = None
 
     self.LoC = LongControl(self.CP)
+    self.resume_test = ResumeTest(self.CP)
+    self.effective_should_stop = True
     self.VM = VehicleModel(self.CP)
     self.LaC: LatControl
     if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
@@ -116,7 +121,11 @@ class Controls:
 
     # accel PID loop
     pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, CS.vEgo, CS.vCruise * CV.KPH_TO_MS)
-    actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
+    target, self.effective_should_stop = self.resume_test.update(
+      self.sm, time.monotonic(), CC.longActive, self.LoC.long_control_state == car.CarControl.Actuators.LongControlState.stopping)
+    actuators.accel = self.resume_test.apply(self.LoC, CC.longActive, CS, target, self.effective_should_stop, pid_accel_limits)
+    if self.resume_test.latched:
+      actuators.longControlState = self.LoC.long_control_state
 
     # Steering PID loop and lateral MPC
     # Reset desired curvature to current to avoid violating the limits on engage
@@ -160,7 +169,7 @@ class Controls:
 
     CC.cruiseControl.override = CC.enabled and not CC.longActive and self.CP.openpilotLongitudinalControl
     CC.cruiseControl.cancel = CS.cruiseState.enabled and (not CC.enabled or not self.CP.pcmCruise)
-    CC.cruiseControl.resume = CC.enabled and CS.cruiseState.standstill and not self.sm['longitudinalPlan'].shouldStop
+    CC.cruiseControl.resume = CC.enabled and CS.cruiseState.standstill and not self.effective_should_stop
 
     hudControl = CC.hudControl
     hudControl.setSpeed = float(CS.vCruiseCluster * CV.KPH_TO_MS)
@@ -192,6 +201,12 @@ class Controls:
     dat.valid = CS.canValid
     cs = dat.controlsState
 
+    cs.resumeTest.ready = self.resume_test.ready
+    cs.resumeTest.active = self.resume_test.active
+    cs.resumeTest.holding = self.resume_test.latched and not self.resume_test.active
+    cs.resumeTest.requestId = self.resume_test.last_id
+    cs.resumeTest.remaining = self.resume_test.remaining
+    cs.resumeTest.reason = self.resume_test.reason
     cs.curvature = self.curvature
     cs.longitudinalPlanMonoTime = self.sm.logMonoTime['longitudinalPlan']
     cs.lateralPlanMonoTime = self.sm.logMonoTime['modelV2']

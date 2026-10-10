@@ -873,6 +873,7 @@ struct SelfdriveState {
 }
 
 struct ControlsState @0x97ff69c53601abf1 {
+  resumeTest @67 :Custom.ResumeTestState;
   longitudinalPlanMonoTime @28 :UInt64;
   lateralPlanMonoTime @50 :UInt64;
 
@@ -2651,7 +2652,7 @@ struct Event {
     mapSpeedLimit @107 :Custom.MapSpeedLimit;
     mapCruiseState @108 :Custom.MapCruiseState;
     mapTrafficControl @109 :Custom.MapTrafficControl;
-    customReserved3 @110 :Custom.CustomReserved3;
+    resumeTestRequest @110 :Custom.ResumeTestRequest;
     customReserved4 @111 :Custom.CustomReserved4;
     customReserved5 @112 :Custom.CustomReserved5;
     customReserved6 @113 :Custom.CustomReserved6;
