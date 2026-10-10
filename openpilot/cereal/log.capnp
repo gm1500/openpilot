@@ -826,6 +826,7 @@ struct SelfdriveState {
   # configurable driving settings
   experimentalMode @10 :Bool;
   personality @11 :LongitudinalPersonality;
+  conditionalExperimental @14 :Bool; # selected map-gated slowing helper; full E2E stays false
 
   enum AudibleAlert {
     none @0;
@@ -2649,7 +2650,7 @@ struct Event {
     # DON'T change which struct it points to
     mapSpeedLimit @107 :Custom.MapSpeedLimit;
     mapCruiseState @108 :Custom.MapCruiseState;
-    customReserved2 @109 :Custom.CustomReserved2;
+    mapTrafficControl @109 :Custom.MapTrafficControl;
     customReserved3 @110 :Custom.CustomReserved3;
     customReserved4 @111 :Custom.CustomReserved4;
     customReserved5 @112 :Custom.CustomReserved5;

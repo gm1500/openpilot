@@ -1,7 +1,7 @@
 # boat-anchor
 
 Based on comma master `ec95db3f1fa19f76940497fedfdb62e09ea19912`.
-Five feature commits carry the working tune and policies onto that base.
+Six feature commits carry the working tune and policies onto that base.
 
 | Category | Behavior |
 | --- | --- |
@@ -10,6 +10,7 @@ Five feature commits carry the working tune and policies onto that base.
 | Lane policy | Blend a bounded centering correction from confident inner lane lines with the model path. Retain brief learned-width support with one line, and release for lane changes, invalid geometry or the per-drive toggle. Shared UI support covers comma 3/3X and comma 4. |
 | [VOACC fixes](voacc.md) | Start with model lead velocity, blend in a bounded early closing cue, then use mature range-derived velocity. Reset inconsistent cut-in history without hiding current range. Preserve urgent braking and stopped-lead constraints. E2E stop targets use a stationary virtual lead, a 1.5 m earlier target, and a persistent rectangular stop marker. |
 | SLC | Match fresh GPS/heading to OSM road geometry. Use legal limits first and advisory speeds when no legal limit exists. Keep the existing cruise target when map data is missing or ambiguous. |
+| [CEM](conditional-experimental.md) | Separate conditional mode enables E2E for junctions, missing map speed, or sustained model stops. No-speed fallback acknowledges its SET change and recovery. |
 
 E2E slowing assistance can qualify when the model-estimated lead speed is below
 55 km/h and E2E requests sustained braking. The threshold controls entry only;
