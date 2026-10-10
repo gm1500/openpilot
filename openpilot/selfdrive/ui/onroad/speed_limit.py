@@ -10,7 +10,7 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 
 def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: float | None, is_metric: bool, set_color: rl.Color,
                      state: str = 'unsupported', pulse_elapsed: float | None = None, advisory: bool = False,
-                     e2e_override: bool = False) -> None:
+                     e2e_override: bool = False, zone_type: str = 'none') -> None:
   """North American-style map sign, with the cruise target outside underneath."""
   font = gui_app.font(FontWeight.BOLD)
   medium = gui_app.font(FontWeight.MEDIUM)
@@ -39,7 +39,14 @@ def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: f
     rl.draw_text_ex(face, value, pos, size, 0, color)
 
   if not advisory:
-    text("MAXIMUM" if is_metric else "SPEED LIMIT", 14, 34, 27, black)
+    label = "MAXIMUM" if is_metric else "SPEED LIMIT"
+    if speed_limit is not None and not e2e_override and zone_type in ('construction', 'school'):
+      label = 'CONSTRUCTION' if zone_type == 'construction' else 'SCHOOL'
+      color = orange if zone_type == 'construction' else rl.Color(180, 255, 0, 255)
+      # Exactly the existing header row; text() fits both width and height.
+      header = rl.Rectangle(rect.x + 7 * scale, rect.y + 14 * scale, rect.width - 14 * scale, 34 * scale)
+      rl.draw_rectangle_rec(header, color)
+    text(label, 14, 34, 27, black)
   if e2e_override:
     # Reuse the mode button's icon, centered where the map number normally sits.
     icon = gui_app.texture('icons/experimental.png', round(100 * scale), round(100 * scale))
@@ -99,4 +106,5 @@ class SpeedLimitButton(Widget):
     elapsed = None if self._pulse_since is None else now - self._pulse_since
     draw_speed_limit(rect, ui_state.speed_limit, self.set_speed, ui_state.is_metric, self.set_color, state, elapsed,
                      advisory=ui_state.speed_limit_is_advisory,
+                     zone_type=str(getattr(ui_state.sm['mapSpeedLimit'], 'zoneType', 'none')),
                      e2e_override=ui_state.map_cruise_e2e and ui_state.map_cruise_enabled and ui_state.map_cruise_supported)

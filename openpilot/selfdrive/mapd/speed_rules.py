@@ -154,3 +154,23 @@ def road_speed(tags: dict[str, str], forward: bool | None, advisory: bool = Fals
     ahead, behind = directional('forward'), directional('backward')
     return ahead if ahead == behind else None
   return directional('forward' if forward else 'backward')
+
+
+def road_zone(tags: dict[str, str], forward: bool | None, local_time: datetime | None = None) -> str:
+  """Classify only a resolved, currently active restriction on the matched way."""
+  if road_speed(tags, forward, local_time=local_time) is None:
+    return 'none'
+  construction = tags.get('maxspeed:type') == 'construction'
+  school = tags.get('school_zone') == 'yes' or tags.get('hazard') == 'school_zone'
+  if construction == school:
+    return 'none'  # absent or conflicting classification
+
+  def active(direction):
+    condition = tags.get(f'maxspeed:{direction}:conditional', tags.get('maxspeed:conditional'))
+    if condition is None:
+      return True
+    clauses = _split(condition)
+    return clauses is not None and any(schedule_active(clause.split('@')[1], local_time) is True for clause in clauses)
+
+  directions = ('forward', 'backward') if forward is None else ('forward' if forward else 'backward',)
+  return ('construction' if construction else 'school') if all(active(direction) for direction in directions) else 'none'

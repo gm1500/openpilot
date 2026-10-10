@@ -36,6 +36,7 @@ def main():
     if sample is not None:
       fix, limit, advisory, ahead = sample
       msg.mapSpeedLimit.speedLimit = limit or 0.
+      msg.mapSpeedLimit.zoneType = provider.zone_type
       msg.mapSpeedLimit.advisorySpeed = advisory or 0.
       msg.mapSpeedLimit.gpsMonoTime = int((fix.gps_timestamp if fix.estimated else fix.timestamp) * 1e9)
       msg.mapSpeedLimit.positionEstimated = fix.estimated

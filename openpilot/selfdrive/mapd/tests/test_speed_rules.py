@@ -197,3 +197,26 @@ class TestTimedRoadIntegration(unittest.TestCase):
 
 if __name__ == '__main__':
   unittest.main()
+
+
+class TestZoneLabels(unittest.TestCase):
+  def test_zone_schedule_direction_and_unknowns(self):
+    from openpilot.selfdrive.mapd.speed_rules import road_zone
+    tags = {'maxspeed': '50', 'hazard': 'school_zone', 'maxspeed:forward:conditional': '30 @ (07:30-21:00)'}
+    self.assertEqual(road_zone(tags, True, local('2026-10-10T12:00')), 'school')
+    self.assertEqual(road_zone(tags, True, local('2026-10-10T22:00')), 'none')
+    self.assertEqual(road_zone(tags, True, None), 'none')
+    self.assertEqual(road_zone(tags, None, local('2026-10-10T12:00')), 'none')
+    self.assertEqual(road_zone({'hazard': 'school_zone'}, True), 'none')
+    self.assertEqual(road_zone({'maxspeed': '40'}, True), 'none')
+    tags['maxspeed:forward:conditional'] = '30 @ (school_days)'
+    self.assertEqual(road_zone(tags, True, local('2026-10-10T12:00')), 'none')
+
+  def test_construction_expiry_and_conflicting_labels(self):
+    from openpilot.selfdrive.mapd.speed_rules import road_zone
+    tags = {'maxspeed': '80', 'maxspeed:type': 'construction',
+            'maxspeed:conditional': '40 @ (2026 Oct 10-2026 Oct 12)'}
+    self.assertEqual(road_zone(tags, True, local('2026-10-10T12:00')), 'construction')
+    self.assertEqual(road_zone(tags, True, local('2026-10-13T12:00')), 'none')
+    tags['school_zone'] = 'yes'
+    self.assertEqual(road_zone(tags, True, local('2026-10-10T12:00')), 'none')

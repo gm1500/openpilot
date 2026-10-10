@@ -9,7 +9,7 @@ from itertools import pairwise
 
 import requests
 
-from openpilot.selfdrive.mapd.speed_rules import parse_speed as parse_speed, road_speed
+from openpilot.selfdrive.mapd.speed_rules import parse_speed as parse_speed, road_speed, road_zone
 from openpilot.selfdrive.mapd.zone_time import ZoneClock
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
@@ -682,10 +682,12 @@ class OSMSpeedLimit:
     self.control: Junction | None = None
     self.control_match: RoadMatch | None = None
     self.control_reason = 'noPosition'
+    self.zone_type = 'none'
 
   def update(self, fix: GpsFix | None, now: float) -> tuple[GpsFix, float | None, float | None, float] | None:
     self.control = self.control_match = None
     self.control_reason = 'noPosition'
+    self.zone_type = 'none'
     if fix is not None and (fix.speed < 0 or not 0 <= now - fix.timestamp <= GPS_MAX_AGE):
       fix = None  # reverse heading is retained by MapPosition, not walked as a forward road path
     with self._lock:
@@ -731,6 +733,8 @@ class OSMSpeedLimit:
     ahead = 0.
     if match is not None and speed is None and advisory is None:
       speed, ahead = self._tracker.merge_limit(match, fix)
+    if match is not None and speed is not None and ahead == 0.:
+      self.zone_type = road_zone(match.road.tags, match.forward, match.local_time)
     return fix, speed, advisory, ahead
 
   def _run(self):

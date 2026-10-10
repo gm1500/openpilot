@@ -22,6 +22,12 @@ struct MapSpeedLimit @0x81c2f05a394cf4af {
   advisorySpeed @7 :Float32; # fresh matched recommendation in m/s; fallback when speedLimit is zero
   distanceAhead @8 :Float32; # metres to a unique ramp-merge limit; zero on the current road
   positionEstimated @9 :Bool; # bounded wheel/steering projection, including a recent parked restart
+  zoneType @11 :ZoneType; # active restriction on the current matched road; old logs default to none
+  enum ZoneType {
+    none @0;
+    construction @1;
+    school @2;
+  }
   positionMonoTime @10 :UInt64; # observation time of the projected position; never rewrite gpsMonoTime
 }
 
