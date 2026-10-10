@@ -1,4 +1,5 @@
 from __future__ import annotations
+from openpilot.selfdrive.controls.lib.longitudinal_mode import LongitudinalMode, set_longitudinal_mode
 
 import datetime
 import math
@@ -175,7 +176,7 @@ class MiciHomeLayout(Widget):
         # long gating for experimental mode - only allow toggle if longitudinal control is available
         if ui_state.has_longitudinal_control and ui_state.experimental_mode_confirmed:
           ui_state.experimental_mode = not ui_state.experimental_mode
-          ui_state.params.put("ExperimentalMode", ui_state.experimental_mode, block=True)
+          set_longitudinal_mode(ui_state.params, LongitudinalMode.experimental if ui_state.experimental_mode else LongitudinalMode.voacc)
         self._mouse_down_t = None
         self._did_long_press = True
 
