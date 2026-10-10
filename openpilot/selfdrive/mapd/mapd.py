@@ -16,6 +16,7 @@ def main():
                            'deviceMotion', 'extrinsicsCalibration'])
   pm = messaging.PubMaster(['mapSpeedLimit', 'mapTrafficControl'])
   provider = OSMSpeedLimit()
+  provider.clock.prepare()  # load timezone polygons before the publication loop
   params = Params()
   with car.CarParams.from_bytes(params.get('CarParams', block=True)) as CP:
     vehicle_id = hashlib.sha256(f'{CP.carFingerprint}:{CP.carVin}'.encode()).hexdigest()
@@ -26,13 +27,17 @@ def main():
   while True:
     sm.update(0)
     now = time.monotonic()
-    fix = position.update(gps_fix(sm, 1, now), vehicle_motion(sm, now, signed_speed), now, time.time())  # noqa: TID251
+    raw_fix = gps_fix(sm, 1, now)
+    provider.clock.observe(raw_fix, now)
+    fix = position.update(raw_fix, vehicle_motion(sm, now, signed_speed), now, time.time())  # noqa: TID251
     sample = provider.update(fix, now)
     msg = messaging.new_message('mapSpeedLimit')
     msg.valid = sample is not None and any(speed is not None for speed in sample[1:3])
     if sample is not None:
       fix, limit, advisory, ahead = sample
       msg.mapSpeedLimit.speedLimit = limit or 0.
+      msg.mapSpeedLimit.zoneType = provider.zone_type
+      msg.mapSpeedLimit.zoneSource = provider.zone_source
       msg.mapSpeedLimit.advisorySpeed = advisory or 0.
       msg.mapSpeedLimit.gpsMonoTime = int((fix.gps_timestamp if fix.estimated else fix.timestamp) * 1e9)
       msg.mapSpeedLimit.positionEstimated = fix.estimated

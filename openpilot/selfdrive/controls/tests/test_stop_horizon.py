@@ -3,7 +3,7 @@ import unittest
 
 from openpilot.selfdrive.controls.lib.e2e_stop import E2EStopTarget
 from openpilot.selfdrive.controls.lib.model_intent import model_intent
-from openpilot.selfdrive.controls.lib.stop_horizon import StableStopHorizon, horizon_stop
+from openpilot.selfdrive.controls.lib.stop_horizon import StopHorizon, horizon_stop
 from openpilot.selfdrive.controls.tests.test_e2e_stop import model
 from openpilot.selfdrive.modeld.constants import ModelConstants
 
@@ -20,7 +20,6 @@ class TestHorizonShape(unittest.TestCase):
     prediction = endpoint_model()
     result = horizon_stop(prediction, 8.)
     self.assertEqual(result.distance, model_intent(prediction, 8.).stop_distance)
-    self.assertEqual(result.endpoint, 16.)
     self.assertGreater(result.remaining_time, 1.5)
 
   def test_geometry_can_qualify_without_near_zero_speed_or_stop_flag(self):
@@ -70,65 +69,24 @@ class TestHorizonShape(unittest.TestCase):
       self.assertEqual(horizon_stop(prediction, 8.).distance, -1.)
 
 
-class TestHorizonStability(unittest.TestCase):
-  def setUp(self):
-    self.horizon = StableStopHorizon()
-
-  def step(self, frame, distance=None, **kwargs):
-    now = 100. + frame * .05
-    self.horizon.update(endpoint_model(16. - frame * .4 if distance is None else distance),
-                        **({'now': now, 'model_time': now, 'v_ego': 8.} | kwargs))
-    return self.horizon
-
-  def test_requires_observed_time_and_motion_compensation(self):
-    for frame in range(6):
-      self.assertFalse(self.step(frame).stable)
-    self.assertTrue(self.step(6).stable)
-    self.assertLess(self.horizon.spread, 1e-6)
-
-  def test_repeated_frames_cannot_confirm_and_stale_frames_clear(self):
-    for frame in range(6):
-      self.assertFalse(self.step(frame, model_time=100.).stable)
-    self.assertFalse(self.step(8, model_time=100.).stable)
-    self.assertEqual(self.horizon.observation.distance, -1.)
-
-  def test_endpoint_moving_with_car_and_jumping_endpoint_do_not_confirm(self):
-    for frame in range(30):
-      self.assertFalse(self.step(frame, distance=16.).stable)
-    self.horizon.reset()
-    for frame in range(30):
-      self.assertFalse(self.step(frame, distance=16. - frame * .4 + (2. if frame % 2 else 0.)).stable)
-
-  def test_small_noise_and_observation_age_are_compensated(self):
-    for frame in range(10):
-      # The path is from 100 ms earlier: it still contains 0.8 m more travel.
-      h = self.step(frame, distance=16.8 - frame * .4 + (.1 if frame % 2 else -.1),
-                    model_time=99.9 + frame * .05)
-    self.assertTrue(h.stable)
-    self.assertLess(h.spread, .21)
-
-  def test_distant_endpoint_noise_tolerance_tightens_near_vehicle_and_is_capped(self):
-    for distance, noise, expected in ((16., .8, False), (40., .8, True), (80., 1.2, True), (80., 1.6, False)):
-      with self.subTest(distance=distance, noise=noise):
-        self.horizon.reset()
-        for frame in range(7):
-          h = self.step(frame, distance=distance - frame * .4 + (noise if frame % 2 else -noise))
-        self.assertEqual(h.stable, expected)
-
-  def test_gap_regression_withdrawal_and_invalid_data_clear_confirmation(self):
-    for kwargs in ({'now': 101., 'model_time': 101.}, {'model_time': 100.1}, {'v_ego': math.nan}):
-      self.horizon.reset()
-      for frame in range(7):
-        self.step(frame)
-      self.assertFalse(self.step(7, **kwargs).stable)
-    for frame in range(7):
-      self.step(frame)
-    self.horizon.update(model(brake=0.), now=100.35, model_time=100.35, v_ego=8.)
-    self.assertFalse(self.horizon.stable)
-    self.assertEqual(self.horizon.observation.distance, -1.)
+class TestHorizonFreshness(unittest.TestCase):
+  def test_repeated_frames_and_invalid_timing(self):
+    horizon = StopHorizon()
+    prediction = endpoint_model()
+    horizon.update(prediction, now=100., model_time=100., v_ego=8.)
+    observed = horizon.observation
+    horizon.update(model(brake=0.), now=100.1, model_time=100., v_ego=8.)
+    self.assertIs(horizon.observation, observed)
+    horizon.update(prediction, now=100.4, model_time=100., v_ego=8.)
+    self.assertEqual(horizon.observation.distance, -1.)
+    for kwargs in ({'now': 101., 'model_time': 101.}, {'model_time': 99.9}, {'v_ego': math.nan}):
+      horizon.reset()
+      horizon.update(prediction, now=100., model_time=100., v_ego=8.)
+      horizon.update(prediction, **({'now': 100.1, 'model_time': 100.1, 'v_ego': 8.} | kwargs))
+      self.assertEqual(horizon.observation.distance, -1.)
 
 
-class TestStableHorizonTarget(unittest.TestCase):
+class TestHorizonTarget(unittest.TestCase):
   def setUp(self):
     self.target = E2EStopTarget()
 
@@ -189,7 +147,7 @@ class TestStableHorizonTarget(unittest.TestCase):
       self.assertTrue(t.requested)
       self.assertTrue(t.approaching)
       self.assertFalse(t.active)
-    self.assertGreater(t.horizon.stable_time, .15)
+    self.assertGreater(t.horizon.observation.distance, 0.)
     t = self.step(5, model=model(brake=0.))
     self.assertFalse(t.requested)
     self.assertFalse(t.approaching)
@@ -200,7 +158,6 @@ class TestStableHorizonTarget(unittest.TestCase):
     prediction = endpoint_model(13.2)
     prediction.position.x[-1] += 2.  # endpoint stability fails; near-zero intent still holds
     self.assertTrue(self.step(7, model=prediction).active)
-    self.assertFalse(self.target.horizon.stable)
     self.assertFalse(self.step(8, model=model(brake=0.), e2e_accel=.5).active)
     self.assertFalse(self.target.holding)
     self.assertEqual(self.target.distance, -1.)
@@ -230,7 +187,6 @@ class TestStableHorizonTarget(unittest.TestCase):
   def test_disengagement_pedal_and_invalid_input_eligibility_clear_history(self):
     self.acquire()
     self.assertFalse(self.step(7, eligible=False).active)
-    self.assertFalse(self.target.horizon.stable)
     self.assertFalse(self.step(8, model=endpoint_model(residual_speed=.7)).active)
 
 

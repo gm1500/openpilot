@@ -1,27 +1,21 @@
-"""Qualify a stationary endpoint before acquiring a virtual stopped lead."""
+"""Recognize a converging model endpoint for immediate E2E approach assistance."""
 import math
-from collections import deque
 from dataclasses import dataclass
 
 from openpilot.selfdrive.controls.lib.model_intent import model_intent
 from openpilot.selfdrive.modeld.constants import ModelConstants
 
 MAX_MODEL_AGE = .3
-CONFIRM_TIME = .3
 MIN_TAIL_TIME = 1.5
 MAX_TAIL_TRAVEL = 4.
 MAX_TAIL_SPEED = 2.5
 MAX_TAIL_SPEED_RATIO = .35
 MAX_STATIONARY_TRAVEL = .75
-MIN_ENDPOINT_SPREAD = 1.
-MAX_ENDPOINT_SPREAD = 3.
-ENDPOINT_SPREAD_RATIO = .05
 
 
 @dataclass(frozen=True)
 class HorizonStop:
   distance: float = -1.
-  endpoint: float = -1.
   remaining_time: float = 0.
 
 
@@ -49,21 +43,17 @@ def horizon_stop(model, v_ego):
         tail_speed <= MAX_TAIL_SPEED and
         (stationary or tail_speed <= min(speeds[0] - drop, MAX_TAIL_SPEED_RATIO * speeds[0]))):
       distance = intent.stop_distance if intent.stop_distance >= 0. else arc[-1]
-      return HorizonStop(distance, arc[-1], float(times[-1] - t))
+      return HorizonStop(distance, float(times[-1] - t))
   return HorizonStop()
 
 
-class StableStopHorizon:
+class StopHorizon:
   def __init__(self):
     self.reset()
 
   def reset(self):
     self.observation = HorizonStop()
-    self.stable = False
-    self.stable_time = self.spread = 0.
     self.timestamp = self.update_time = None
-    self.travel = self.speed = 0.
-    self.samples = deque()
 
   def update(self, model, *, now, model_time, v_ego):
     if (not all(math.isfinite(x) for x in (now, model_time, v_ego)) or not -.1 <= v_ego <= 75 or
@@ -72,33 +62,8 @@ class StableStopHorizon:
         self.update_time is not None and not 0 <= now - self.update_time <= MAX_MODEL_AGE):
       self.reset()
       return
-    speed = max(0., v_ego)
-    if self.update_time is not None:
-      self.travel += .5 * (self.speed + speed) * (now - self.update_time)
-    self.update_time, self.speed = now, speed
+    self.update_time = now
     if model_time == self.timestamp:
-      return  # repeated frames cannot confirm stability
+      return  # one shape calculation per new model frame
     self.timestamp = model_time
-    self.observation = horizon_stop(model, speed)
-    self.stable = False
-    self.stable_time = self.spread = 0.
-    if not 0 <= self.observation.distance <= 150.:
-      self.samples.clear()
-      return
-    # Compare in a travelled-distance frame, including observation age. An
-    # endpoint fixed relative to the moving car is not a fixed road location.
-    endpoint = self.observation.endpoint - speed * (now - model_time) + self.travel
-    self.samples.append((model_time, endpoint))
-    while len(self.samples) > 1 and self.samples[1][0] <= model_time - CONFIRM_TIME:
-      self.samples.popleft()
-    positions = [s[1] for s in self.samples]
-    self.spread = max(positions) - min(positions)
-    # Distant endpoints have more range noise. Tighten back to 1 m near the
-    # vehicle; neither this tolerance nor the compact-tail length is an offset.
-    tolerance = min(MAX_ENDPOINT_SPREAD, max(MIN_ENDPOINT_SPREAD, ENDPOINT_SPREAD_RATIO * self.observation.endpoint))
-    # A jump restarts qualification; no stale stable result survives it.
-    while len(self.samples) > 1 and max(positions) - min(positions) > tolerance:
-      self.samples.popleft()
-      positions = [s[1] for s in self.samples]
-    self.stable_time = model_time - self.samples[0][0]
-    self.stable = len(self.samples) >= 4 and self.stable_time >= CONFIRM_TIME - 1e-6
+    self.observation = horizon_stop(model, max(0., v_ego))

@@ -23,6 +23,13 @@ struct MapSpeedLimit @0x81c2f05a394cf4af {
   distanceAhead @8 :Float32; # metres to a unique ramp-merge limit; zero on the current road
   positionEstimated @9 :Bool; # bounded wheel/steering projection, including a recent parked restart
   positionMonoTime @10 :UInt64; # observation time of the projected position; never rewrite gpsMonoTime
+  zoneType @11 :ZoneType; # active restriction on the current matched road; old logs default to none
+  zoneSource @12 :Text; # municipal restriction identifier, when consulted
+  enum ZoneType {
+    none @0;
+    construction @1;
+    school @2;
+  }
 }
 
 struct MapCruiseState @0xaedffd8f31e7b55d {
@@ -91,11 +98,11 @@ struct StopTargetState {
   distance @1 :Float32; # remaining ego travel to the tracked target, -1 when inactive
   holding @2 :Bool;
   horizonCandidate @3 :Bool;
-  horizonStable @4 :Bool;
+  horizonStable @4 :Bool; # retired diagnostic; reserved for old logs
   horizonDistance @5 :Float32; # unshifted candidate stop travel, -1 when absent
   horizonRemaining @6 :Float32; # seconds of compact trajectory after endpoint onset
-  horizonStableTime @7 :Float32; # observed span within the endpoint spread tolerance
-  horizonSpread @8 :Float32; # motion-compensated endpoint range over the confirmation window
+  horizonStableTime @7 :Float32; # retired diagnostic; reserved for old logs
+  horizonSpread @8 :Float32; # retired diagnostic; reserved for old logs
   approaching @9 :Bool; # E2E approach enabled; no stationary virtual obstacle
   approachDistance @10 :Float32; # age-compensated endpoint preview, not a committed stop
 }

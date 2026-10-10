@@ -24,7 +24,7 @@ VOACC priority for overlapping stops without switching on small prediction jitte
 The comparison uses the model stopping position, with no artificial early-stop
 offset. A positionless stop request creates no virtual obstacle. Lead overlap
 suppresses the duplicate obstacle without suppressing a fresh E2E action or
-clearing endpoint diagnostic history. Existing selective lead assistance and
+discarding the current endpoint observation. Existing selective lead assistance and
 CEM remain independent.
 
 For a separate earlier target, MPC considers it alongside both real leads over
@@ -70,8 +70,8 @@ speed. An already stationary vehicle requires the entire path to stay within 0.7
 all predicted speeds at or below 0.5 m/s. A short path, turn, slow constant
 creep, or merely reaching the finite forecast boundary is insufficient.
 
-There is no endpoint-stability delay for enabling E2E. The previous 0.3 s,
-distance-dependent stability calculation remains diagnostic telemetry only.
+There is no endpoint-stability delay for enabling E2E. The obsolete 0.3 s
+stability window and spread calculation have been removed.
 The green preview follows the current endpoint and can refine in either
 direction; it never seeds the committed stop filter.
 
@@ -86,9 +86,10 @@ near-zero speed jitter. Fresh withdrawal releases assistance and the obstacle;
 pedal overrides, disengagement and unhealthy data clear them immediately.
 The confirmed target retains its existing filter and cannot recede.
 
-`longitudinalPlan.stopTarget.horizon*` records the candidate, stability,
-candidate distance, remaining forecast time, observed stability duration, and
-motion-compensated endpoint spread. `stopTarget.approaching` and
+`longitudinalPlan.stopTarget.horizonCandidate`, `horizonDistance` and
+`horizonRemaining` record the candidate, distance and remaining forecast time.
+Old stability fields retain their schema ordinals for existing logs but are no
+longer computed or published. `stopTarget.approaching` and
 `approachDistance` identify E2E approach and its age-compensated preview;
 `active` and `distance` identify an actual MPC virtual obstacle.
 `e2eStopActive` includes both approach and confirmed-stop E2E requests.

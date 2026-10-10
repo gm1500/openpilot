@@ -234,11 +234,8 @@ class LongitudinalPlanner:
     longitudinalPlan.stopTarget.approachDistance = self.stop_target.approach_distance
     horizon = self.stop_target.horizon
     longitudinalPlan.stopTarget.horizonCandidate = horizon.observation.distance >= 0.
-    longitudinalPlan.stopTarget.horizonStable = horizon.stable
     longitudinalPlan.stopTarget.horizonDistance = horizon.observation.distance
     longitudinalPlan.stopTarget.horizonRemaining = horizon.observation.remaining_time
-    longitudinalPlan.stopTarget.horizonStableTime = horizon.stable_time
-    longitudinalPlan.stopTarget.horizonSpread = horizon.spread
     self.conditional.publish(longitudinalPlan.conditionalExperimental, self.regular_accel, self.model_accel, self.model_stop)
 
     pm.send('longitudinalPlan', plan_send)

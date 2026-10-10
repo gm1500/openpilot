@@ -3,7 +3,7 @@ import math
 
 from openpilot.selfdrive.controls.lib.model_intent import model_intent
 from openpilot.selfdrive.controls.lib.lead_stop import lead_covers_stop
-from openpilot.selfdrive.controls.lib.stop_horizon import StableStopHorizon
+from openpilot.selfdrive.controls.lib.stop_horizon import StopHorizon
 from openpilot.selfdrive.modeld.constants import ModelConstants
 
 MAX_MODEL_AGE = .3
@@ -23,7 +23,7 @@ def departing(model, v_ego, e2e_accel, e2e_stop):
 
 class E2EStopTarget:
   def __init__(self):
-    self.horizon = StableStopHorizon()
+    self.horizon = StopHorizon()
     self.reset()
 
   def reset(self):
@@ -75,7 +75,7 @@ class E2EStopTarget:
         raw_stop = max(0., self.distance - travel)
       if lead_covers_stop(raw_stop, lead_stop_distance, self.active):
         # Suppress the duplicate obstacle, not the fresh model braking request.
-        # Flickering accepted leads must not erase approach/diagnostic history.
+        # Flickering accepted leads must not erase the current approach observation.
         covered = True
         self.active = False
         self.distance = self.filtered_distance = -1.
@@ -87,7 +87,7 @@ class E2EStopTarget:
       # may keep a phantom stopped obstacle after the model requests departure.
       self.requested = (stop_distance >= 0. or e2e_stop or approach) and not departing(model, speed, e2e_accel, e2e_stop)
       if not self.requested:
-        self._clear_target()  # retain only the new detector's qualification history
+        self._clear_target()  # retain the current horizon observation
         return
       self.model_distance = stop_distance if stop_distance >= 0. else endpoint
       if not covered and 0 <= stop_distance <= MAX_STOP_DISTANCE:
