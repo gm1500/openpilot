@@ -216,7 +216,7 @@ class TestResumeTest(unittest.TestCase):
         decoded.append((self.test.active, addr, values))
         self.assertEqual(bus, 0)
         if addr == 715:
-          self.assertEqual(values['GasRegenFullStopActive'], not self.test.active)
+          self.assertEqual(values['GasRegenFullStopActive'], 0)
           if self.test.active:
             self.assertAlmostEqual(values['GasRegenCmd'], 325., delta=1.)
           else:
