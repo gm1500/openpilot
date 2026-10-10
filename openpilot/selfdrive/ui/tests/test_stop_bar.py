@@ -31,6 +31,7 @@ class TestStopBar(unittest.TestCase):
 
   def release_target(self):
     self.sm['longitudinalPlan'].stopTarget.active = False
+    self.sm['longitudinalPlan'].stopTarget.approaching = False
     self.sm['longitudinalPlan'].e2eStopActive = False
 
   def set_lead(self, distance, second=False):
@@ -86,6 +87,128 @@ class TestStopBar(unittest.TestCase):
     self.set_lead(31.)  # real-lead ego stop at 25 m overlaps the raw 20 m target
     self.stop.update(self.sm, 1, 100.02)
     self.assertIsNone(self.stop.marker)
+
+  def test_trajectory_style_promotes_on_stop_and_persists_until_brake_release(self):
+    self.set_trajectory_only()
+    self.assertTrue(self.stop.marker.trajectory_only)
+    self.sm['modelV2'].velocity.x = model().velocity.x  # sustained stop point, still no shouldStop flag
+    self.sm['longitudinalPlan'].stopTarget.active = True
+    self.sm['longitudinalPlan'].stopTarget.approaching = False
+    self.sm['longitudinalPlan'].stopTarget.distance = 16.
+    self.stop.update(self.sm, 1, 100.01)
+    self.assertFalse(self.stop.marker.trajectory_only)
+    self.sm['modelV2'].velocity.x = np.maximum(.7, self.sm['modelV2'].velocity.x)
+    self.stop.update(self.sm, 1, 100.02)
+    self.assertFalse(self.stop.marker.trajectory_only)  # braking retains the stop style
+    self.release_target()
+    self.stop.update(self.sm, 1, 100.03)
+    self.assertTrue(self.stop.marker.held)
+    self.assertFalse(self.stop.marker.trajectory_only)
+    self.sm['carOutput'].actuatorsOutput.brake = 0.
+    self.stop.update(self.sm, 1, 100.04)
+    self.assertIsNone(self.stop.marker)
+
+  def test_planner_hold_promotes_trajectory_style_without_model_stop_flag(self):
+    self.set_trajectory_only()
+    self.assertTrue(self.stop.marker.trajectory_only)
+    self.sm['longitudinalPlan'].stopTarget.approaching = False
+    self.sm['longitudinalPlan'].stopTarget.holding = True
+    self.stop.update(self.sm, 1, 100.01)
+    self.assertFalse(self.stop.marker.trajectory_only)
+
+  def set_trajectory_only(self):
+    self.sm['modelV2'] = model()
+    self.sm['modelV2'].velocity.x = np.maximum(.7, self.sm['modelV2'].velocity.x)
+    self.sm['longitudinalPlan'].stopTarget.active = False
+    self.sm['longitudinalPlan'].stopTarget.approaching = True
+    self.sm['longitudinalPlan'].stopTarget.approachDistance = 16.
+    self.sm['longitudinalPlan'].stopTarget.distance = -1.
+    self.stop = ModelStop()
+    self.stop.update(self.sm, 1, 100.)
+
+  def test_green_approach_uses_preview_distance_and_clears_when_assistance_releases(self):
+    self.set_trajectory_only()
+    self.assertEqual(self.stop.marker.label, 'E2E APPROACH')
+    self.assertEqual(self.stop.marker.distance, 16.)
+    self.assertFalse(self.sm['longitudinalPlan'].stopTarget.active)
+    self.release_target()
+    self.stop.update(self.sm, 1, 100.01)
+    self.assertIsNone(self.stop.marker)  # applied brakes cannot retain a green control indication
+
+  def test_green_projection_clamps_to_new_path_without_moving_confirmed_target(self):
+    self.set_trajectory_only()
+    self.sm['modelV2'].position.x *= .8  # newer model ends before the planner's 16 m preview
+    self.sm.stamp(100.05)
+    self.stop.update(self.sm, 1, 100.05)
+    self.assertIsNotNone(self.stop.marker.position)
+    self.assertAlmostEqual(self.stop.marker.distance, 12.8)
+    self.assertAlmostEqual(self.stop.marker.position[0], 12.8 + 1.52)
+    self.assertEqual(self.sm['longitudinalPlan'].stopTarget.approachDistance, 16.)
+    self.sm['longitudinalPlan'].stopTarget.active = True
+    self.sm['longitudinalPlan'].stopTarget.approaching = False
+    self.sm['longitudinalPlan'].stopTarget.distance = 15.
+    self.stop.update(self.sm, 1, 100.06)
+    self.assertFalse(self.stop.marker.trajectory_only)
+    self.assertEqual(self.stop.marker.distance, 15.)  # real stop keeps its exact planner distance
+    self.assertIsNone(self.stop.marker.position)
+
+  def test_green_preview_smooths_range_changes_in_both_directions(self):
+    self.set_trajectory_only()
+    self.sm['modelV2'] = model(speed=20.)
+    self.sm['longitudinalPlan'].stopTarget.approachDistance = 60.
+    self.stop.reset()
+    self.stop.update(self.sm, 1, 100.)
+    self.assertEqual(self.stop.marker.distance, 60.)
+    self.sm['longitudinalPlan'].stopTarget.approachDistance = 40.
+    self.sm.stamp(100.05)
+    self.stop.update(self.sm, 1, 100.05)
+    closer = self.stop.marker.distance
+    self.assertGreater(closer, 55.)
+    self.assertLess(closer, 60.)
+    self.sm['longitudinalPlan'].stopTarget.approachDistance = 75.
+    self.sm.stamp(100.10)
+    self.stop.update(self.sm, 1, 100.10)
+    self.assertGreater(self.stop.marker.distance, closer)
+    self.assertLess(self.stop.marker.distance, 65.)
+
+  def test_green_bridges_brief_withdrawal_then_fades_and_expires(self):
+    self.set_trajectory_only()
+    self.sm['modelV2'].action = NS(desiredAcceleration=-1.)
+    self.release_target()
+    for now, opacity in ((100.1, 1.), (100.2, 1.), (100.3, 2. / 3.)):
+      self.sm.stamp(now)
+      self.stop.update(self.sm, 1, now)
+      self.assertTrue(self.stop.marker.trajectory_only)
+      self.assertFalse(self.stop.marker.held)
+      self.assertAlmostEqual(self.stop.marker.opacity, opacity)
+    self.sm.stamp(100.41)
+    self.stop.update(self.sm, 1, 100.41)
+    self.assertIsNone(self.stop.marker)
+
+  def test_green_retention_clears_for_departure_override_or_invalid_data(self):
+    for change in ('departure', 'gas', 'brake', 'disabled', 'control_off', 'reverse', 'stale', 'invalid_path', 'lead'):
+      with self.subTest(change=change):
+        self.setUp()
+        self.set_trajectory_only()
+        self.sm['modelV2'].action = NS(desiredAcceleration=-1.)
+        self.release_target()
+        self.sm.stamp(100.1)
+        if change == 'departure':
+          self.sm['modelV2'].action.desiredAcceleration = .5
+        elif change in ('gas', 'brake'):
+          setattr(self.sm['carState'], change + 'Pressed', True)
+        elif change == 'disabled':
+          self.sm['selfdriveState'].enabled = False
+        elif change == 'control_off':
+          self.sm['carControl'].longActive = False
+        elif change == 'reverse':
+          self.sm['carState'].gearShifter = 'reverse'
+        elif change == 'invalid_path':
+          self.sm['modelV2'].position.x[5] = np.nan
+        elif change == 'lead':
+          self.set_lead(20.)
+        self.stop.update(self.sm, 1, 100.5 if change == 'stale' else 100.1)
+        self.assertIsNone(self.stop.marker)
 
   def test_either_lead_in_overlap_band_clears_live_and_brake_held_bar(self):
     for second in (False, True):
@@ -240,6 +363,37 @@ class TestStopBar(unittest.TestCase):
       self.assertEqual(text.call_args.args[1], 'STOP TARGET  20.0 m')
       draw_stop_bar(marker, 4., 1.5, self.project, self.rect, None, False)
       self.assertEqual(text.call_args.args[1], 'STOP TARGET  65.6 ft')
+
+  def test_trajectory_bar_is_half_width_green_with_the_same_profile_and_thickness(self):
+    for position in ((21.52, 0., 0.), None):
+      marker = StopMarker(position, 0., 20., label='STOP TARGET', trajectory_only=True)
+      points, _ = stop_bar_geometry(marker, 1.5, self.project, self.rect)
+      full, _ = stop_bar_geometry(StopMarker(position, 0., 20.), 1.5, self.project, self.rect)
+      self.assertAlmostEqual(np.ptp(points[:, 0]), .5 * np.ptp(full[:, 0]))
+      self.assertAlmostEqual(np.ptp(points[:, 1]), np.ptp(full[:, 1]))
+      self.assertEqual(points[0, 1], points[1, 1])
+      self.assertEqual(points[2, 1], points[3, 1])
+      self.assertAlmostEqual(points[1, 0] - points[0, 0], .8 * (points[2, 0] - points[3, 0]))
+      with patch.dict(sys.modules, {'openpilot.system.ui.lib.text_measure': NS(measure_text_cached=lambda *args: NS(x=240., y=30.))}), \
+           patch.object(rl, 'draw_triangle_fan') as polygon, patch.object(rl, 'draw_rectangle_rounded'), patch.object(rl, 'draw_text_ex'):
+        draw_stop_bar(marker, 8., 1.5, self.project, self.rect, None, True)
+        self.assertEqual(polygon.call_count, int(position is not None))
+        if position is not None:
+          color = polygon.call_args.args[2]
+          self.assertEqual((color.r, color.g, color.b, color.a), (23, 134, 68, 255))
+
+  def test_green_fade_applies_to_bar_and_label_and_never_draws_in_stop_dock(self):
+    marker = StopMarker((61.52, 0., 0.), 0., 60., label='E2E APPROACH', trajectory_only=True, opacity=.5)
+    with patch.dict(sys.modules, {'openpilot.system.ui.lib.text_measure': NS(measure_text_cached=lambda *args: NS(x=240., y=30.))}), \
+         patch.object(rl, 'draw_triangle_fan') as polygon, patch.object(rl, 'draw_rectangle_rounded') as background, \
+         patch.object(rl, 'draw_text_ex') as text:
+      draw_stop_bar(marker, 8., 1.5, self.project, self.rect, None, True)
+      self.assertEqual(polygon.call_args.args[2].a, 128)
+      self.assertEqual(text.call_args.args[-1].a, 128)
+      self.assertEqual(background.call_args.args[-1].a, 95)
+      polygon.reset_mock()
+      draw_stop_bar(marker, 8., 1.5, lambda *p: None, self.rect, None, True)
+      self.assertEqual(polygon.call_count, 0)
 
   def test_rounded_bar_fans_face_the_camera_with_either_input_winding(self):
     # raylib DrawTriangleFan submits (center, i, i+1) with back-face culling.
