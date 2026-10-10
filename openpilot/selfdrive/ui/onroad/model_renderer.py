@@ -1,4 +1,5 @@
 import colorsys
+import time
 import numpy as np
 import pyray as rl
 from openpilot.cereal import messaging
@@ -8,7 +9,11 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.system.ui.lib.application import gui_app
+from openpilot.selfdrive.ui.onroad.e2e_assist import slowing_assist_color
+from openpilot.selfdrive.ui.onroad.lead_geometry import lead_fill_alpha
+from openpilot.selfdrive.ui.onroad.model_stop import ModelStop, PATH_HALF_WIDTH
+from openpilot.selfdrive.ui.onroad.stop_bar import draw_stop_bar
+from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
 from openpilot.system.ui.widgets import Widget
 
@@ -53,6 +58,7 @@ class ModelRenderer(Widget):
     self._road_edge_stds = np.zeros(2, dtype=np.float32)
     self._lead_vehicles = [LeadVehicle(), LeadVehicle()]
     self._path_offset_z = HEIGHT_INIT[0]
+    self._model_stop = ModelStop(Params().get("ModelStopFrontOffset", return_default=True))
 
     # Initialize ModelPoints objects
     self._path = ModelPoints()
@@ -83,6 +89,7 @@ class ModelRenderer(Widget):
 
   def _render(self, rect: rl.Rectangle):
     sm = ui_state.sm
+    self._model_stop.update(sm, ui_state.started_frame, time.monotonic())
 
     # Check if data is up-to-date
     if (sm.recv_frame["extrinsicsCalibration"] < ui_state.started_frame or
@@ -126,6 +133,11 @@ class ModelRenderer(Widget):
     # Draw elements
     self._draw_lane_lines()
     self._draw_path(sm)
+
+    if (self._model_stop.marker is not None and sm.valid['extrinsicsCalibration'] and
+        str(extrinsics_calibration.calStatus) == 'calibrated'):
+      draw_stop_bar(self._model_stop.marker, sm['carState'].vEgo, self._path_offset_z, self._project_stop_point,
+                    rect, gui_app.font(FontWeight.BOLD), ui_state.is_metric)
 
     if render_lead_indicator and radar_state:
       self._draw_lead_indicator()
@@ -182,7 +194,7 @@ class ModelRenderer(Widget):
 
     max_idx = self._get_path_length_idx(path_x_array, max_distance)
     self._path.projected_points = self._map_line_to_polygon(
-      self._path.raw_points, 0.9, self._path_offset_z, max_idx, max_distance, allow_invert=False
+      self._path.raw_points, PATH_HALF_WIDTH, self._path_offset_z, max_idx, max_distance, allow_invert=False
     )
 
     self._update_experimental_gradient()
@@ -233,15 +245,7 @@ class ModelRenderer(Widget):
     )
 
   def _update_lead_vehicle(self, d_rel, v_rel, point, rect):
-    speed_buff, lead_buff = 10.0, 40.0
-
-    # Calculate fill alpha
-    fill_alpha = 0
-    if d_rel < lead_buff:
-      fill_alpha = 255 * (1.0 - (d_rel / lead_buff))
-      if v_rel < 0:
-        fill_alpha += 255 * (-1 * (v_rel / speed_buff))
-      fill_alpha = min(fill_alpha, 255)
+    fill_alpha = lead_fill_alpha(d_rel, v_rel)
 
     # Calculate size and position
     sz = np.clip((25 * 30) / (d_rel / 3 + 30), 15.0, 30.0) * 2.35
@@ -284,7 +288,12 @@ class ModelRenderer(Widget):
     allow_throttle = sm['longitudinalPlan'].allowThrottle or not self._longitudinal_control
     self._blend_filter.update(int(allow_throttle))
 
-    if self._experimental_mode:
+    assist_color = slowing_assist_color(sm, ui_state.started_frame, time.monotonic()) if self._longitudinal_control else None
+    if assist_color is not None:
+      gradient = Gradient(start=(0.0, 1.0), end=(0.0, 0.0),
+                          colors=[rl.Color(*assist_color, alpha) for alpha in (102, 89, 0)], stops=[0.0, 0.5, 1.0])
+      draw_polygon(self._rect, self._path.projected_points, gradient=gradient)
+    elif self._experimental_mode:
       # Draw with acceleration coloring
       if len(self._exp_gradient.colors) > 1:
         draw_polygon(self._rect, self._path.projected_points, gradient=self._exp_gradient)
@@ -334,6 +343,14 @@ class ModelRenderer(Widget):
       return None
 
     return (x, y)
+
+  def _project_stop_point(self, x, y, z):
+    # Stop bars retain the normal lead's edge clamping even when the road point
+    # has passed below the clip region. Never project points behind the camera.
+    point = self._car_space_transform @ np.array([x, y, z])
+    if point[2] <= 1e-6 or not np.all(np.isfinite(point)):
+      return None
+    return tuple(point[:2] / point[2])
 
   def _map_line_to_polygon(self, line: np.ndarray, y_off: float, z_off: float, max_idx: int, max_distance: float, allow_invert: bool = True) -> np.ndarray:
     """Convert 3D line to 2D polygon for rendering."""
