@@ -1,13 +1,16 @@
 """OSM road matching with fresh legal/advisory speeds shared by display and SET."""
 import json
 import math
-import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from itertools import pairwise
 
 import requests
+
+from openpilot.selfdrive.mapd.speed_rules import parse_speed as parse_speed, road_speed
+from openpilot.selfdrive.mapd.zone_time import ZoneClock
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 QUERY_RADIUS = 1500.0  # metres; prefetch again after travelling 700 m
@@ -38,6 +41,7 @@ class GpsFix:
   motion_epoch: float | None = None
   estimated: bool = False
   gps_timestamp: float = 0.
+  utc_timestamp: float | None = None
 
 
 @dataclass(frozen=True)
@@ -63,10 +67,11 @@ class RoadMatch:
   forward: bool | None
   position: tuple[float, float]
   bearing: float | None = None
+  local_time: datetime | None = None
 
   @property
   def advisory_speed(self) -> float | None:
-    return road_speed(self.road.tags, self.forward, advisory=True)
+    return road_speed(self.road.tags, self.forward, advisory=True, local_time=self.local_time)
 
 
 @dataclass(frozen=True)
@@ -98,7 +103,8 @@ def gps_fix(sm, started_frame: int, now: float) -> GpsFix | None:
     if gps.speed >= 2 and math.isfinite(gps.bearingDeg) and 0 <= gps.bearingDeg < 360 and 0 <= gps.bearingAccuracyDeg <= 30:
       bearing = gps.bearingDeg
     speed = gps.speed if math.isfinite(gps.speed) and 0 <= gps.speed <= 75 else 0.
-    fixes.append(GpsFix(gps.latitude, gps.longitude, bearing, accuracy, timestamp, speed=speed))
+    utc = getattr(gps, 'unixTimestampMillis', 0) / 1000.
+    fixes.append(GpsFix(gps.latitude, gps.longitude, bearing, accuracy, timestamp, speed=speed, utc_timestamp=utc or None))
   return min(fixes, key=lambda fix: fix.accuracy) if fixes else None
 
 
@@ -108,34 +114,8 @@ def offset_metres(latitude: float, longitude: float, origin: GpsFix) -> tuple[fl
           math.radians(latitude - origin.latitude) * EARTH_RADIUS)
 
 
-def parse_speed(value: str) -> float | None:
-  """OSM numbers default to km/h. Do not invent limits for implicit/variable tags."""
-  match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(km/h|kmh|kph|mph)?", value.strip().lower())
-  if match is None:
-    return None
-  speed = float(match[1]) * (0.44704 if match[2] == "mph" else 1 / 3.6)
-  return speed if 0 < speed <= 300 / 3.6 else None
-
-
-def road_speed(tags: dict[str, str], forward: bool | None, advisory: bool = False) -> float | None:
-  # Advisory restrictions are independent of the legal limit. Reject unsupported
-  # qualifiers within each family, rather than hiding both when one is present.
-  prefix = "maxspeed:advisory" if advisory else "maxspeed"
-  supported = {prefix, f"{prefix}:forward", f"{prefix}:backward", f"{prefix}:type"}
-  qualified = (key for key in tags if key.startswith(f"{prefix}:"))
-  if not advisory:
-    qualified = (key for key in qualified if key != "maxspeed:advisory" and not key.startswith("maxspeed:advisory:"))
-  if any(key not in supported for key in qualified):
-    return None
-  base = tags.get(prefix, "")
-  ahead = parse_speed(tags.get(f"{prefix}:forward", base))
-  behind = parse_speed(tags.get(f"{prefix}:backward", base))
-  if forward is None:
-    return ahead if ahead == behind else None
-  return ahead if forward else behind
-
-
-def road_candidates(roads: tuple[Road, ...], fix: GpsFix, radius: float = ACQUIRE_RADIUS) -> list[RoadMatch]:
+def road_candidates(roads: tuple[Road, ...], fix: GpsFix, radius: float = ACQUIRE_RADIUS,
+                    local_time: datetime | None = None) -> list[RoadMatch]:
   candidates = []
   latitude_margin = math.degrees(radius / EARTH_RADIUS)
   longitude_margin = latitude_margin / math.cos(math.radians(fix.latitude))
@@ -174,9 +154,9 @@ def road_candidates(roads: tuple[Road, ...], fix: GpsFix, radius: float = ACQUIR
         x, y = ax + projection * dx, ay + projection * dy
         position = (fix.latitude + math.degrees(y / EARTH_RADIUS),
                     (fix.longitude + math.degrees(x / (EARTH_RADIUS * math.cos(math.radians(fix.latitude)))) + 180) % 360 - 180)
-        nearest = RoadMatch(road, distance, road_speed(road.tags, forward), heading_error,
+        nearest = RoadMatch(road, distance, road_speed(road.tags, forward, local_time=local_time), heading_error,
                             segment_start + projection * length, forward, position,
-                            (heading if forward else (heading + 180) % 360) if forward is not None else None)
+                            (heading if forward else (heading + 180) % 360) if forward is not None else None, local_time)
     if nearest is not None:
       candidates.append(nearest)
   return sorted(candidates, key=lambda candidate: candidate.distance)
@@ -205,6 +185,7 @@ class RoadTracker:
     self.reset()
 
   def reset(self):
+    self._local_time: datetime | None = None
     self.match: RoadMatch | None = None
     self.fix: GpsFix | None = None
     self._roads: tuple[Road, ...] = ()
@@ -249,7 +230,7 @@ class RoadTracker:
       old = previous.road
       same = next((road for road in roads if (road.way_id == old.way_id if old.way_id else road == old)
                    and road.geometry == old.geometry), None)
-      projected = road_candidates((same,), fix, radius=TRACK_RADIUS) if same is not None else []
+      projected = road_candidates((same,), fix, radius=TRACK_RADIUS, local_time=self._local_time) if same is not None else []
       return projected[0] if projected and projected[0].forward == previous.forward else None
 
     # Cached ways are replaced atomically. Retain only unchanged geometry and
@@ -449,7 +430,7 @@ class RoadTracker:
       exits = [(road, forward) for road, forward, along in self._connections[node]
                if (self._nodes[id(road)][-1][1] - along if forward else along) > .1]
       if (0 <= remaining <= 60 and len(exits) == 1 and
-          road_speed(exits[0][0].tags, exits[0][1]) == current.speed):
+          road_speed(exits[0][0].tags, exits[0][1], local_time=self._local_time) == current.speed):
         for approach in entries:
           progress = remaining - approach
           if 0 <= approach <= 25 and -3 <= progress <= maximum:
@@ -513,7 +494,7 @@ class RoadTracker:
       if next_road is None or distance > maximum:
         return None, 0.
       road, forward, along = next_road
-      limit = road_speed(road.tags, forward)
+      limit = road_speed(road.tags, forward, local_time=self._local_time)
       if limit is not None:
         return limit, distance
     return None, 0.
@@ -576,7 +557,25 @@ class RoadTracker:
           return None
     return result
 
-  def update(self, roads: tuple[Road, ...], fix: GpsFix) -> RoadMatch | None:
+  def update(self, roads: tuple[Road, ...], fix: GpsFix, local_time: datetime | None = None) -> RoadMatch | None:
+    # Aware datetime equality compares UTC instants. Crossing a timezone can
+    # change a schedule at the same instant, so compare civil time and offset.
+    retimed = ((local_time.isoformat() if local_time is not None else None) !=
+               (self._local_time.isoformat() if self._local_time is not None else None))
+    if retimed:
+      self._local_time = local_time
+
+      def retime(match):
+        return (replace(match, speed=road_speed(match.road.tags, match.forward, local_time=local_time), local_time=local_time)
+                if match is not None else None)
+
+      # A clock boundary isn't new motion evidence. Refresh speeds in place,
+      # including stationary/repeated fixes, preserving the established road.
+      self.match, self._result = retime(self.match), retime(self._result)
+      self._paths = [(retime(match), score, since, distance) for match, score, since, distance in self._paths]
+      if self._branch_recovery is not None:
+        previous, *rest = self._branch_recovery
+        self._branch_recovery = (retime(previous), *rest)
     refreshed = roads is not self._roads
     if refreshed:
       self._set_roads(roads)
@@ -585,6 +584,14 @@ class RoadTracker:
         old = self._result.road
         self._result = next((p[0] for p in self._paths if p[0].road.way_id == old.way_id and
                              p[0].road.geometry == old.geometry), None)
+      if retimed and self._result is not None:
+        # Previously equal limits can diverge at a school-zone boundary. A
+        # repeated fix must not qualify a newly conflicting nearby road.
+        candidates = road_candidates(roads, fix, radius=TRACK_RADIUS, local_time=local_time)
+        best = self._result
+        if any((c.speed, c.advisory_speed) != (best.speed, best.advisory_speed) and
+               c.distance <= best.distance + 3 for c in candidates):
+          self._result = None
       return self._result  # repeated polling is not new motion evidence
     self._processed = fix
     if self.fix is not None:
@@ -593,7 +600,7 @@ class RoadTracker:
       if not 0 <= dt <= GPS_MAX_AGE or travelled > 75 * dt + 10:
         self.match = self.fix = None
         self._stop_anchor = None
-    candidates = road_candidates(roads, fix, radius=TRACK_RADIUS)
+    candidates = road_candidates(roads, fix, radius=TRACK_RADIUS, local_time=local_time)
     # An established connected path can survive a bounded lateral GPS offset.
     # Unconnected roads still need normal acquisition within 25 metres.
     maximum = max(15., fix.speed * GPS_MAX_AGE * 1.6 + 8.)
@@ -669,6 +676,7 @@ class OSMSpeedLimit:
     self._fix: GpsFix | None = None
     self._cache: tuple[tuple[Road, ...], GpsFix | None, float] = ((), None, -math.inf)
     self._tracker = RoadTracker()
+    self.clock = ZoneClock()
     self._thread: threading.Thread | None = None
     self._wake = threading.Event()
     self.control: Junction | None = None
@@ -702,7 +710,13 @@ class OSMSpeedLimit:
       return None
     # Publish the current match in this mapd cycle. No asynchronous grace period
     # or previous-limit hold is needed when GPS heading changes through a turn.
-    match = self._tracker.update(roads, fix)
+    # Ordinary roads don't need timezone work. Timed roads anywhere in the
+    # world use the same evaluator; no city-specific hours or UTC offset.
+    timed = any(key.startswith('maxspeed:') and key.endswith(':conditional') for road in roads for key in road.tags)
+    local_time = self.clock.local_time(fix, now) if timed else None
+    if local_time is not None:
+      local_time = local_time.replace(second=0, microsecond=0)
+    match = self._tracker.update(roads, fix, local_time)
     gps_time = fix.gps_timestamp if fix.estimated else fix.timestamp
     self.control_reason = 'noRoadMatch' if match is None else 'gpsStale'
     if match is not None and match.forward is not None and gps_time > 0 and 0 <= now - gps_time <= GPS_MAX_AGE:
@@ -711,6 +725,9 @@ class OSMSpeedLimit:
       self.control_reason = self._tracker.control_reason
     speed = match.speed if match is not None else None
     advisory = match.advisory_speed if match is not None else None
+    if match is not None and speed is None and any(k.startswith('maxspeed:') and k.endswith(':conditional') and
+                                                  not k.startswith('maxspeed:advisory:') for k in match.road.tags):
+      advisory = None  # an unresolved legal restriction must not become advisory cruise
     ahead = 0.
     if match is not None and speed is None and advisory is None:
       speed, ahead = self._tracker.merge_limit(match, fix)

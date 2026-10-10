@@ -61,3 +61,8 @@ or replace a full device build and closed-loop validation.
 
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
 under the [ODbL](https://opendatacommons.org/licenses/odbl/).
+
+The `boat-anchor-dynamic-zones` development branch adds location-based civil-time
+evaluation for explicitly mapped school/playground schedules and dated temporary
+limits. See [dynamic speed zones](dynamic-speed-zones.md) for supported conditions,
+data coverage and the additional device dependency provisioning requirement.
