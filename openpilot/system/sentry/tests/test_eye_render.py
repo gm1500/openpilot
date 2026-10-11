@@ -53,13 +53,14 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
   device.sentry_eye_visible = True
   eye._render(rect)
   assert calls.count('draw_circle_gradient') == 3
-  assert calls.count('draw_ellipse') == 12  # Six highlights, each with a soft halo.
+  assert calls.count('draw_ellipse') == 6  # Three highlights, each with a soft halo.
   assert glows[0][2] == 380  # Original 95 px glow, now four times the diameter.
-  # At the center, the three lights on either side have identical mirrored shapes.
-  left, right = reflections[1:6:2], reflections[7:12:2]
-  for l, r in zip(left, right, strict=True):
-    assert l[0]+r[0] == rect.width
-    assert l[1:] == r[1:]
+  # All three lights sit above the lens center, with the middle one highest.
+  left, middle, right = reflections[1::2]
+  assert left[0]+right[0] == rect.width
+  assert left[1:] == right[1:]
+  assert middle[0] == rect.width/2
+  assert middle[1] < left[1] < rect.height/2
   for x, y in ((0., 0.), (0., 1.), (1., 0.), (1., 1.)):
     eye.x, eye.y = x, y
     glows.clear()
@@ -74,8 +75,11 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
     reflected_x = sum(r[0] for r in reflections)/len(reflections)
     reflected_y = sum(r[1] for r in reflections)/len(reflections)
     assert (reflected_x-cx)*(rect.width/2-cx) > 0
-    assert (reflected_y-cy)*(rect.height/2-cy) > 0
+    assert (reflected_y-cy+25*4)*(rect.height/2-cy) > 0
+    assert abs(reflected_x-cx) > 25  # More visible than the old ~10 px shift.
+    assert abs(reflected_y-cy+25*4) > 10
     for rx, ry, width, height in reflections:
+      assert ry+height < cy
       assert ((abs(rx-cx)+width)**2+(abs(ry-cy)+height)**2)**.5 < 44*4
 
   calls.clear()

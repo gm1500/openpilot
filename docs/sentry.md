@@ -158,8 +158,9 @@ settings row.
 The eye follows the approximate image position of motion from the front wide or cabin lens;
 the cabin direction is mirrored. It reacts without the recording confirmation delay or larger
 area threshold, while still respecting camera warmup, arming and touch suppression.
-Three glass reflections on each side form a symmetric pattern
-at the display center and shift subtly toward the display center as the eye moves.
+Three glass reflections form a symmetric arc across the upper lens, with the middle one
+highest. They shift toward the display center as the eye moves, with three times the
+previous reflection movement.
 Its diameter is four times the original, including the glow,
 and its full extent stays within the display. It appears on black at 100% brightness only after the normal
 screen timeout, and fades off when motion stops. **Any touch clears the eye and suppresses it
