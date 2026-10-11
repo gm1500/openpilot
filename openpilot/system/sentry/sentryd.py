@@ -39,6 +39,25 @@ def inactive_reason(params, sm, now, device_type):
   return ''
 
 
+def trigger_source(results, previous, confirmed_since, now, manual=False):
+  confirmed = {stream: motion for stream, motion in results.items() if motion.triggered}
+  for stream in tuple(confirmed_since):
+    if stream not in confirmed:
+      del confirmed_since[stream]
+  # First confirmation keeps priority while motion overlaps. Scores only break
+  # ties between cameras confirming in the same sample, never steal a live view.
+  for stream in sorted(confirmed, key=lambda s: confirmed[s].score, reverse=True):
+    confirmed_since.setdefault(stream, now)
+  if confirmed_since:
+    return min(confirmed_since, key=confirmed_since.get)
+  if manual:
+    active = {stream: motion for stream, motion in results.items() if motion.active}
+    if active:
+      return max(active, key=lambda stream: active[stream].score)
+    return next((stream for stream in (2, 0, 1) if stream in results), previous)
+  return previous
+
+
 class CameraMotion:
   def __init__(self, stream):
     self.stream = stream
@@ -79,6 +98,7 @@ def main():
   cameras = {}
   cooldown = False
   record_until = 0.
+  trigger_camera, confirmed_since = 2, {}
   last_camera_mask = 0
   gps_finished = False
   low_since = None
@@ -99,6 +119,7 @@ def main():
         off_since, location, cameras = None, None, {}
         ready_since = None
         record_until, cooldown, gps_finished, low_since = 0., False, False, None
+        confirmed_since.clear()
         cutoff_reason = ''
       else:
         if off_since is None:
@@ -158,11 +179,13 @@ def main():
           last_camera_mask = camera_mask
           arm_delay = setting(params, 'SentryArmDelay')
           armed = ready_since is not None and now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
+          results = {}
           for stream in (2, 1, 0):
             if camera_mask & (1 << stream):
               if stream not in cameras:
                 cameras[stream] = CameraMotion(stream)
               result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'), armed)
+              results[stream] = result
               triggered |= result.triggered
               # Wide cameras drive the eye. Narrow camera can still trigger recording.
               if stream in (1, 2) and result.active and (not best.active or result.score > best.score):
@@ -198,6 +221,10 @@ def main():
           manual = params.get_bool('SentryManualTrigger')
           if manual:
             params.remove('SentryManualTrigger')
+          if manual or (armed and recorder_ready):
+            trigger_camera = trigger_source(results, trigger_camera, confirmed_since, now, manual)
+          else:
+            confirmed_since.clear()
           if manual or triggered:
             record_until = now+setting(params, 'SentryPostSeconds')
           if recorder_fresh and sm['sentryRecorderState'].recording:
@@ -208,6 +235,7 @@ def main():
           cameras.clear()
           ready_since = None
           record_until = 0.
+          confirmed_since.clear()
         error = sm['sentryRecorderState'].error if now-sm.recv_time['sentryRecorderState'] < 2. else ''
         if capture and error:
           phase = error
@@ -230,6 +258,7 @@ def main():
       state.motion = capture and best.active
       state.motionX, state.motionY, state.motionScore, state.motionCamera = best.x, best.y, best.score, motion_camera
       state.recordUntilMonoTime = int(record_until*1e9)
+      state.triggerCamera = trigger_camera
       state.eyeEnabled, state.cameraMask = setting(params, 'SentryEye'), camera_mask
       state.timeZone, state.utcOffsetSeconds = zone_name, utc_offset
       state.locationValid = location is not None

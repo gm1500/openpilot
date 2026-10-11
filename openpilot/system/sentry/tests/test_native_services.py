@@ -36,9 +36,10 @@ def services_binary(tmp_path_factory):
   ('sub', ['selfdriveState', 'deviceState', 'cabinCameraState']),
   ('pub', ['can', 'pandaStates', 'peripheralState']),
   ('sub', ['sentryState', 'pandaStates', 'deviceState', 'sentryNarrowEncodeData',
-           'sentryWideEncodeData', 'sentryCabinEncodeData', 'sentryQcamEncodeData']),
+           'sentryWideEncodeData', 'sentryCabinEncodeData', 'sentryQcamEncodeData', 'sentryWideQcamEncodeData', 'sentryCabinQcamEncodeData']),
   ('pub', ['sentryRecorderState']),
-  ('pub', ['sentryNarrowEncodeData', 'sentryWideEncodeData', 'sentryCabinEncodeData', 'sentryQcamEncodeData']),
+  ('pub', ['sentryNarrowEncodeData', 'sentryWideEncodeData', 'sentryCabinEncodeData',
+           'sentryQcamEncodeData', 'sentryWideQcamEncodeData', 'sentryCabinQcamEncodeData']),
 ])
 def test_native_services_start_without_publishers(services_binary, mode, names):
   # Match the native panda, recorder and encoder subscriptions/publications.

@@ -132,7 +132,7 @@ class SentryLayout(Widget):
       items.append(SentrySlider(self.params, key, title, unit, step))
     items.extend([
       text_item('Event uploads', 'Request in Connect',
-                'Previews and motion bookmarks use normal route uploads. Request full camera videos and logs from Connect when needed. ' +
+                'The preview follows motion between enabled cameras. Request full camera videos and logs from Connect when needed. ' +
                 'Saved events follow normal storage cleanup.'),
       text_item('Battery protection', 'Sentry cutoff',
                 'While Sentry is active, its voltage and time limits replace the stock offroad software limits. ' +

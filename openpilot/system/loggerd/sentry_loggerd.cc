@@ -27,20 +27,27 @@ int setting(const char *key, int fallback, int lo, int hi) {
 struct Packet {
   int camera;  // -1 is an ordinary log message
   uint64_t time;
+  uint64_t frame_time;
   // Keep Cap'n Proto's aligned allocation. Individual words are deliberately
   // non-copyable under Clang; moving the owning array also avoids a second copy.
   kj::Array<capnp::word> words;
   Packet(int camera_, cereal::Event::Reader event) : camera(camera_), time(event.getLogMonoTime()) {
+    frame_time = camera < 0 ? time : (event.*sentry_encoders[camera].get_encode_data_func)().getIdx().getTimestampEof();
     capnp::MallocMessageBuilder builder;
     builder.setRoot(event);
     words = capnp::messageToFlatArray(builder);
   }
   size_t bytes() const { return words.size() * sizeof(capnp::word); }
 };
+struct PreviewSelection {
+  uint64_t time;
+  int camera;
+};
 struct Segment {
   uint64_t start = 0, end = 0;
   size_t bytes = 0;
   std::deque<Packet> packets;
+  std::vector<PreviewSelection> previews;  // Retain the original view of overlapping history.
 };
 
 // All files stay locked until video and logs are finalized. The ordinary uploader
@@ -52,10 +59,15 @@ public:
   std::array<std::unique_ptr<VideoWriter>, 4> video;
   std::array<uint32_t, 4> frame_count = {};
   int number;
+  std::vector<PreviewSelection> previews;
+  int preview_encoder = -1;
+  uint64_t preview_time = 0;
   uint64_t last_time = 0;
 
-  SavedSegment(const std::string &route, int number_, kj::ArrayPtr<capnp::word> init, uint64_t start)
-      : path(Path::log_root() + "/" + route + "--" + std::to_string(number_)), number(number_) {
+  SavedSegment(const std::string &route, int number_, kj::ArrayPtr<capnp::word> init, uint64_t start,
+               const std::vector<PreviewSelection> &previews_)
+      : path(Path::log_root() + "/" + route + "--" + std::to_string(number_)), number(number_),
+        previews(previews_) {
     fs::create_directories(path);
     std::ofstream{path + "/sentry.lock"} << getpid() << "\n";
     std::ofstream{path + "/.sentry"} << "1\n";
@@ -96,11 +108,25 @@ public:
       write(packet.words.asBytes());
       return;
     }
-    int c = packet.camera;
-    const auto &info = sentry_encoders[c];
+    int c = std::min(packet.camera, 3);
+    const auto &info = sentry_encoders[packet.camera];
     auto data = (event.*info.get_encode_data_func)();
     auto idx = data.getIdx();
     bool keyframe = idx.getFlags() & V4L2_BUF_FLAG_KEYFRAME;
+    bool switching = false;
+    if (packet.camera >= 3) {
+      int desired = previews.front().camera;
+      for (const auto &selection : previews) {
+        if (selection.time > packet.frame_time) break;
+        desired = selection.camera;
+      }
+      // Only qcamera.ts changes lenses. Never splice a dependent frame from a
+      // different encoder or move its timestamps backwards. The player holds
+      // the last frame until the new source's next keyframe (one-second GOP).
+      if (packet.camera != sentry_preview_encoder(desired) || (video[c] && packet.frame_time <= preview_time)) return;
+      switching = video[c] && preview_encoder != packet.camera;
+      if (switching && !keyframe) return;
+    }
     if (!video[c]) {
       // A truncated RAM segment must still start with a decodable frame.
       if (!keyframe) return;
@@ -110,13 +136,27 @@ public:
       video[c]->write(const_cast<uint8_t *>(header.begin()), header.size(), idx.getTimestampEof()/1000, true, false);
     }
     auto bytes = data.getData();
+    std::vector<uint8_t> switched;
+    if (switching) {
+      // Supply the new encoder's SPS/PPS in-band, without restarting the TS
+      // muxer or overwriting the earlier part of this same minute.
+      auto header = data.getHeader();
+      switched.insert(switched.end(), header.begin(), header.end());
+      switched.insert(switched.end(), bytes.begin(), bytes.end());
+      bytes = kj::arrayPtr<const uint8_t>(switched.data(), switched.size());
+    }
     video[c]->write(const_cast<uint8_t *>(bytes.begin()), bytes.size(), idx.getTimestampEof()/1000, false, keyframe);
+    if (packet.camera >= 3) {
+      preview_encoder = packet.camera;
+      preview_time = packet.frame_time;
+    }
     // Keep source frame/timestamps but rebase segment and in-file frame indexes.
     capnp::MallocMessageBuilder index_builder;
     index_builder.setRoot(idx);
     auto rebased = index_builder.getRoot<cereal::EncodeIndex>();
     rebased.setSegmentNum(number);
     rebased.setSegmentId(frame_count[c]++);
+    rebased.setLen(bytes.size());
     MessageBuilder msg;
     auto out = msg.initEvent(event.getValid());
     out.setLogMonoTime(event.getLogMonoTime());
@@ -146,8 +186,8 @@ class Recorder {
 public:
   std::map<int, Segment> ring;
   std::map<int, std::unique_ptr<SavedSegment>> saved;
-  std::array<int, 4> source_segments = {-1, -1, -1, -1};
-  std::array<uint64_t, 4> source_times = {};
+  std::array<int, SENTRY_ENCODER_COUNT> source_segments;
+  std::array<uint64_t, SENTRY_ENCODER_COUNT> source_times = {};
   size_t buffered = 0;
   std::string route, error;
   kj::Array<capnp::word> init = logger_build_init_data(true);
@@ -156,7 +196,9 @@ public:
   uint64_t event_start = 0, retry_after = 0, storage_check = 0;
   uint64_t last_motion = 0;
   uint64_t last_record_until = 0;
+  int preview_camera = VISION_STREAM_NARROW_ROAD;
 
+  Recorder() { source_segments.fill(-1); }
   ~Recorder() { finish(); }
   bool disk_ok() {
     struct statvfs disk;
@@ -186,9 +228,20 @@ public:
   }
   void save(int segment, const Packet &packet) {
     if (segment < first_segment || segment <= closed_segment) return;
+    auto &entry = ring.at(segment);
+    if (entry.previews.empty()) entry.previews.push_back({0, preview_camera});
     auto &out = saved[segment];
-    if (!out) out = std::make_unique<SavedSegment>(route, segment-first_segment, route_init.asPtr(), packet.time);
+    if (!out) out = std::make_unique<SavedSegment>(route, segment-first_segment, route_init.asPtr(), packet.time, entry.previews);
     out->append(packet);
+  }
+  void select_preview(uint64_t time, int camera) {
+    preview_camera = camera;
+    if (route.empty() || ring.empty()) return;
+    auto &entry = ring.rbegin()->second;
+    if (entry.previews.empty() || entry.previews.back().camera == camera) return;
+    entry.previews.push_back({time, camera});
+    auto it = saved.find(ring.rbegin()->first);
+    if (it != saved.end()) it->second->previews = entry.previews;
   }
   void append(int camera, cereal::Event::Reader event, uint64_t now) {
     int segment = ring.empty() ? 0 : ring.rbegin()->first;
@@ -223,7 +276,7 @@ public:
       else old.start = old.packets.front().time;
     }
   }
-  void tick(uint64_t record_until, uint64_t now, uint64_t control_time) {
+  void tick(uint64_t record_until, uint64_t now, uint64_t control_time, int trigger_camera) {
     // Only confirmed motion or a manual Save advances the recording deadline.
     // The immediate eye signal must never create bookmarks or extend a route.
     uint64_t motion_time = record_until > now && record_until > last_record_until ? control_time : 0;
@@ -240,7 +293,7 @@ public:
       }
       // Finalize historical segments once all recently seen camera streams advanced.
       int oldest = INT_MAX;
-      for (int c = 0; c < 4; ++c) {
+      for (int c = 0; c < SENTRY_ENCODER_COUNT; ++c) {
         if (source_times[c] && now-source_times[c] < 3*SECOND) oldest = std::min(oldest, source_segments[c]);
       }
       while (saved.size() > 1 && saved.begin()->first < oldest) {
@@ -271,7 +324,18 @@ public:
       init_event.setLogMonoTime(begin->second.start);
       init_event.getInitData().setWallTimeNanos(nanos_since_epoch()-(nanos_since_boot()-begin->second.start));
       route_init = capnp::messageToFlatArray(init_message);
-      for (auto it = begin; it != ring.end(); ++it) for (const auto &packet : it->second.packets) save(it->first, packet);
+      preview_camera = trigger_camera;
+      for (auto it = begin; it != ring.end(); ++it) {
+        // Historical preview choices stay intact when event windows overlap.
+        // Sort buffered packets by source time so a multi-lens preview is
+        // replayed in order even if the encoder queues drained unevenly.
+        if (it->second.previews.empty()) it->second.previews.push_back({0, trigger_camera});
+        std::vector<const Packet *> packets;
+        for (const auto &packet : it->second.packets) packets.push_back(&packet);
+        std::stable_sort(packets.begin(), packets.end(), [](auto a, auto b) { return a->frame_time < b->frame_time; });
+        for (const auto *packet : packets) save(it->first, *packet);
+      }
+      select_preview(control_time, trigger_camera);
       bookmark = true;  // Also mark manual saves and the start of a split event.
     }
     if (bookmark && !route.empty()) {
@@ -289,8 +353,8 @@ int main() {
   PubMaster pm({"sentryRecorderState"});
   SubMaster sm({"sentryState", "pandaStates", "deviceState", "clocks", "narrowRoadCameraState", "wideRoadCameraState", "cabinCameraState"});
   std::unique_ptr<Context> context(Context::create());
-  std::array<std::unique_ptr<SubSocket>, 4> sockets;
-  for (int c = 0; c < 4; ++c) {
+  std::array<std::unique_ptr<SubSocket>, SENTRY_ENCODER_COUNT> sockets;
+  for (int c = 0; c < SENTRY_ENCODER_COUNT; ++c) {
     const auto &service = services.at(sentry_encoders[c].publish_name);
     // Raw sockets must use the same queue size as the encoder's PubMaster.
     // The default 1 MiB mapping truncates these 10 MiB queues and breaks both
@@ -324,7 +388,10 @@ int main() {
                    sm["deviceState"].isDeviceState() &&
                    !ignition && !sm["deviceState"].getDeviceState().getStarted();
     if (!capture) recorder.reset();
-    for (int c = 0; c < 4; ++c) {
+    if (capture && state.getRecordUntilMonoTime() > now && state.getRecordUntilMonoTime() > recorder.last_record_until) {
+      recorder.select_preview(sm["sentryState"].getLogMonoTime(), state.getTriggerCamera());
+    }
+    for (int c = 0; c < SENTRY_ENCODER_COUNT; ++c) {
       // Bound each drain so control/ignition updates cannot be starved by a bad publisher.
       for (int n = 0; n < 64; ++n) {
         std::unique_ptr<Message> message(sockets[c]->receive(true));
@@ -355,7 +422,7 @@ int main() {
         recorder.append(-1, event.asReader(), now);
         location_logged = now;
       }
-      recorder.tick(state.getRecordUntilMonoTime(), now, sm["sentryState"].getLogMonoTime());
+      recorder.tick(state.getRecordUntilMonoTime(), now, sm["sentryState"].getLogMonoTime(), state.getTriggerCamera());
     }
     if (now-flushed >= SECOND) {
       for (auto &[number, segment] : recorder.saved) segment->flush();
@@ -369,6 +436,7 @@ int main() {
       status.setBufferBytes(recorder.buffered);
       status.setBufferSeconds(recorder.ring.empty() ? 0 : (now-recorder.ring.begin()->second.start)/double(SECOND));
       status.setError(recorder.error);
+      status.setPreviewCamera(recorder.preview_camera);
       pm.send("sentryRecorderState", message);
       published = now;
     }

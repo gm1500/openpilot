@@ -3,6 +3,7 @@
 Requires the built system/loggerd/sentry_loggerd binary and PyAV.
 """
 import os
+import re
 import signal
 import subprocess
 import time
@@ -22,12 +23,15 @@ from openpilot.common.prefix import OpenpilotPrefix
 
 ROOT = Path(__file__).resolve().parents[3]
 BINARY = ROOT/'system/loggerd/sentry_loggerd'
-STREAMS = ('sentryNarrowEncodeData', 'sentryWideEncodeData', 'sentryCabinEncodeData', 'sentryQcamEncodeData')
-FIELDS = ('narrowRoadEncodeData', 'wideRoadEncodeData', 'cabinEncodeData', 'qNarrowRoadEncodeData')
+STREAMS = ('sentryNarrowEncodeData', 'sentryWideEncodeData', 'sentryCabinEncodeData',
+           'sentryQcamEncodeData', 'sentryWideQcamEncodeData', 'sentryCabinQcamEncodeData')
+FIELDS = ('narrowRoadEncodeData', 'wideRoadEncodeData', 'cabinEncodeData', *('qNarrowRoadEncodeData',)*3)
 FILES = ('fcamera.hevc', 'ecamera.hevc', 'dcamera.hevc', 'qcamera.ts')
+CAMERA_INDEX = {0: 0, 2: 1, 1: 2}  # VisionStreamType -> narrow, wide, cabin output order.
+COLORS = (45, 110, 180)
 
 
-def sample_packet(codec_name, noisy=False):
+def sample_packet(codec_name, noisy=False, color=75):
   codec = av.CodecContext.create(codec_name, 'w')
   codec.width, codec.height = 526, 330
   codec.pix_fmt = 'yuv420p'
@@ -35,7 +39,7 @@ def sample_packet(codec_name, noisy=False):
   codec.options = {'preset': 'ultrafast', 'tune': 'zerolatency'}
   if codec_name == 'libx265':
     codec.options['x265-params'] = 'pools=1:frame-threads=1:log-level=error'
-  image = np.full((330, 526, 3), 75, dtype=np.uint8)
+  image = np.full((330, 526, 3), color, dtype=np.uint8)
   image[90:190, 200:320] = (200, 20, 20)
   if noisy:
     image = np.random.default_rng(0).integers(0, 256, image.shape, dtype=np.uint8)
@@ -88,10 +92,11 @@ def test_recorder_waits_for_publishers_at_startup(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
-@pytest.mark.parametrize('stop_reason', ['ignition', 'disabled', 'manager'])
-def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
+@pytest.mark.parametrize('stop_reason,trigger_camera', [('ignition', 0), ('disabled', 1), ('manager', 2)])
+def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_camera):
   monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
-  hevc, h264 = sample_packet('libx265'), sample_packet('libx264')
+  hevc = [sample_packet('libx265', color=color) for color in COLORS]
+  h264 = [sample_packet('libx264', color=color) for color in COLORS]
   with OpenpilotPrefix():
     messaging.reset_context()
     params = Params()
@@ -109,6 +114,8 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
           msg = messaging.new_message('sentryState', valid=True)
           msg.sentryState.capture = capture
           msg.sentryState.motion = True  # Eye-only movement must never save or bookmark.
+          msg.sentryState.motionCamera = (trigger_camera+1)%3
+          msg.sentryState.triggerCamera = trigger_camera
           msg.sentryState.recordUntilMonoTime = record_until
           msg.sentryState.locationValid = True
           msg.sentryState.locationSource = 'slcParked'
@@ -142,15 +149,15 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
         for segment in range(4):
           control()
           for frame in range(20):
-            for c in range(4):
+            for c in range(len(STREAMS)):
               msg = messaging.new_message(FIELDS[c], valid=True)
               msg.logMonoTime = base+segment*60_000_000_000+frame*50_000_000
               data = getattr(msg, FIELDS[c])
               data.width, data.height = 526, 330
-              data.data = h264 if c == 3 else hevc
+              data.data = h264[c-3] if c >= 3 else hevc[c]
               idx = data.idx
-              idx.type = log.EncodeIndex.Type.qcameraH264 if c == 3 else log.EncodeIndex.Type.fullHEVC
-              idx.frameId = segment*1200+frame
+              idx.type = log.EncodeIndex.Type.qcameraH264 if c >= 3 else log.EncodeIndex.Type.fullHEVC
+              idx.frameId = segment*1200+frame+10000*(c%3)
               idx.segmentId, idx.segmentNum, idx.flags = frame, segment+7, 8
               idx.timestampSof = idx.timestampEof = msg.logMonoTime
               pm.send(STREAMS[c], msg)
@@ -187,11 +194,15 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
           assert (directory/'.sentry').exists()
           assert not list(directory.glob('*.lock'))
           assert 'user.preserve' not in os.listxattr(directory)
-          for filename in FILES:
+          for c, filename in enumerate(FILES):
             with av.open(str(directory/filename)) as video:
               frames = list(video.decode(video=0))
             assert len(frames) == 20
             assert (frames[0].width, frames[0].height) == (526, 330)
+            source = c if c < 3 else CAMERA_INDEX[trigger_camera]
+            assert abs(float(frames[0].to_ndarray(format='rgb24')[10, 10].mean())-COLORS[source]) < 10
+            if c < 3:
+              assert (directory/filename).read_bytes() == hevc[c]*20
           events = messages(directory/'qlog.zst')
           for filename in ('qlog.zst', 'rlog.zst'):
             log_events = messages(directory/filename)
@@ -203,6 +214,8 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
           indexes = [getattr(e, e.which()) for e in events if e.which().endswith('EncodeIdx')]
           assert len(indexes) == 80
           assert all(i.segmentNum == number for i in indexes)
+          preview_indexes = [e.qNarrowRoadEncodeIdx for e in events if e.which() == 'qNarrowRoadEncodeIdx']
+          assert [i.frameId for i in preview_indexes] == [number*1200+frame+10000*CAMERA_INDEX[trigger_camera] for frame in range(20)]
           assert events[-1].sentinel.type == ('endOfRoute' if number == 3 else 'endOfSegment')
         all_events = [e for directory in dirs for e in messages(directory/'qlog.zst')]
         assert any(e.which() == 'sentryState' and e.sentryState.locationSource == 'slcParked' for e in all_events)
@@ -225,9 +238,10 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
 def test_video_queue_wrap_and_repeated_events(tmp_path, monkeypatch, publisher_first):
   monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
   # Larger real keyframes cross both the old 1 MiB mapping and the registered
-  # 10 MiB queue multiple times without a many-minute real-time camera test.
+  # 10 MiB queues without a many-minute real-time camera test. With six streams,
+  # one wrap stays below the recorder's 128 MiB cap while retaining every frame.
   hevc, h264 = sample_packet('libx265', noisy=True), sample_packet('libx264', noisy=True)
-  frame_count = 2*max(SERVICE_LIST[s].queue_size for s in STREAMS)//min(len(hevc), len(h264))+1
+  frame_count = max(SERVICE_LIST[s].queue_size for s in STREAMS)//min(len(hevc), len(h264))+1
   with OpenpilotPrefix() as prefix:
     messaging.reset_context()
     pm = messaging.PubMaster(['sentryState', 'pandaStates', 'deviceState'])
@@ -272,9 +286,9 @@ def test_video_queue_wrap_and_repeated_events(tmp_path, monkeypatch, publisher_f
               msg.logMonoTime = base+frame*50_000_000
               data = getattr(msg, FIELDS[camera])
               data.width, data.height = 526, 330
-              data.data = h264 if camera == 3 else hevc
+              data.data = h264 if camera >= 3 else hevc
               idx = data.idx
-              idx.type = log.EncodeIndex.Type.qcameraH264 if camera == 3 else log.EncodeIndex.Type.fullHEVC
+              idx.type = log.EncodeIndex.Type.qcameraH264 if camera >= 3 else log.EncodeIndex.Type.fullHEVC
               idx.frameId, idx.segmentId, idx.segmentNum, idx.flags = frame, frame, 0, 8
               idx.timestampSof = idx.timestampEof = msg.logMonoTime
               video_pm.send(service, msg)
@@ -303,8 +317,138 @@ def test_video_queue_wrap_and_repeated_events(tmp_path, monkeypatch, publisher_f
         assert process.returncode == 0, (tmp_path/'recorder.log').read_text()
 
 
+@pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
+def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlapping_history(tmp_path, monkeypatch):
+  monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
+  count = 120
+  hevc = [sample_packet('libx265', color=color) for color in COLORS]
+  previews = []
+  for color in COLORS:
+    codec = av.CodecContext.create('libx264', 'w')
+    codec.width, codec.height, codec.pix_fmt = 526, 330, 'yuv420p'
+    codec.time_base, codec.framerate = Fraction(1, 20), Fraction(20, 1)
+    codec.options = {'preset': 'ultrafast', 'tune': 'zerolatency', 'x264-params': 'keyint=20:min-keyint=20:scenecut=0'}
+    packets = []
+    for frame in range(count):
+      image = av.VideoFrame.from_ndarray(np.full((330, 526, 3), color, dtype=np.uint8), format='rgb24')
+      image.pts = frame
+      packets.extend(codec.encode(image))
+    packets.extend(codec.encode(None))
+    assert len(packets) == count
+    source = []
+    for packet in packets:
+      # Match hardware output: SPS/PPS are separate from the keyframe payload.
+      data = bytes(packet)
+      starts = [m.start() for m in re.finditer(rb'\x00\x00(?:\x00)?\x01', data)]+[len(data)]
+      header, payload = bytearray(), bytearray()
+      for start, end in zip(starts, starts[1:], strict=False):
+        nal = data[start:end]
+        kind = nal.lstrip(b'\x00')[1] & 31
+        (header if kind in (7, 8) else payload).extend(nal)
+      source.append((bytes(header), bytes(payload), packet.is_keyframe))
+    assert [i for i, (_, _, key) in enumerate(source) if key] == list(range(0, count, 20))
+    previews.append(source)
+
+  with OpenpilotPrefix():
+    messaging.reset_context()
+    pm = messaging.PubMaster([*STREAMS, 'sentryState', 'pandaStates', 'deviceState'])
+    status = messaging.SubMaster(['sentryRecorderState'])
+    base = time.monotonic_ns()-10_000_000_000
+    recording, camera, control_frame = False, 2, 0
+    with (tmp_path/'recorder.log').open('w') as logfile:
+      process = subprocess.Popen([str(BINARY)], cwd=BINARY.parent, stdout=logfile, stderr=subprocess.STDOUT)
+      try:
+        def control():
+          msg = messaging.new_message('sentryState', valid=True)
+          msg.logMonoTime = base+control_frame*50_000_000
+          msg.sentryState.capture = True
+          msg.sentryState.triggerCamera = camera
+          msg.sentryState.recordUntilMonoTime = time.monotonic_ns()+60_000_000_000 if recording else 0
+          pm.send('sentryState', msg)
+          msg = messaging.new_message('pandaStates', 1, valid=True)
+          msg.pandaStates[0].pandaType = log.PandaState.PandaType.tres
+          pm.send('pandaStates', msg)
+          pm.send('deviceState', messaging.new_message('deviceState', valid=True))
+
+        def await_state(predicate):
+          deadline = time.monotonic()+5
+          while time.monotonic() < deadline:
+            assert process.poll() is None, (tmp_path/'recorder.log').read_text()
+            control()
+            status.update(50)
+            if status.updated['sentryRecorderState'] and predicate(status['sentryRecorderState']):
+              return
+          pytest.fail('Recorder did not reach the expected preview state')
+
+        def send_frames(start, end):
+          for frame in range(start, end):
+            control()
+            for c, service in enumerate(STREAMS):
+              msg = messaging.new_message(FIELDS[c], valid=True)
+              msg.logMonoTime = base+frame*50_000_000
+              data = getattr(msg, FIELDS[c])
+              data.width, data.height = 526, 330
+              if c >= 3:
+                data.header, data.data, key = previews[c-3][frame]
+              else:
+                data.data, key = hevc[c], True
+              idx = data.idx
+              idx.type = log.EncodeIndex.Type.qcameraH264 if c >= 3 else log.EncodeIndex.Type.fullHEVC
+              idx.frameId, idx.segmentId, idx.segmentNum = frame+10000*(c%3), frame, 7
+              idx.flags = 8 if key else 0
+              idx.timestampSof = idx.timestampEof = msg.logMonoTime
+              pm.send(service, msg)
+            time.sleep(.01)
+          await_state(lambda _: True)  # Drain all six queues before changing the view.
+
+        await_state(lambda _: True)
+        send_frames(0, 20)
+        assert not list((tmp_path/'routes').iterdir())
+        recording, control_frame = True, 19
+        await_state(lambda s: s.recording and s.previewCamera == 2)
+        send_frames(20, 23)
+        camera, control_frame = 1, 23
+        await_state(lambda s: s.previewCamera == 1)
+        send_frames(23, 63)  # Cabin P-frames before frame 40 must not be spliced in.
+        camera, control_frame = 0, 63
+        await_state(lambda s: s.previewCamera == 0)
+        send_frames(63, 90)  # Narrow starts cleanly at frame 80, in this SAME segment.
+        recording = False
+        await_state(lambda s: not s.recording)
+        recording, camera, control_frame = True, 1, 90
+        await_state(lambda s: s.recording and s.previewCamera == 1)
+        send_frames(90, 120)
+        recording = False
+        await_state(lambda s: not s.recording)
+        directories = sorted((tmp_path/'routes').iterdir())
+        assert len(directories) == 2
+        expected = [(1, f) for f in range(23)]+[(2, f) for f in range(40, 63)]+[(0, f) for f in range(80, 90)]
+        for directory, full_count in zip(directories, (90, 120), strict=True):
+          if full_count == 120:
+            expected += [(2, f) for f in range(100, 120)]
+          assert directory.name.endswith('--0') and not list(directory.glob('*.lock'))
+          with av.open(str(directory/'qcamera.ts')) as video:
+            assert video.streams.video[0].codec_context.name == 'h264'
+            frames = list(video.decode(video=0))
+          assert len(frames) == len(expected)
+          assert all(a.pts < b.pts for a, b in zip(frames, frames[1:], strict=False))
+          for image, (source, _) in zip(frames, expected, strict=True):
+            assert abs(float(image.to_ndarray(format='rgb24')[10, 10].mean())-COLORS[source]) < 10
+          indexes = [e.qNarrowRoadEncodeIdx for e in messages(directory/'qlog.zst') if e.which() == 'qNarrowRoadEncodeIdx']
+          assert [i.frameId for i in indexes] == [10000*source+frame for source, frame in expected]
+          assert [i.segmentId for i in indexes] == list(range(len(expected)))
+          for c, filename in enumerate(FILES[:3]):
+            assert (directory/filename).read_bytes() == hevc[c]*full_count
+      finally:
+        if process.poll() is None:
+          process.send_signal(signal.SIGINT)
+          process.wait(timeout=8)
+        assert process.returncode == 0, (tmp_path/'recorder.log').read_text()
+
+
 @pytest.mark.skipif(not (ROOT/'system/loggerd/encoderd').exists(), reason='build encoderd first')
-def test_encoder_private_watermark_buffers(monkeypatch, tmp_path):
+@pytest.mark.parametrize('narrow_enabled', [True, False])
+def test_encoder_private_watermark_buffers(monkeypatch, tmp_path, narrow_enabled):
   import io
   import socket as unix_socket
   try:
@@ -320,6 +464,7 @@ def test_encoder_private_watermark_buffers(monkeypatch, tmp_path):
     params = Params()
     for key, value in DEFAULTS.items():
       params.put(key, value, block=True)
+    params.put_bool('SentryNarrowCamera', narrow_enabled, block=True)
     server = VisionIpcServer('camerad')
     width, height = 640, 360
     for camera in (0, 1, 2):
@@ -330,9 +475,9 @@ def test_encoder_private_watermark_buffers(monkeypatch, tmp_path):
     while not observer.connect(False) and time.monotonic() < deadline:
       time.sleep(.01)
     assert observer.is_connected()
-    socket = messaging.sub_sock('sentryQcamEncodeData', timeout=100)
+    sockets = [messaging.sub_sock(service, timeout=100) for service in STREAMS[3 if narrow_enabled else 4:]]
     image = np.full(width*height*3//2, 128, dtype=np.uint8)
-    packets = []
+    packets = [[] for _ in sockets]
     with (tmp_path/'encoder.log').open('w') as logfile:
       process = subprocess.Popen([str(ROOT/'system/loggerd/encoderd'), '--sentry'],
                                  cwd=ROOT/'system/loggerd', stdout=logfile, stderr=subprocess.STDOUT)
@@ -343,9 +488,10 @@ def test_encoder_private_watermark_buffers(monkeypatch, tmp_path):
           for camera in (0, 1, 2):
             server.send(camera, image, frame, now, now)
           time.sleep(.05)
-          msg = messaging.recv_one_or_none(socket)
-          if msg:
-            packets.append(bytes(msg.qNarrowRoadEncodeData.data))
+          for socket, frames in zip(sockets, packets, strict=True):
+            msg = messaging.recv_one_or_none(socket)
+            if msg:
+              frames.append(bytes(msg.qNarrowRoadEncodeData.data))
         source = observer.recv(100)
         assert source is not None and np.all(source.data == 128), 'watermark modified a shared camera buffer'
       finally:
@@ -353,11 +499,12 @@ def test_encoder_private_watermark_buffers(monkeypatch, tmp_path):
         process.wait(timeout=8)
       assert process.returncode == 0, (tmp_path/'encoder.log').read_text()
       del observer, server
-    assert len(packets) > 20
-    with av.open(io.BytesIO(b''.join(packets)), format='h264') as video:
-      frames = list(video.decode(video=0))
-    assert len(frames) > 20
-    image = frames[-1].to_ndarray(format='gray')
-    assert image.shape == (330, 526)
-    assert image[290:308].max() > 200 and image[290:308].min() < 30
-    assert image[:250].std() < 2
+    for source in packets:
+      assert len(source) > 20
+      with av.open(io.BytesIO(b''.join(source)), format='h264') as video:
+        frames = list(video.decode(video=0))
+      assert len(frames) > 20
+      image = frames[-1].to_ndarray(format='gray')
+      assert image.shape == (330, 526)
+      assert image[290:308].max() > 200 and image[290:308].min() < 30
+      assert image[:250].std() < 2

@@ -46,8 +46,9 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   trigger it. Small/distant objects or brief movement may not save an event. There are no
   person, vehicle or license-plate rules in this version.
 - All three cameras default on. Device targets are 526×330, 20 fps, HEVC at 256 kbit/s
-  per camera, plus a separate 256 kbit/s H264 front preview. The nominal five-minute
-  compressed-video payload is about 38.4 MB including the preview, before logs/overhead.
+  per camera, plus a separate 256 kbit/s H264 preview buffer for each enabled camera.
+  This retains pre-event previews from whichever lens confirms motion. With all cameras
+  enabled, the nominal five-minute compressed-video payload is about 57.6 MB, before logs/overhead.
   Actual variable bitrate varies. Encoded payloads have a hard 128 MiB RAM cap; IPC queues,
   camera buffers and private watermark buffers use additional RAM.
 - No route directories or video files are written while merely watching. Runtime control
@@ -122,10 +123,27 @@ These are written directly to the saved route; the UI retains ownership of the l
 publisher. Log contents are tested locally; bookmark appearance in Connect still needs
 verification against an uploaded device event.
 
-Qlogs and the front preview use the ordinary route uploader, so Connect can index events
+The Connect preview (`qcamera.ts`) starts with the lens that first confirms motion,
+including its available pre-event footage. If movement then reaches another camera,
+the preview can switch within the same minute. The first lens keeps priority while
+its confirmed motion continues; after it clears, the earliest other lens with confirmed
+motion takes over. A stronger score or eye-only movement cannot steal the current view.
+This follows motion through the camera views, without identifying or tracking a person.
+
+Handoffs wait for the next H264 keyframe, normally within one second. Playback holds
+the previous view until that frame; timestamps remain increasing and each minute still
+has one `qcamera.ts`. Earlier preview choices are retained when saved event histories
+overlap. Manual saves use a confirming camera, otherwise the strongest currently active
+camera, then an enabled wide/narrow/cabin fallback. Disabling narrow no longer disables
+the preview: any enabled camera can supply it.
+
+Only the preview changes lenses. Full recordings always retain their original mapping:
+`fcamera.hevc` is narrow, `ecamera.hevc` is wide, and `dcamera.hevc` is cabin. Their
+camera indexes and manual Connect upload destinations do not change.
+
+Qlogs and the motion preview use the ordinary route uploader, so Connect can index events
 and display their motion bookmarks. The stock metered-connection policy still applies:
 qlogs upload normally, and previews on metered links require viewing the route in Connect.
-Disabling the narrow camera also disables the normal front preview.
 
 Full logs (`rlog.zst`) and the selected-camera videos (`fcamera.hevc`, `ecamera.hevc`,
 `dcamera.hevc`) stay on the device until requested manually from Connect. Open the event
@@ -255,8 +273,8 @@ and expired leases. The recorder and watermark rendering share this guarded read
 neither can crash merely because the sentry publisher starts later. The recorder is also tested
 with no publishers initially and staggered controller/panda/device messages.
 Encoded-video sockets use the service registry's queue sizes, matching the encoder's
-publishers. Native tests start them in both orders, send real HEVC/H264 past multiple
-10 MiB queue wraps, save two successive events, and decode every saved frame from all
+publishers. Native tests start them in both orders, send real HEVC/H264 past the
+10 MiB queue boundaries, save two successive events, and decode every saved frame from all
 four video files. This catches the smaller socket mapping that previously stopped capture
 after a short burst even while motion detection kept running.
 The native service-registry checks link the built messaging library and start panda,
@@ -286,14 +304,18 @@ gates, tap suppression/full brightness, ordinary event cleanup, manual camera up
 preview retry handling, timezone/DST and native video/log creation. The recorder test replays
 real HEVC/H264 packets, checks no idle route writes,
 decodes every saved camera stream, validates indexes and tests ignition finalization.
-The encoder test uses three synthetic VisionIPC camera streams and checks watermark output
-without modifying the shared camera buffer. PC main-camera encoding uses the existing lossless
-codec; production hardware uses HEVC.
+Preview tests cover all three trigger lenses, first-confirmed priority during overlapping
+motion, real H264 keyframe handoffs within a minute, increasing timestamps, retained preview
+choices in overlapping events, and byte-for-byte unchanged full-camera files. The encoder test
+uses three synthetic VisionIPC camera streams and checks each preview's watermark output
+without modifying the shared camera buffer, with narrow both enabled and disabled.
+PC main-camera encoding uses the existing lossless codec; production hardware uses HEVC.
 
 Before considering it ready for unattended use, verify on a parked comma 3X:
 
-1. Hardware encoding for all three cameras, decodable saved clips, timestamp/coordinate
-   watermarks, IR behavior and realistic night-time motion sensitivity.
+1. Hardware encoding for all three cameras and their three H264 previews, decodable saved
+   clips, timestamp/coordinate watermarks, IR behavior and realistic night-time motion
+   sensitivity. Walk around the car to check camera handoffs in the Connect preview.
 2. Screen timeout → motion eye → touch → uninterrupted settings → timeout → eye again.
 3. Cached parking position leaves GPS processes off; missing checkpoint starts/stops a
    bounded GPS acquisition; no-fix recording still works.
@@ -306,9 +328,11 @@ Before considering it ready for unattended use, verify on a parked comma 3X:
    preview/full requested camera files. Do not assume backend compatibility solely from
    successful local decoding.
 
-Local verification for this change: the PC encoder and recorder targets compiled, and the
-native recorder integration decoded all saved streams. The VisionIPC encoder test could not
-run in the development sandbox because Unix socket creation is blocked. The touch/timeout
+Local verification for the motion-preview change: the PC encoder and recorder targets compiled;
+82 controller, recorder, native-service and upload checks passed, including decoding the
+mixed-camera preview. Both VisionIPC encoder cases were skipped in the development sandbox
+because Unix socket creation is blocked. Six concurrent hardware encoder sessions and Connect
+playback of the changing preview still need comma 3X validation. The touch/timeout
 policy was unit tested; the rendered settings and eye still need a device visual check.
 The eye's drawing calls are checked against the installed raylib C signatures using
 callbacks instead of an OpenGL context, including its first visible frame and the older

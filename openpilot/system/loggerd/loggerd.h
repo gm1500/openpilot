@@ -219,9 +219,19 @@ const EncoderInfo sentry_encoders[] = {
   sentry_encoder(main_wide_road_encoder_info, "sentryWideEncodeData"),
   sentry_encoder(main_cabin_encoder_info, "sentryCabinEncodeData"),
   sentry_encoder(qcam_encoder_info, "sentryQcamEncodeData", true),
+  sentry_encoder(qcam_encoder_info, "sentryWideQcamEncodeData", true),
+  sentry_encoder(qcam_encoder_info, "sentryCabinQcamEncodeData", true),
 };
+// The first three streams retain their camera filenames. The remaining three
+// buffer independent H264 previews, selected into one qcamera.ts per segment.
+constexpr int SENTRY_ENCODER_COUNT = 6;
+inline int sentry_preview_encoder(int camera) {
+  if (camera == VISION_STREAM_WIDE_ROAD) return 4;
+  if (camera == VISION_STREAM_CABIN) return 5;
+  return 3;
+}
 const LogCameraInfo sentry_cameras[] = {
   {.thread_name = "sentry_narrow", .stream_type = VISION_STREAM_NARROW_ROAD, .encoder_infos = {sentry_encoders[0], sentry_encoders[3]}},
-  {.thread_name = "sentry_wide", .stream_type = VISION_STREAM_WIDE_ROAD, .encoder_infos = {sentry_encoders[1]}},
-  {.thread_name = "sentry_cabin", .stream_type = VISION_STREAM_CABIN, .encoder_infos = {sentry_encoders[2]}},
+  {.thread_name = "sentry_wide", .stream_type = VISION_STREAM_WIDE_ROAD, .encoder_infos = {sentry_encoders[1], sentry_encoders[4]}},
+  {.thread_name = "sentry_cabin", .stream_type = VISION_STREAM_CABIN, .encoder_infos = {sentry_encoders[2], sentry_encoders[5]}},
 };

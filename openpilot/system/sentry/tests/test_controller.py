@@ -11,6 +11,35 @@ from openpilot.system.sentry.location import vehicle_identity
 from openpilot.system.sentry.motion import Motion
 
 
+@pytest.mark.parametrize('first,second,third', [(0, 1, 2), (1, 2, 0), (2, 0, 1)])
+def test_preview_follows_confirmed_motion_in_first_detection_order(first, second, third):
+  since = {}
+  results = {stream: Motion() for stream in range(3)}
+  results[first] = Motion(active=True, score=.1, triggered=True)
+  camera = sentryd.trigger_source(results, 2, since, 100.)
+  assert camera == first
+  # Stronger motion in an overlapping camera must not steal the preview.
+  results[second] = Motion(active=True, score=.8, triggered=True)
+  assert sentryd.trigger_source(results, camera, since, 101.) == first
+  results[third] = Motion(active=True, score=1., triggered=True)
+  assert sentryd.trigger_source(results, camera, since, 102.) == first
+  # As a person leaves one view, the next already-confirmed lens takes over.
+  results[first] = Motion(active=True, score=.9, triggered=False)
+  camera = sentryd.trigger_source(results, camera, since, 103.)
+  assert camera == second
+  results[second] = Motion()
+  assert sentryd.trigger_source(results, camera, since, 104.) == third
+
+
+@pytest.mark.parametrize('enabled,expected', [((0, 1, 2), 2), ((0, 1), 0), ((1,), 1), ((2,), 2)])
+def test_manual_preview_uses_an_enabled_camera_and_eye_only_motion_does_not_switch(enabled, expected):
+  results = {stream: Motion() for stream in enabled}
+  assert sentryd.trigger_source(results, 2, {}, 100., manual=True) == expected
+  results[enabled[0]] = Motion(active=True, score=.5)
+  assert sentryd.trigger_source(results, expected, {}, 101.) == expected
+  assert sentryd.trigger_source(results, expected, {}, 101., manual=True) == enabled[0]
+
+
 @pytest.mark.parametrize('stream', [0, 1, 2])
 @pytest.mark.parametrize('size', [(1928, 1208), (1344, 760)])
 def test_live_camera_sampling_applies_lens_area_and_one_second_confirmation(monkeypatch, stream, size):

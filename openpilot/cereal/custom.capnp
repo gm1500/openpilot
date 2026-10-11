@@ -137,6 +137,8 @@ struct SentryState @0xda96579883444c35 {
   cameraMask @16 :UInt8;
   timeZone @17 :Text;
   utcOffsetSeconds @18 :Int32;
+  # Confirmed recording source (VisionStreamType), independent of the eye.
+  triggerCamera @19 :UInt8;
 }
 
 struct SentryRecorderState @0x80ae746ee2596b11 {
@@ -145,6 +147,7 @@ struct SentryRecorderState @0x80ae746ee2596b11 {
   bufferSeconds @2 :Float32;
   bufferBytes @3 :UInt64;
   error @4 :Text;
+  previewCamera @5 :UInt8;
 }
 
 struct CustomReserved5 @0xa5cd762cd951a455 {
