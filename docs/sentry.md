@@ -111,6 +111,11 @@ the cabin direction is mirrored. It appears on black at low brightness only afte
 screen timeout, and fades off when motion stops. **Any touch clears the eye and suppresses it
 throughout the interactive screen period, even if motion continues. It becomes eligible again
 only at the next inactivity timeout.** Settings remain accessible through the normal interface.
+To stop an active session, tap the display, open **Settings → Sentry**, and press **STOP**
+at the top or turn **Enable Sentry** off. Turning it off remains available even if ignition
+is reported. Capture/GPS process gates and the eye honor the master switch directly;
+the current event is finalized and already saved events remain preserved. Sentry stays
+disabled until you explicitly enable it again while offroad.
 
 Sentry's cutoff/time limits replace the stock offroad software limits only while the
 controller has a fresh parked-session lease. `DisablePowerDown` does not bypass sentry's cutoff.

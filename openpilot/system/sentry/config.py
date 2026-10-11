@@ -59,8 +59,8 @@ def write_runtime(state):
 
 
 def sentry_capture_requested(started, params, CP):
-  return not started and bool(read_runtime().get('capture'))
+  return not started and setting(params, 'SentryEnabled') and bool(read_runtime().get('capture'))
 
 
 def sentry_gps_requested(started, params, CP):
-  return not started and bool(read_runtime().get('gps'))
+  return not started and setting(params, 'SentryEnabled') and bool(read_runtime().get('gps'))

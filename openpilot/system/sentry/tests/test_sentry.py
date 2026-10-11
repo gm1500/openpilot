@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from openpilot.system.sentry import config
 from openpilot.system.sentry.location import parked_location, gps_location
@@ -155,6 +156,68 @@ def test_eye_touch_suppression_lasts_until_next_timeout(monkeypatch):
   assert not device.sentry_eye_visible
 
 
+@pytest.mark.parametrize('stop_control', ['button', 'toggle'])
+@pytest.mark.parametrize('ignition,started', [(False, False), (True, False), (False, True)])
+def test_settings_can_stop_sentry_and_only_reenable_offroad(monkeypatch, tmp_path, stop_control, ignition, started):
+  monkeypatch.setenv('SCALE', '1')
+  import pyray as rl
+  from openpilot.common.params import Params
+  from openpilot.selfdrive.ui import ui_state
+  from openpilot.selfdrive.ui.layouts.settings import sentry as ui
+  from openpilot.system.ui.widgets import list_view
+
+  params = Params(str(tmp_path/'params'))
+  params.put_bool('SentryEnabled', True, block=True)
+  params.put_bool('SentryManualTrigger', True, block=True)
+
+  class SubMaster(dict):
+    valid = {'sentryState': True, 'peripheralState': True}
+    recv_time = dict.fromkeys(valid, ui.time.monotonic())
+
+  class State(SimpleNamespace):
+    sentry_active = ui_state.UIState.sentry_active
+
+  sm = SubMaster(sentryState=SimpleNamespace(capture=True, phase='Recording', locationValid=False),
+                 sentryRecorderState=SimpleNamespace(bufferSeconds=120, bufferBytes=1000),
+                 peripheralState=SimpleNamespace(voltage=12000))
+  state = State(params=params, sm=sm, ignition=ignition, started=started)
+  device = SimpleNamespace(sentry_motion_until=100.)
+  monkeypatch.setattr(ui, 'Params', lambda: params)
+  monkeypatch.setattr(ui, 'ui_state', state)
+  monkeypatch.setattr(ui, 'device', device)
+  # Construct the real settings rows without an OpenGL context.
+  monkeypatch.setattr(ui.gui_app, 'font', lambda *args: rl.Font())
+  monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*20, 40))
+  layout = ui.SentryLayout()
+  assert layout._stop_button.action_item.enabled
+  assert layout._enable_toggle.action_item.enabled
+  assert layout._enable_toggle.action_item.get_state()
+  assert state.sentry_active == (not ignition and not started)
+
+  if stop_control == 'button':
+    layout._stop_button.callback()
+  else:
+    layout._enable_toggle.action_item.toggle._handle_mouse_release(rl.Vector2())
+  assert not params.get_bool('SentryEnabled')
+  assert not params.get_bool('SentryManualTrigger')
+  assert not layout._enable_toggle.action_item.get_state()
+  assert not layout._stop_button.action_item.enabled
+  assert layout._stop_button.action_item.value == 'Off'
+  assert device.sentry_motion_until == 0.
+  assert not state.sentry_active  # A fresh capture=true message cannot keep the eye alive.
+
+  assert layout._enable_toggle.action_item.enabled == (not ignition and not started)
+  layout._set_sentry_enabled(True)
+  assert params.get_bool('SentryEnabled') == (not ignition and not started)
+  state.ignition = state.started = False
+  layout._set_sentry_enabled(True)
+  assert params.get_bool('SentryEnabled') and layout._enable_toggle.action_item.get_state()
+  # Reflect an external change, e.g. a stop issued over SSH, on the next UI update.
+  params.put_bool('SentryEnabled', False, block=True)
+  layout._update_state()
+  assert not layout._enable_toggle.action_item.get_state()
+
+
 def test_camera_buttons_toggle_independently_and_keep_personality_exclusive(monkeypatch):
   monkeypatch.setenv('SCALE', '1')
   import pyray as rl
@@ -193,9 +256,15 @@ def test_camera_buttons_toggle_independently_and_keep_personality_exclusive(monk
 def test_process_gates_do_not_start_driving_controls(monkeypatch):
   from openpilot.system.manager import process_config as processes
   monkeypatch.setattr(config, 'read_runtime', lambda: {'capture': True, 'gps': True})
-  assert config.sentry_capture_requested(False, None, None)
-  assert not config.sentry_capture_requested(True, None, None)
-  assert config.sentry_gps_requested(False, None, None)
+  params = FakeParams(SentryEnabled=True)
+  assert config.sentry_capture_requested(False, params, None)
+  assert not config.sentry_capture_requested(True, params, None)
+  assert config.sentry_gps_requested(False, params, None)
+  params['SentryEnabled'] = False
+  # The master switch overrides a capture/GPS lease even before sentryd updates it.
+  assert not config.sentry_capture_requested(False, params, None)
+  assert not config.sentry_gps_requested(False, params, None)
+  assert not processes.sentry_encoder(False, params, None)
   for name in ('modeld', 'controlsd', 'card', 'selfdrived', 'plannerd', 'locationd'):
     assert not processes.managed_processes[name].should_run(False, FakeParams(), SimpleNamespace(notCar=False))
   monkeypatch.setattr(processes.managed_processes['sentry_encoderd'], 'proc', SimpleNamespace(is_alive=lambda: True))

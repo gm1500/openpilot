@@ -85,7 +85,8 @@ def test_recorder_waits_for_publishers_at_startup(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
-def test_native_ram_event_and_ignition_handoff(tmp_path, monkeypatch):
+@pytest.mark.parametrize('stop_reason', ['ignition', 'disabled', 'manager'])
+def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
   monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
   hevc, h264 = sample_packet('libx265'), sample_packet('libx264')
   with OpenpilotPrefix():
@@ -98,9 +99,9 @@ def test_native_ram_event_and_ignition_handoff(tmp_path, monkeypatch):
     with (tmp_path/'recorder.log').open('w') as logfile:
       process = subprocess.Popen([str(BINARY)], cwd=BINARY.parent, stdout=logfile, stderr=subprocess.STDOUT)
       try:
-        def control(trigger=False, ignition=False):
+        def control(trigger=False, ignition=False, capture=True):
           msg = messaging.new_message('sentryState', valid=True)
-          msg.sentryState.capture = True
+          msg.sentryState.capture = capture
           msg.sentryState.recordUntilMonoTime = time.monotonic_ns()+10_000_000_000 if trigger else 0
           msg.sentryState.locationValid = True
           msg.sentryState.locationSource = 'slcParked'
@@ -116,11 +117,11 @@ def test_native_ram_event_and_ignition_handoff(tmp_path, monkeypatch):
           msg.deviceState.started = False
           pm.send('deviceState', msg)
 
-        def await_state(predicate, trigger=False, ignition=False):
+        def await_state(predicate, trigger=False, ignition=False, capture=True):
           deadline = time.monotonic()+5
           while time.monotonic() < deadline:
             assert process.poll() is None, (tmp_path/'recorder.log').read_text()
-            control(trigger, ignition)
+            control(trigger, ignition, capture)
             status.update(50)
             if predicate(status['sentryRecorderState']):
               return
@@ -149,8 +150,15 @@ def test_native_ram_event_and_ignition_handoff(tmp_path, monkeypatch):
         assert not list((tmp_path/'routes').iterdir()), 'idle capture wrote a route to disk'
         assert params.get('RouteCount') is None
         await_state(lambda s: s.recording, trigger=True)
-        # Ignition alone must finalize even when the controller incorrectly keeps capture true.
-        await_state(lambda s: not s.recording and s.bufferBytes == 0, trigger=True, ignition=True)
+        if stop_reason == 'manager':
+          # The manager can observe the master switch before the controller does.
+          # Its normal stop signal must finalize an event that is still recording.
+          process.send_signal(signal.SIGINT)
+          process.wait(timeout=8)
+        else:
+          # Both ignition and capture=false override an unexpired event request.
+          await_state(lambda s: not s.recording and s.bufferBytes == 0, trigger=True,
+                      ignition=stop_reason == 'ignition', capture=stop_reason != 'disabled')
         dirs = sorted((tmp_path/'routes').iterdir())
         assert len(dirs) == 3
         for number, directory in enumerate(dirs):

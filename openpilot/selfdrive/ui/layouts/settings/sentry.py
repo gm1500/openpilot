@@ -2,7 +2,7 @@ import pyray as rl
 import time
 
 from openpilot.common.params import Params
-from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.ui.ui_state import ui_state, device
 from openpilot.system.sentry.config import setting, RANGES
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.widgets import Widget
@@ -76,10 +76,18 @@ class SentryLayout(Widget):
   def __init__(self):
     super().__init__()
     self.params = Params()
+    self._enable_toggle = toggle_item('Enable Sentry',
+                                     'Arms after ignition turns off. Switch off or press STOP to end Sentry until you enable it again.',
+                                     initial_state=setting(self.params, 'SentryEnabled'),
+                                     callback=self._set_sentry_enabled, enabled=self._can_toggle_sentry)
+    self._stop_button = button_item('Sentry', 'STOP',
+                                   'Stops parked capture and the red eye. Events already saved stay on the device.',
+                                   callback=lambda: self._set_sentry_enabled(False),
+                                   enabled=lambda: setting(self.params, 'SentryEnabled'))
+    self._stop_button.action_item.set_value(self.phase_status)
     items = [
-      text_item('Sentry', self.phase_status,
-                'Parked motion recording for comma 3X. Up to five minutes of compressed video stay in RAM until an event.'),
-      self.toggle('SentryEnabled', 'Enable Sentry', 'Arms after ignition turns off. Stops when the vehicle starts.'),
+      self._stop_button,
+      self._enable_toggle,
       SentrySlider(self.params, 'SentrySensitivity', 'Motion sensitivity'),
       text_item('Buffered footage', self.buffer_status),
       text_item('Battery voltage', self.voltage_status),
@@ -110,6 +118,22 @@ class SentryLayout(Widget):
                 'Uses the SLC parking checkpoint first. Otherwise requests a GPS fix for up to 90 seconds, then switches GPS off.'),
     ])
     self.scroller = self._child(Scroller(items, spacing=0, line_separator=True))
+
+  def _can_toggle_sentry(self):
+    return setting(self.params, 'SentryEnabled') or (not ui_state.ignition and not ui_state.started)
+
+  def _set_sentry_enabled(self, enabled):
+    if enabled and (ui_state.ignition or ui_state.started):
+      return
+    # Persist the command before refreshing the switch or evaluating process gates.
+    self.params.put_bool('SentryEnabled', enabled, block=True)
+    if not enabled:
+      self.params.remove('SentryManualTrigger')
+      device.sentry_motion_until = 0.
+    self._enable_toggle.action_item.set_state(enabled)
+
+  def _update_state(self):
+    self._enable_toggle.action_item.set_state(setting(self.params, 'SentryEnabled'))
 
   def toggle(self, key, title, description=None):
     return toggle_item(title, description, initial_state=setting(self.params, key),

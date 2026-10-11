@@ -153,7 +153,7 @@ class UIState:
 
   @property
   def sentry_active(self) -> bool:
-    return (not self.ignition and not self.started and self.sm.valid['sentryState'] and
+    return (self.params.get_bool('SentryEnabled') and not self.ignition and not self.started and self.sm.valid['sentryState'] and
             0 <= time.monotonic()-self.sm.recv_time['sentryState'] < 2. and self.sm['sentryState'].capture)
 
   @property

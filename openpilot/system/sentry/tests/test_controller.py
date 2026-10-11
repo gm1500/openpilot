@@ -11,7 +11,8 @@ from openpilot.system.sentry.motion import Motion
 
 
 @pytest.mark.parametrize('cached,fix_after,video_ready', [(True, None, True), (False, 20, True), (False, None, True), (True, None, False)])
-def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp_path, cached, fix_after, video_ready):
+@pytest.mark.parametrize('stop_reason', ['ignition', 'disabled'])
+def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp_path, cached, fix_after, video_ready, stop_reason):
   clock = [100.]
   wall = 10000.
   CP = car.CarParams.new_message()
@@ -48,11 +49,11 @@ def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp
       self.logMonoTime = dict.fromkeys(self, int(clock[0]*1e9))
       self.valid['gpsLocation'] = fix_after is not None and clock[0]-100 >= fix_after
       # Mimic enabling the existing UI while already parked, then a manual save
-      # before the arming delay, and finally ignition returning.
-      params['SentryEnabled'] = clock[0] >= 101.
+      # before the arming delay, and finally disabling Sentry or ignition returning.
+      params['SentryEnabled'] = clock[0] >= 101. and not (stop_reason == 'disabled' and clock[0] >= 199.)
       if clock[0] == 104.:
         params['SentryManualTrigger'] = True
-      self['pandaStates'][0].ignitionLine = clock[0] >= 199.
+      self['pandaStates'][0].ignitionLine = stop_reason == 'ignition' and clock[0] >= 199.
 
   class Finished(Exception):
     pass
@@ -88,7 +89,8 @@ def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp
   assert runtime[3]['capture']
   assert sent[4]['sentryState']['recordUntilMonoTime'] > 104e9
   assert runtime[-2]['phase'] == ('Watching' if video_ready else 'Waiting for encoded video')
-  assert runtime[-1]['phase'] == 'Waiting for ignition off' and not runtime[-1]['capture']
+  assert runtime[-1]['phase'] == ('Off' if stop_reason == 'disabled' else 'Waiting for ignition off')
+  assert not runtime[-1]['capture'] and not runtime[-1]['gps'] and not runtime[-1]['session']
   assert sent[-1]['sentryState']['recordUntilMonoTime'] == 0
   # Discard disabled/onroad samples for the parking-location assertions.
   runtime = runtime[1:-1]
