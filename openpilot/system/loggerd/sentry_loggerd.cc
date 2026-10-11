@@ -27,12 +27,13 @@ int setting(const char *key, int fallback, int lo, int hi) {
 struct Packet {
   int camera;  // -1 is an ordinary log message
   uint64_t time;
-  std::vector<capnp::word> words;
+  // Keep Cap'n Proto's aligned allocation. Individual words are deliberately
+  // non-copyable under Clang; moving the owning array also avoids a second copy.
+  kj::Array<capnp::word> words;
   Packet(int camera_, cereal::Event::Reader event) : camera(camera_), time(event.getLogMonoTime()) {
     capnp::MallocMessageBuilder builder;
     builder.setRoot(event);
-    auto data = capnp::messageToFlatArray(builder);
-    words.assign(data.begin(), data.end());
+    words = capnp::messageToFlatArray(builder);
   }
   size_t bytes() const { return words.size() * sizeof(capnp::word); }
 };
@@ -96,11 +97,11 @@ public:
     write(msg.toBytes());
   }
   void append(const Packet &packet) {
-    capnp::FlatArrayMessageReader reader(kj::arrayPtr(packet.words.data(), packet.words.size()));
+    capnp::FlatArrayMessageReader reader(packet.words.asPtr());
     auto event = reader.getRoot<cereal::Event>();
     last_time = std::max(last_time, packet.time);
     if (packet.camera < 0) {
-      write(kj::arrayPtr(reinterpret_cast<const kj::byte *>(packet.words.data()), packet.bytes()));
+      write(packet.words.asBytes());
       return;
     }
     int c = packet.camera;
