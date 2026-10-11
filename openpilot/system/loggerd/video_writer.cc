@@ -240,3 +240,8 @@ VideoWriter::~VideoWriter() {
   }
   unlink(this->lock_path.c_str());
 }
+
+void VideoWriter::flush() {
+  if (of) util::safe_fflush(of);
+  else if (ofmt_ctx && ofmt_ctx->pb) avio_flush(ofmt_ctx->pb);
+}

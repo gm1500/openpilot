@@ -1,0 +1,173 @@
+"""Parked motion controller. Cameras/encoders and GPS are independent of onroad state."""
+import time
+import math
+import numpy as np
+
+from opendbc.car.structs import car
+from msgq.visionipc import VisionIpcClient
+from openpilot.cereal import messaging, log
+from openpilot.common.hardware import HARDWARE
+from openpilot.common.params import Params
+from openpilot.common.realtime import Ratekeeper
+from openpilot.common.swaglog import cloudlog
+from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH
+from openpilot.system.sentry.location import vehicle_identity, parked_location, gps_location
+from openpilot.system.sentry.motion import MotionDetector, Motion
+
+
+class CameraMotion:
+  def __init__(self, stream):
+    self.client = VisionIpcClient('camerad', stream, True)
+    self.detector = MotionDetector()
+    self.last_frame = -1
+
+  def sample(self, now, sensitivity):
+    if not self.client.is_connected() and not self.client.connect(False):
+      return Motion()
+    buf = self.client.recv(5)
+    if buf is None or self.client.frame_id == self.last_frame or not 0 <= now-self.client.timestamp_eof/1e9 <= .5:
+      return Motion()
+    self.last_frame = self.client.frame_id
+    image = np.frombuffer(buf.data, dtype=np.uint8, count=self.client.stride*self.client.height)
+    image = image.reshape(self.client.height, self.client.stride)[:, :self.client.width]
+    rows = np.linspace(0, image.shape[0]-1, 80, dtype=int)
+    cols = np.linspace(0, image.shape[1]-1, 128, dtype=int)
+    return self.detector.update(image[np.ix_(rows, cols)], now, sensitivity)
+
+
+def main():
+  params = Params()
+  sm = messaging.SubMaster(['deviceState', 'pandaStates', 'peripheralState', 'gpsLocation', 'gpsLocationExternal', 'sentryRecorderState'])
+  pm = messaging.PubMaster(['sentryState'])
+  rk = Ratekeeper(5, print_delay_threshold=None)
+  off_since = None
+  location = None
+  cameras = {}
+  cooldown = False
+  record_until = 0.
+  last_camera_mask = 0
+  gps_finished = False
+  low_since = None
+  cutoff_reason = ''
+  config_signature = None
+  restart_until = 0.
+  try:
+    while True:
+      sm.update(0)
+      now, wall = time.monotonic(), time.time()  # noqa: TID251
+      health_ok = (sm.valid['pandaStates'] and bool(sm['pandaStates']) and
+                   all(p.pandaType != log.PandaState.PandaType.unknown for p in sm['pandaStates']) and
+                   now-sm.recv_time['pandaStates'] < 2. and sm.valid['deviceState'] and now-sm.recv_time['deviceState'] < 2.)
+      ignition = any(p.ignitionLine or p.ignitionCan for p in sm['pandaStates'])
+      session = (setting(params, 'SentryEnabled') and HARDWARE.get_device_type() == 'tizi' and
+                 health_ok and not ignition and not sm['deviceState'].started and params.get_bool('IsOffroad') and
+                 not any(params.get_bool(k) for k in ('DoShutdown', 'DoReboot', 'DoUninstall')))
+      phase, capture, gps_request = 'Off', False, False
+      best, motion_camera = Motion(), 2
+      camera_mask = sum(1 << i for i, key in enumerate(('SentryNarrowCamera', 'SentryCabinCamera', 'SentryWideCamera')) if setting(params, key))
+      if not session:
+        off_since, location, cameras = None, None, {}
+        record_until, cooldown, gps_finished, low_since = 0., False, False, None
+        cutoff_reason = ''
+      else:
+        if off_since is None:
+          off_since = now
+          try:
+            cp_data = params.get('CarParamsPersistent')
+            if cp_data:
+              with car.CarParams.from_bytes(cp_data) as CP:
+                location = parked_location(params.get('MapParkedPosition'), vehicle_identity(CP), wall)
+          except Exception:
+            cloudlog.exception('sentry parking checkpoint')
+        signature = (camera_mask, *(setting(params, key) for key in
+                     ('SentryWatermarkTime', 'SentryWatermarkGPS', 'SentryWatermarkCamera')))
+        if config_signature is not None and signature != config_signature:
+          restart_until = now+3.  # manager must observe an off period before reconfiguring encoders
+        config_signature = signature
+        elapsed = now-off_since
+        temp = sm['deviceState'].maxTempC
+        limit = setting(params, 'SentryMaxTemp')
+        cooldown = not math.isfinite(temp) or (temp >= limit if not cooldown else temp > limit-8)
+        voltage = sm['peripheralState'].voltage / 1000.
+        voltage_ok = sm.valid['peripheralState'] and now-sm.recv_time['peripheralState'] < 3. and 6 < voltage < 20
+        if voltage_ok and voltage < setting(params, 'SentryCutoffVoltage'):
+          low_since = now if low_since is None else low_since
+        else:
+          low_since = None
+        low_battery = low_since is not None and now-low_since >= 10
+        expired = elapsed >= setting(params, 'SentryMaxHours')*3600
+        used_up = sm['deviceState'].offroadPowerUsageUwh >= setting(params, 'SentryMaxEnergyWh')*1e6
+        if not cutoff_reason and (low_battery or expired or used_up):
+          cutoff_reason = 'Battery cutoff' if low_battery else 'Parking budget reached'
+        if cutoff_reason:
+          phase = cutoff_reason
+        elif not voltage_ok:
+          phase = 'Waiting for battery reading'
+        elif cooldown:
+          phase = 'Cooling down'
+        elif now < restart_until:
+          phase = 'Applying camera settings'
+        elif not camera_mask:
+          phase = 'No cameras selected'
+        elif params.get_bool('IsDriverViewEnabled') or params.get_bool('IsLiveStreaming'):
+          phase = 'Camera preview in use'
+        else:
+          capture = elapsed >= 2.  # allow driving encoders to finish offroad transition
+          phase = 'Arming' if elapsed < setting(params, 'SentryArmDelay') else 'Watching'
+          if location is None and not gps_finished:
+            for service in ('gpsLocationExternal', 'gpsLocation'):
+              if sm.valid[service]:
+                location = gps_location(sm[service], sm.logMonoTime[service]/1e9, now, wall)
+                if location is not None:
+                  break
+            gps_finished = location is not None or elapsed >= 90.
+            gps_request = not gps_finished
+        if capture:
+          if camera_mask != last_camera_mask:
+            cameras.clear()
+          last_camera_mask = camera_mask
+          for stream in (2, 1, 0):
+            if camera_mask & (1 << stream):
+              if stream not in cameras:
+                cameras[stream] = CameraMotion(stream)
+              result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'))
+              # Wide cameras drive the eye. Narrow camera can still trigger recording.
+              if result.active and (not best.active or (stream in (1, 2) and result.score > best.score)):
+                best, motion_camera = result, stream
+          manual = params.get_bool('SentryManualTrigger')
+          if manual:
+            params.remove('SentryManualTrigger')
+          if phase == 'Watching' and (best.active or manual):
+            record_until = now+setting(params, 'SentryPostSeconds')
+          if sm['sentryRecorderState'].recording and now-sm.recv_time['sentryRecorderState'] < 2.:
+            phase = 'Recording'
+            if best.active or manual:
+              record_until = now+setting(params, 'SentryPostSeconds')
+        else:
+          cameras.clear()
+          record_until = 0.
+        error = sm['sentryRecorderState'].error if now-sm.recv_time['sentryRecorderState'] < 2. else ''
+        if capture and error:
+          phase = error
+      write_runtime({'monoTime': now, 'session': bool(session), 'capture': capture, 'gps': gps_request,
+                     'location': location, 'phase': phase})
+      msg = messaging.new_message('sentryState', valid=True)
+      state = msg.sentryState
+      state.sessionActive, state.capture, state.phase = bool(session), capture, phase
+      state.motion = capture and best.active
+      state.motionX, state.motionY, state.motionScore, state.motionCamera = best.x, best.y, best.score, motion_camera
+      state.recordUntilMonoTime = int(record_until*1e9)
+      state.eyeEnabled, state.cameraMask = setting(params, 'SentryEye'), camera_mask
+      state.locationValid = location is not None
+      if location:
+        state.latitude, state.longitude = location['latitude'], location['longitude']
+        state.locationAccuracy, state.locationSavedAt = location['accuracy'], location['savedAt']
+        state.locationSource = location['source']
+      pm.send('sentryState', msg)
+      rk.keep_time()
+  finally:
+    RUNTIME_PATH.unlink(missing_ok=True)
+
+
+if __name__ == '__main__':
+  main()

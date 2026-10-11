@@ -4,6 +4,7 @@ import threading
 from openpilot.common.params import Params
 from openpilot.common.hardware import HARDWARE
 from openpilot.common.swaglog import cloudlog
+from openpilot.system.sentry.config import read_runtime, setting
 
 CAR_VOLTAGE_LOW_PASS_K = 0.011 # LPF gain for 45s tau (dt/tau / (dt/tau + 1))
 
@@ -110,6 +111,16 @@ class PowerMonitoring:
     now = time.monotonic()
     should_shutdown = False
     offroad_time = (now - offroad_timestamp)
+    # Sentry owns the parked budget only while its RAM-only controller lease is live.
+    # A crash returns to stock policy; DisablePowerDown cannot defeat the sentry cutoff.
+    sentry_runtime = read_runtime(now)
+    sentry = sentry_runtime.get('session', False) and setting(self.params, 'SentryEnabled')
+    if sentry and in_car and not ignition:
+      return bool(self.params.get_bool('ForcePowerDown') or
+                  sentry_runtime.get('phase') in ('Battery cutoff', 'Parking budget reached') or
+                  (offroad_time > 60 and self.car_voltage_mV < setting(self.params, 'SentryCutoffVoltage')*1000) or
+                  offroad_time >= setting(self.params, 'SentryMaxHours')*3600 or
+                  self.power_used_uWh >= setting(self.params, 'SentryMaxEnergyWh')*1e6)
     low_voltage_shutdown = (self.car_voltage_mV < (VBATT_PAUSE_CHARGING * 1e3) and
                             offroad_time > VOLTAGE_SHUTDOWN_MIN_OFFROAD_TIME_S)
     should_shutdown |= offroad_time > MAX_TIME_OFFROAD_S

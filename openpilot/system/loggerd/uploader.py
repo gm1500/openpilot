@@ -11,6 +11,7 @@ from collections.abc import Iterator
 
 from openpilot.cereal import log
 import openpilot.cereal.messaging as messaging
+from openpilot.system.sentry.storage import live_sentry_lock
 from openpilot.common.api import Api
 from openpilot.common.utils import get_upload_stream
 from openpilot.common.params import Params
@@ -63,6 +64,8 @@ def listdir_by_creation(d: str) -> list[str]:
 def clear_locks(root: str) -> None:
   for logdir in os.listdir(root):
     path = os.path.join(root, logdir)
+    if live_sentry_lock(path):
+      continue
     try:
       for fname in os.listdir(path):
         if fname.endswith(".lock"):

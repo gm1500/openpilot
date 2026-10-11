@@ -280,7 +280,7 @@ void process_panda_state(Panda *panda, PubMaster *pm, bool engaged, bool is_onro
 
 void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control, bool is_onroad) {
   static Params params;
-  static SubMaster sm({"deviceState", "cabinCameraState"});
+  static SubMaster sm({"deviceState", "cabinCameraState", "sentryState"});
 
   static uint64_t last_cabin_camera_t = 0;
   static uint16_t prev_fan_speed = 999;
@@ -330,10 +330,13 @@ void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control, 
       }
     }
 
-    // Disable IR on input timeout or when requested offroad.
-    if (nanos_since_boot() - last_cabin_camera_t > 1e9 || (!is_onroad && params.getBool("DisableDriverCameraIR"))) {
-      ir_pwr = 0;
-    }
+    // Exposure control remains automatic. Sentry owns its offroad IR preference.
+    auto sentry = sm["sentryState"].getSentryState();
+    bool sentry_active = !is_onroad && sentry.getCapture() &&
+                         nanos_since_boot() - sm["sentryState"].getLogMonoTime() < 2e9;
+    bool ir_disabled = sentry_active ? (!params.getBool("SentryIR") || !(sentry.getCameraMask() & 2)) :
+                                      (!is_onroad && params.getBool("DisableDriverCameraIR"));
+    if (nanos_since_boot() - last_cabin_camera_t > 1e9 || ir_disabled) ir_pwr = 0;
 
     // turn off IR leds if body
     if (!not_car_checked && is_onroad) {

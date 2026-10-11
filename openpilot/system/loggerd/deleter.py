@@ -59,6 +59,10 @@ def deleter_step() -> tuple[bool, str | None]:
   for delete_dir in sorted(dirs, key=lambda d: (d in DELETE_LAST, d in preserved_dirs)):
     delete_path = os.path.join(Paths.log_root(), delete_dir)
 
+    # Event footage is bounded by SentryStorageGB; retain it until explicitly deleted.
+    if os.path.exists(os.path.join(delete_path, ".sentry")):
+      continue
+
     if any(name.endswith(".lock") for name in os.listdir(delete_path)):
       continue
 
