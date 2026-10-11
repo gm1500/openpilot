@@ -30,11 +30,14 @@ class SentryEye(Widget):
     if state.motion and state.motionCamera in (1, 2):
       self.x += (max(0., min(1., x))-self.x)*min(1., dt*5)
       self.y += (max(0., min(1., state.motionY))-self.y)*min(1., dt*5)
-    center = rl.Vector2(rect.x+100+self.x*max(0, rect.width-200), rect.y+100+self.y*max(0, rect.height-200))
+    # Four times the previous diameter, with the entire glow kept inside the display.
+    scale = min(4., rect.width/200, rect.height/200)
+    margin = 100*scale
+    center = rl.Vector2(rect.x+margin+self.x*max(0, rect.width-2*margin), rect.y+margin+self.y*max(0, rect.height-2*margin))
     fade = max(0., min(1., (device.sentry_motion_until-now)/.5))
-    draw_glow(center, 95, rl.Color(130, 0, 0, int(110*fade)), rl.BLANK)
-    rl.draw_circle_v(center, 44, rl.Color(18, 5, 5, int(255*fade)))
-    rl.draw_ring(center, 42, 44, 0, 360, 64, rl.Color(110, 40, 40, int(180*fade)))
-    draw_glow(center, 35, rl.Color(255, 65, 25, int(255*fade)), rl.Color(75, 0, 0, int(255*fade)))
-    draw_glow(center, 16, rl.Color(255, 190, 130, int(255*fade)), rl.Color(220, 0, 0, int(120*fade)))
-    rl.draw_ellipse(int(center.x-13), int(center.y-18), 11, 5, rl.Color(255, 235, 230, int(160*fade)))
+    draw_glow(center, 95*scale, rl.Color(130, 0, 0, int(110*fade)), rl.BLANK)
+    rl.draw_circle_v(center, 44*scale, rl.Color(18, 5, 5, int(255*fade)))
+    rl.draw_ring(center, 42*scale, 44*scale, 0, 360, 64, rl.Color(110, 40, 40, int(180*fade)))
+    draw_glow(center, 35*scale, rl.Color(255, 65, 25, int(255*fade)), rl.Color(75, 0, 0, int(255*fade)))
+    draw_glow(center, 16*scale, rl.Color(255, 190, 130, int(255*fade)), rl.Color(220, 0, 0, int(120*fade)))
+    rl.draw_ellipse(int(center.x-13*scale), int(center.y-18*scale), 11*scale, 5*scale, rl.Color(255, 235, 230, int(160*fade)))

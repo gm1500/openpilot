@@ -11,6 +11,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH
+from openpilot.system.sentry.clock import SentryClock
 from openpilot.system.sentry.location import vehicle_identity, parked_location, gps_location
 from openpilot.system.sentry.motion import MotionDetector, Motion
 
@@ -62,6 +63,7 @@ class CameraMotion:
 
 def main():
   params = Params()
+  clock = SentryClock(params)
   sm = messaging.SubMaster(['deviceState', 'pandaStates', 'peripheralState', 'gpsLocation', 'gpsLocationExternal', 'sentryRecorderState'])
   pm = messaging.PubMaster(['sentryState'])
   rk = Ratekeeper(5, print_delay_threshold=None)
@@ -177,6 +179,17 @@ def main():
         error = sm['sentryRecorderState'].error if now-sm.recv_time['sentryRecorderState'] < 2. else ''
         if capture and error:
           phase = error
+      # Observe GPS that is already running (including onroad) to remember the
+      # local timezone for later garage starts. This does not request extra GPS.
+      time_location = location
+      for service in ('gpsLocationExternal', 'gpsLocation'):
+        if sm.valid[service]:
+          fix = gps_location(sm[service], sm.logMonoTime[service]/1e9, now, wall)
+          if fix is not None:
+            time_location = fix
+            break
+      clock.update(time_location, now)
+      zone_name, utc_offset = clock.snapshot(wall)
       write_runtime({'monoTime': now, 'session': bool(session), 'capture': capture, 'gps': gps_request,
                      'location': location, 'phase': phase})
       msg = messaging.new_message('sentryState', valid=True)
@@ -186,6 +199,7 @@ def main():
       state.motionX, state.motionY, state.motionScore, state.motionCamera = best.x, best.y, best.score, motion_camera
       state.recordUntilMonoTime = int(record_until*1e9)
       state.eyeEnabled, state.cameraMask = setting(params, 'SentryEye'), camera_mask
+      state.timeZone, state.utcOffsetSeconds = zone_name, utc_offset
       state.locationValid = location is not None
       if location:
         state.latitude, state.longitude = location['latitude'], location['longitude']

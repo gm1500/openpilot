@@ -6,9 +6,9 @@
 #include "openpilot/cereal/gen/cpp/log.capnp.h"
 
 inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
-    {"SentryEnabled", {PERSISTENT, BOOL, "0"}},
-    {"SentrySensitivity", {PERSISTENT, INT, "50"}},
-    {"SentryArmDelay", {PERSISTENT, INT, "60"}},
+    {"SentryEnabled", {PERSISTENT, BOOL, "1"}},
+    {"SentrySensitivity", {PERSISTENT, INT, "75"}},
+    {"SentryArmDelay", {PERSISTENT, INT, "30"}},
     {"SentryPreMinutes", {PERSISTENT, INT, "5"}},
     {"SentryPostSeconds", {PERSISTENT, INT, "60"}},
     {"SentryNarrowCamera", {PERSISTENT, BOOL, "1"}},
@@ -17,9 +17,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SentryCutoffVoltage", {PERSISTENT, FLOAT, "11.8"}},
     {"SentryMaxHours", {PERSISTENT, INT, "4"}},
     {"SentryMaxTemp", {PERSISTENT, INT, "70"}},
-    {"SentryStorageGB", {PERSISTENT, INT, "2"}},
     {"SentryEye", {PERSISTENT, BOOL, "1"}},
     {"SentryWatermark", {PERSISTENT, BOOL, "1"}},
+    {"SentryTimeZone", {PERSISTENT | DONT_LOG, STRING}},
     {"SentryManualTrigger", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
     {"AccessToken", {CLEAR_ON_MANAGER_START | DONT_LOG, STRING}},
     {"AdbEnabled", {PERSISTENT, BOOL}},

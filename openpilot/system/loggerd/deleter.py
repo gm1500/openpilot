@@ -19,6 +19,10 @@ PRESERVE_COUNT = 5
 
 
 def has_preserve_xattr(d: str) -> bool:
+  # Older Sentry builds set this attribute on every segment. Sentry events now
+  # follow ordinary route cleanup, including events written by those builds.
+  if os.path.exists(os.path.join(Paths.log_root(), d, '.sentry')):
+    return False
   return getxattr(os.path.join(Paths.log_root(), d), PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
 
 
@@ -58,10 +62,6 @@ def deleter_step() -> tuple[bool, str | None]:
   # remove the earliest directory we can
   for delete_dir in sorted(dirs, key=lambda d: (d in DELETE_LAST, d in preserved_dirs)):
     delete_path = os.path.join(Paths.log_root(), delete_dir)
-
-    # Event footage is bounded by SentryStorageGB; retain it until explicitly deleted.
-    if os.path.exists(os.path.join(delete_path, ".sentry")):
-      continue
 
     if any(name.endswith(".lock") for name in os.listdir(delete_path)):
       continue

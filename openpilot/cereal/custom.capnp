@@ -135,6 +135,8 @@ struct SentryState @0xda96579883444c35 {
   locationValid @14 :Bool;
   eyeEnabled @15 :Bool;
   cameraMask @16 :UInt8;
+  timeZone @17 :Text;
+  utcOffsetSeconds @18 :Int32;
 }
 
 struct SentryRecorderState @0x80ae746ee2596b11 {

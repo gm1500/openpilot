@@ -89,13 +89,34 @@ def test_expired_lease_never_keeps_cameras_or_gps_alive(tmp_path, monkeypatch):
 
 
 def test_settings_clamp_and_default():
-  assert not config.setting(FakeParams(), 'SentryEnabled')
+  assert config.setting(FakeParams(), 'SentryEnabled')
+  assert config.setting(FakeParams(), 'SentrySensitivity') == 75
+  assert config.setting(FakeParams(), 'SentryArmDelay') == 30
+  assert config.setting(FakeParams(SentryEnabled=False), 'SentryEnabled') is False
+  assert config.setting(FakeParams(SentrySensitivity=42), 'SentrySensitivity') == 42
+  for previous, expected in ((10, 15), (20, 15), (30, 30), (40, 30), (60, 60), (300, 60)):
+    assert config.setting(FakeParams(SentryArmDelay=previous), 'SentryArmDelay') == expected
   assert config.setting(FakeParams(SentrySensitivity=400), 'SentrySensitivity') == 100
   assert config.setting(FakeParams(SentryCutoffVoltage=float('nan')), 'SentryCutoffVoltage') == 11.8
   assert config.setting(FakeParams(SentryCutoffVoltage=12.3), 'SentryCutoffVoltage') == 11.8
   assert config.setting(FakeParams(SentryCutoffVoltage=10.), 'SentryCutoffVoltage') == 11.0
   from openpilot.system.hardware.power_monitoring import VBATT_PAUSE_CHARGING
   assert config.DEFAULTS['SentryCutoffVoltage'] == VBATT_PAUSE_CHARGING
+
+
+def test_manager_first_use_defaults_match_sentry(tmp_path):
+  from openpilot.common.params import Params
+  params = Params(str(tmp_path/'params'))
+  # manager_init only fills absent keys. Its native defaults must agree with the
+  # Python fallback, and an explicitly disabled session must stay disabled.
+  params.put_bool('SentryEnabled', False, block=True)
+  for key, value in config.DEFAULTS.items():
+    assert params.get_default_value(key) == value
+    if params.get(key) is None:
+      params.put(key, params.get_default_value(key), block=True)
+  assert not params.get_bool('SentryEnabled')
+  assert params.get('SentrySensitivity') == 75
+  assert params.get('SentryArmDelay') == 30
 
 
 def test_battery_override_and_ignition(monkeypatch, tmp_path):
@@ -139,6 +160,8 @@ def test_eye_touch_suppression_lasts_until_next_timeout(monkeypatch):
   device._interaction_time = 90.
   device._update_wakefulness()
   assert device.sentry_eye_visible
+  device._update_brightness()
+  assert device._brightness_target == 100
   app.mouse_events = [SimpleNamespace(left_down=True)]
   device._update_wakefulness()
   assert not device.sentry_screen and not device.sentry_eye_visible
@@ -154,6 +177,8 @@ def test_eye_touch_suppression_lasts_until_next_timeout(monkeypatch):
   clock[0] = 131.2
   device._update_wakefulness()
   assert not device.sentry_eye_visible
+  device._update_brightness()
+  assert device._brightness_target == 0
 
 
 @pytest.mark.parametrize('stop_control', ['button', 'toggle'])
@@ -189,6 +214,8 @@ def test_settings_can_stop_sentry_and_only_reenable_offroad(monkeypatch, tmp_pat
   monkeypatch.setattr(ui.gui_app, 'font', lambda *args: rl.Font())
   monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*20, 40))
   layout = ui.SentryLayout()
+  assert [row.title for row in layout.scroller._items[:6]] == ['Sentry', 'Enable Sentry', 'Cameras', 'Red eye', 'Video watermark', 'Arming delay']
+  assert not any(getattr(row, 'title', '') in ('Parking location', 'Event storage') for row in layout.scroller._items)
   assert layout._stop_button.action_item.enabled
   assert layout._enable_toggle.action_item.enabled
   assert layout._enable_toggle.action_item.get_state()
@@ -253,6 +280,27 @@ def test_camera_buttons_toggle_independently_and_keep_personality_exclusive(monk
   assert [personality.is_button_selected(i) for i in range(3)] == [False, False, True]
 
 
+def test_arming_buttons_select_one_preset(monkeypatch, tmp_path):
+  monkeypatch.setenv('SCALE', '1')
+  import pyray as rl
+  from openpilot.common.params import Params
+  from openpilot.selfdrive.ui.layouts.settings import sentry as ui
+  monkeypatch.setattr(ui.gui_app, 'font', lambda *args: None)
+  state = SimpleNamespace(ignition=False)
+  monkeypatch.setattr(ui, 'ui_state', state)
+  params = Params(str(tmp_path/'params'))
+  buttons = ui.SentryArmButtons(params)
+  buttons.set_rect(rl.Rectangle(0, 0, 670, 170))
+  assert [buttons.is_button_selected(i) for i in range(3)] == [False, True, False]
+  for index, x in enumerate((105, 335, 565)):
+    buttons._handle_mouse_release(rl.Vector2(x, 85))
+    assert params.get('SentryArmDelay') == config.ARM_DELAYS[index]
+    assert [buttons.is_button_selected(i) for i in range(3)] == [i == index for i in range(3)]
+  state.ignition = True
+  buttons._handle_mouse_release(rl.Vector2(105, 85))
+  assert params.get('SentryArmDelay') == 60
+
+
 def test_process_gates_do_not_start_driving_controls(monkeypatch):
   from openpilot.system.manager import process_config as processes
   monkeypatch.setattr(config, 'read_runtime', lambda: {'capture': True, 'gps': True})
@@ -290,7 +338,8 @@ def test_uploader_does_not_unlock_active_events(tmp_path, monkeypatch):
   assert not list(route.glob('*.lock'))
 
 
-def test_deleter_keeps_all_event_segments(tmp_path, monkeypatch):
+def test_deleter_uses_normal_cleanup_for_events_but_never_active_segments(tmp_path, monkeypatch):
+  import os
   from openpilot.system.loggerd import deleter
   monkeypatch.setattr(deleter.Paths, 'log_root', lambda: str(tmp_path))
   monkeypatch.setattr(deleter, 'get_available_bytes', lambda **kwargs: 0)
@@ -299,8 +348,13 @@ def test_deleter_keeps_all_event_segments(tmp_path, monkeypatch):
     route = tmp_path/f'00000000--0123456789--{i}'
     route.mkdir()
     (route/'.sentry').touch()
+    os.setxattr(route, 'user.preserve', b'1')  # Retention from an older Sentry build.
+    if i == 0:
+      (route/'sentry.lock').touch()
   ordinary = tmp_path/'00000001--0123456789--0'
   ordinary.mkdir()
+  for i in range(1, 8):
+    assert deleter.deleter_step() == (True, str(tmp_path/f'00000000--0123456789--{i}'))
   assert deleter.deleter_step() == (True, str(ordinary))
   assert deleter.deleter_step() == (True, None)
-  assert len(list(tmp_path.iterdir())) == 8
+  assert len(list(tmp_path.iterdir())) == 1

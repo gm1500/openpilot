@@ -69,6 +69,7 @@ def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp
   monkeypatch.setattr(sentryd.time, 'monotonic', lambda: clock[0])
   monkeypatch.setattr(sentryd.time, 'time', lambda: wall+clock[0]-100)
   monkeypatch.setattr(sentryd, 'Params', lambda: params)
+  monkeypatch.setattr(sentryd, 'SentryClock', lambda params: SimpleNamespace(update=lambda *args: None, snapshot=lambda wall: ('', 0)))
   monkeypatch.setattr(sentryd, 'HARDWARE', SimpleNamespace(get_device_type=lambda: 'tizi'))
   monkeypatch.setattr(sentryd.messaging, 'SubMaster', SubMaster)
   monkeypatch.setattr(sentryd.messaging, 'PubMaster', lambda services: SimpleNamespace(send=lambda service, msg: sent.append(msg.to_dict())))

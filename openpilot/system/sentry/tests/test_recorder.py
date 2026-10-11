@@ -93,7 +93,6 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
     messaging.reset_context()
     params = Params()
     params.put('SentryPreMinutes', 5, block=True)
-    params.put('SentryStorageGB', 2, block=True)
     pm = messaging.PubMaster([*STREAMS, 'sentryState', 'pandaStates', 'deviceState'])
     status = messaging.SubMaster(['sentryRecorderState'])
     with (tmp_path/'recorder.log').open('w') as logfile:
@@ -165,7 +164,7 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
           assert directory.name.endswith(f'--{number}')
           assert (directory/'.sentry').exists()
           assert not list(directory.glob('*.lock'))
-          assert os.getxattr(directory, 'user.preserve') == b'1'
+          assert 'user.preserve' not in os.listxattr(directory)
           for filename in FILES:
             with av.open(str(directory/filename)) as video:
               frames = list(video.decode(video=0))

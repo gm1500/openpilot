@@ -3,7 +3,8 @@ import time
 
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.ui_state import ui_state, device
-from openpilot.system.sentry.config import setting, RANGES
+from openpilot.system.sentry.config import setting, RANGES, ARM_DELAYS
+from openpilot.system.sentry.clock import time_status
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.list_view import ListItem, MultipleButtonAction, toggle_item, text_item, button_item
@@ -72,6 +73,20 @@ class SentryCameraButtons(MultipleButtonAction):
       self.params.put_bool(self.KEYS[index], not self.is_button_selected(index))
 
 
+class SentryArmButtons(MultipleButtonAction):
+  def __init__(self, params):
+    super().__init__([f'{delay}s' for delay in ARM_DELAYS], button_width=210)
+    self.params = params
+    self.set_enabled(lambda: not ui_state.ignition)
+
+  def is_button_selected(self, index):
+    return setting(self.params, 'SentryArmDelay') == ARM_DELAYS[index]
+
+  def select_button(self, index):
+    if self.enabled:
+      self.params.put('SentryArmDelay', ARM_DELAYS[index], block=True)
+
+
 class SentryLayout(Widget):
   def __init__(self):
     super().__init__()
@@ -81,41 +96,44 @@ class SentryLayout(Widget):
                                      initial_state=setting(self.params, 'SentryEnabled'),
                                      callback=self._set_sentry_enabled, enabled=self._can_toggle_sentry)
     self._stop_button = button_item('Sentry', 'STOP',
-                                   'Stops parked capture and the red eye. Events already saved stay on the device.',
+                                   'Stops parked capture and the red eye. Saved events stay in the upload queue.',
                                    callback=lambda: self._set_sentry_enabled(False),
                                    enabled=lambda: setting(self.params, 'SentryEnabled'))
     self._stop_button.action_item.set_value(self.phase_status)
     items = [
       self._stop_button,
       self._enable_toggle,
+      ListItem('Cameras', description='Each camera switches independently. Green means on. Cabin infrared adjusts automatically.',
+               action_item=SentryCameraButtons(self.params)),
+      self.toggle('SentryEye', 'Red eye', 'A large, bright eye follows motion after the screen times out. Tap to dismiss until the next timeout.'),
+      self.toggle('SentryWatermark', 'Video watermark',
+                  'Local timestamp with UTC offset, camera name and parking coordinates when available. Uses UTC until the timezone is known.'),
+      ListItem('Arming delay', description='Time after parking before motion can save an event. Video starts buffering sooner.',
+               action_item=SentryArmButtons(self.params)),
       SentrySlider(self.params, 'SentrySensitivity', 'Motion sensitivity'),
-      text_item('Buffered footage', self.buffer_status),
-      text_item('Battery voltage', self.voltage_status),
       button_item('Save an event now', 'SAVE', callback=lambda: self.params.put_bool('SentryManualTrigger', True),
                   enabled=lambda: ui_state.sentry_active),
+      text_item('Buffered footage', self.buffer_status),
+      text_item('Current time', lambda: time_status(self.params),
+                'Uses the device clock, synchronized by the system through the network or GPS. ' +
+                'The local timezone is remembered from the last known position; continuous GPS is not needed.'),
+      text_item('Battery voltage', self.voltage_status),
     ]
     for key, title, unit, step in (
-      ('SentryArmDelay', 'Arming delay', ' s', 10),
+      ('SentryCutoffVoltage', 'Battery cutoff', ' V', .1),
       ('SentryPreMinutes', 'Pre-event buffer', ' min', 1),
       ('SentryPostSeconds', 'Record after motion stops', ' s', 10),
-      ('SentryCutoffVoltage', 'Battery cutoff', ' V', .1),
       ('SentryMaxHours', 'Maximum parked time', ' h', 1),
       ('SentryMaxTemp', 'Pause capture above', ' °C', 1),
-      ('SentryStorageGB', 'Event storage limit', ' GiB', 1),
     ):
       items.append(SentrySlider(self.params, key, title, unit, step))
     items.extend([
-      text_item('Event storage', 'Preserved', 'Saved events remain on the device until deleted. When the limit is reached, new event saving pauses.'),
+      text_item('Event uploads', 'Automatic',
+                'Saved footage from every selected camera uploads on unmetered connections, usually Wi-Fi. ' +
+                'Events use normal route storage cleanup; upload requires Connect to accept the files.'),
       text_item('Battery protection', 'Sentry cutoff',
                 'While Sentry is active, its voltage and time limits replace the stock offroad software limits. ' +
                 'Default cutoff is 11.8 V; adjustable down to 11.0 V. Hardware protections remain active.'),
-      ListItem('Cameras', description='Each camera switches independently. Green means on. Cabin infrared adjusts automatically.',
-               action_item=SentryCameraButtons(self.params)),
-      self.toggle('SentryEye', 'Red eye', 'Appears with motion after the screen times out. Tap to dismiss until the next screen timeout.'),
-      self.toggle('SentryWatermark', 'Video watermark',
-                  'UTC timestamp, camera name and saved parking coordinates. Shows unavailable when no parking location is known.'),
-      text_item('Parking location', self.location_status,
-                'Uses the SLC parking checkpoint first. Otherwise requests a GPS fix for up to 90 seconds, then switches GPS off.'),
     ])
     self.scroller = self._child(Scroller(items, spacing=0, line_separator=True))
 
@@ -156,10 +174,6 @@ class SentryLayout(Widget):
   def buffer_status(self):
     state = ui_state.sm['sentryRecorderState']
     return f'{state.bufferSeconds:.0f} s / {state.bufferBytes/1048576:.0f} MB' if ui_state.sentry_active else 'Idle'
-
-  def location_status(self):
-    state = ui_state.sm['sentryState']
-    return ('SLC parking position' if state.locationSource == 'slcParked' else 'GPS snapshot') if state.locationValid else 'Unavailable'
 
   def _render(self, rect):
     self.scroller.render(rect)

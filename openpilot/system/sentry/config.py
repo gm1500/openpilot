@@ -7,19 +7,19 @@ import time
 
 RUNTIME_PATH = Path('/dev/shm/openpilot_sentry.json')
 LEASE_SECONDS = 2.0
+ARM_DELAYS = (15, 30, 60)
 DEFAULTS = {
-  'SentryEnabled': False, 'SentrySensitivity': 50, 'SentryArmDelay': 60,
+  'SentryEnabled': True, 'SentrySensitivity': 75, 'SentryArmDelay': 30,
   'SentryPreMinutes': 5, 'SentryPostSeconds': 60,
   'SentryNarrowCamera': True, 'SentryWideCamera': True, 'SentryCabinCamera': True,
   'SentryCutoffVoltage': 11.8, 'SentryMaxHours': 4,
-  'SentryMaxTemp': 70, 'SentryStorageGB': 2, 'SentryEye': True,
+  'SentryMaxTemp': 70, 'SentryEye': True,
   'SentryWatermark': True,
 }
 RANGES = {
-  'SentrySensitivity': (1, 100), 'SentryArmDelay': (10, 300), 'SentryPreMinutes': (1, 5),
+  'SentrySensitivity': (1, 100), 'SentryArmDelay': (15, 60), 'SentryPreMinutes': (1, 5),
   'SentryPostSeconds': (10, 180), 'SentryCutoffVoltage': (11.0, 11.8),
   'SentryMaxHours': (1, 12), 'SentryMaxTemp': (55, 75),
-  'SentryStorageGB': (1, 10),
 }
 
 
@@ -34,6 +34,8 @@ def setting(params, key):
     number = float(value)
     if not math.isfinite(number):
       return default
+    if key == 'SentryArmDelay':
+      return min(ARM_DELAYS, key=lambda delay: abs(delay-number))
     low, high = RANGES[key]
     return type(default)(min(high, max(low, number)))
   except (TypeError, ValueError, OverflowError):

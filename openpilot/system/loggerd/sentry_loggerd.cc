@@ -1,6 +1,5 @@
 // RAM-only parked capture. Native route files are created only after a motion trigger.
 #include <sys/statvfs.h>
-#include <sys/xattr.h>
 
 #include <array>
 #include <climits>
@@ -19,7 +18,7 @@ namespace fs = std::filesystem;
 ExitHandler do_exit;
 constexpr uint64_t SECOND = 1'000'000'000;
 constexpr size_t RAM_LIMIT = 128 * 1024 * 1024;
-constexpr uint64_t DISK_RESERVE = 6ULL * 1024 * 1024 * 1024;
+constexpr uint64_t DISK_RESERVE = 5ULL * 1024 * 1024 * 1024;
 
 int setting(const char *key, int fallback, int lo, int hi) {
   try { return std::clamp(std::stoi(Params().get(key)), lo, hi); } catch (...) { return fallback; }
@@ -44,8 +43,8 @@ struct Segment {
   std::deque<Packet> packets;
 };
 
-// All files stay locked until video and logs are finalized. Existing uploader handles
-// qlog/qcamera normally; full camera files remain available for user-requested upload.
+// All files stay locked until video and logs are finalized. The uploader recognizes
+// .sentry and queues every selected camera on unmetered connections.
 class SavedSegment {
 public:
   std::string path;
@@ -60,11 +59,6 @@ public:
     fs::create_directories(path);
     std::ofstream{path + "/sentry.lock"} << getpid() << "\n";
     std::ofstream{path + "/.sentry"} << "1\n";
-#ifdef __APPLE__
-    setxattr(path.c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0, 0);
-#else
-    setxattr(path.c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0);
-#endif
     rlog = std::make_unique<ZstdFileWriter>(path + "/rlog.zst", 3);
     qlog = std::make_unique<ZstdFileWriter>(path + "/qlog.zst", 3);
     capnp::FlatArrayMessageReader init_reader(init);
@@ -167,22 +161,12 @@ public:
   bool disk_ok() {
     struct statvfs disk;
     if (statvfs(Path::log_root().c_str(), &disk) || disk.f_bavail * disk.f_frsize < DISK_RESERVE ||
-        static_cast<double>(disk.f_bavail) / std::max<uint64_t>(disk.f_blocks, 1) < .12) {
+        static_cast<double>(disk.f_bavail) / std::max<uint64_t>(disk.f_blocks, 1) < .10) {
       error = "Low storage";
       return false;
     }
-    uint64_t used = 0;
-    for (const auto &dir : fs::directory_iterator(Path::log_root())) {
-      if (!dir.is_directory() || !fs::exists(dir.path() / ".sentry")) continue;
-      for (const auto &file : fs::directory_iterator(dir.path())) {
-        if (file.is_regular_file()) used += file.file_size();
-      }
-    }
-    uint64_t cap = static_cast<uint64_t>(setting("SentryStorageGB", 2, 1, 10)) * 1024 * 1024 * 1024;
-    if (used + RAM_LIMIT >= cap) {
-      error = "Event storage full";
-      return false;
-    }
+    // Match normal route cleanup thresholds so low storage can recover without
+    // a separate permanent event budget or manual deletion.
     error.clear();
     return true;
   }

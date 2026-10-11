@@ -8,6 +8,7 @@
 #endif
 #include "system/loggerd/encoder/encoder.h"
 #include "system/sentry/state.h"
+#include "system/sentry/timestamp.h"
 
 // Private low-resolution buffers: never draw onto camerad's shared buffers.
 // The V4L input-done callback releases each buffer only after hardware consumes it.
@@ -86,14 +87,12 @@ public:
     sm.update(0);
     if (watermark) {
       time_t epoch = (nanos_since_epoch() - (nanos_since_boot()-extra.timestamp_eof))/1'000'000'000;
-      tm utc;
-      gmtime_r(&epoch, &utc);
-      char stamp[32];
-      strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S UTC", &utc);
-      text(buf, std::string(stamp)+" "+name, 290);
       auto state = sentry_state(sm["sentryState"], sm.rcv_time("sentryState"), nanos_since_boot());
-      text(buf, state && state->getLocationValid() ?
-                util::string_format("POS %.5f,%.5f", state->getLatitude(), state->getLongitude()) : "POS UNAVAILABLE", 310);
+      bool local = state && state->getTimeZone().size() > 0;
+      text(buf, sentry_timestamp(epoch, local, local ? state->getUtcOffsetSeconds() : 0)+" "+name, 290);
+      if (state && state->getLocationValid()) {
+        text(buf, util::string_format("POS %.5f,%.5f", state->getLatitude(), state->getLongitude()), 310);
+      }
     }
     buf->sync(VISIONBUF_SYNC_TO_DEVICE);
     return buf;

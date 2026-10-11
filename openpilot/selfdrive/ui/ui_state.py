@@ -446,7 +446,7 @@ class Device:
 
     brightness = round(self._brightness_filter.update(clipped_brightness))
     if self.sentry_screen:
-      brightness = 8 if self.sentry_eye_visible else 0
+      brightness = 100 if self.sentry_eye_visible else 0
     if not self._awake:
       brightness = 0
 

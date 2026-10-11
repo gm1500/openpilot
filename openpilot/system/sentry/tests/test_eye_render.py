@@ -19,6 +19,7 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
   # Keep the installed binding's C argument types/arity. Replace only the native
   # drawing destination with callbacks, so API mismatches still raise normally.
   calls = []
+  glows = []
   functions = {
     'draw_rectangle_rec': 'DrawRectangleRec',
     'draw_circle_gradient': 'DrawCircleGradient',
@@ -30,7 +31,14 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
     signature = rl.ffi.typeof(getattr(rl.rl, native_name))
     if python_name == 'draw_circle_gradient' and gradient_api == 'legacy':
       signature = rl.ffi.typeof('void(*)(int, int, float, struct Color, struct Color)')
-    callback = rl.ffi.callback(signature, lambda *args, name=python_name: calls.append(name))
+    def capture(*args, name=python_name):
+      calls.append(name)
+      if name == 'draw_circle_gradient':
+        if gradient_api == 'legacy':
+          glows.append((args[0], args[1], args[2]))
+        else:
+          glows.append((args[0].x, args[0].y, args[1]))
+    callback = rl.ffi.callback(signature, capture)
     monkeypatch.setattr(rl, python_name, rl._wrap_function(callback))
 
   eye = ui.SentryEye()
@@ -43,6 +51,14 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
   eye._render(rect)
   assert calls.count('draw_circle_gradient') == 3
   assert calls.count('draw_ellipse') == 1
+  assert glows[0][2] == 380  # Original 95 px glow, now four times the diameter.
+  for x, y in ((0., 0.), (0., 1.), (1., 0.), (1., 1.)):
+    eye.x, eye.y = x, y
+    glows.clear()
+    eye._render(rect)
+    for cx, cy, radius in glows:
+      assert radius <= cx <= rect.width-radius
+      assert radius <= cy <= rect.height-radius
 
   calls.clear()
   device.sentry_eye_visible = False

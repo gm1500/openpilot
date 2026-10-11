@@ -23,6 +23,7 @@ from openpilot.common.swaglog import cloudlog
 NetworkType = log.DeviceState.NetworkType
 UPLOAD_ATTR_NAME = 'user.upload'
 UPLOAD_ATTR_VALUE = b'1'
+SENTRY_UPLOAD_PRIORITY = {'rlog': 2, 'rlog.zst': 2, 'fcamera.hevc': 3, 'ecamera.hevc': 4, 'dcamera.hevc': 5}
 
 MAX_UPLOAD_SIZES = {
   "qlog": 25*1e6,  # can't be too restrictive here since we use qlogs to find
@@ -44,6 +45,10 @@ class FakeResponse:
   def __init__(self):
     self.status_code = 200
     self.request = FakeRequest()
+
+
+def is_sentry_file(filename: str) -> bool:
+  return os.path.isfile(os.path.join(os.path.dirname(filename), '.sentry'))
 
 
 def get_directory_sort(d: str) -> list[str]:
@@ -102,7 +107,8 @@ class Uploader:
       if any(name.endswith(".lock") for name in names):
         continue
 
-      for name in sorted(names, key=lambda n: self.immediate_priority.get(n, 1000)):
+      priority = self.immediate_priority | SENTRY_UPLOAD_PRIORITY if '.sentry' in names else self.immediate_priority
+      for name in sorted(names, key=lambda n: priority.get(n, 1000)):
         key = os.path.join(logdir, name)
         fn = os.path.join(path, name)
         # skip files already uploaded
@@ -124,6 +130,8 @@ class Uploader:
 
           if name == "qcamera.ts" and not any(logdir.startswith(r.split('|')[-1]) for r in requested_routes):
             continue
+          if '.sentry' in names and name in SENTRY_UPLOAD_PRIORITY:
+            continue
 
         yield name, key, fn
 
@@ -137,6 +145,11 @@ class Uploader:
     for name, key, fn in upload_files:
       if name in self.immediate_priority:
         return name, key, fn
+
+    if not metered:
+      for name, key, fn in upload_files:
+        if name in SENTRY_UPLOAD_PRIORITY and is_sentry_file(fn):
+          return name, key, fn
 
     return None
 
@@ -188,7 +201,10 @@ class Uploader:
       except Exception as e:
         last_exc = (e, traceback.format_exc())
 
-      if stat is not None and stat.status_code in (200, 201, 401, 403, 412):
+      # A refused Sentry upload is still pending, not successfully backed up.
+      # Keep the local file eligible for retry through the normal backoff.
+      accepted = (200, 201) if is_sentry_file(fn) else (200, 201, 401, 403, 412)
+      if stat is not None and stat.status_code in accepted:
         self.last_filename = fn
         dt = time.monotonic() - start_time
         if stat.status_code == 412:
