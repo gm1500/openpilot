@@ -5,6 +5,13 @@ from openpilot.selfdrive.ui.ui_state import ui_state, device
 from openpilot.system.ui.widgets import Widget
 
 
+def draw_glow(center, radius, inner, outer):
+  try:
+    rl.draw_circle_gradient(center, radius, inner, outer)
+  except (TypeError, RuntimeError):  # Older AGNOS installations use raylib 5.
+    rl.draw_circle_gradient(int(center.x), int(center.y), radius, inner, outer)
+
+
 class SentryEye(Widget):
   def __init__(self):
     super().__init__()
@@ -25,9 +32,9 @@ class SentryEye(Widget):
       self.y += (max(0., min(1., state.motionY))-self.y)*min(1., dt*5)
     center = rl.Vector2(rect.x+100+self.x*max(0, rect.width-200), rect.y+100+self.y*max(0, rect.height-200))
     fade = max(0., min(1., (device.sentry_motion_until-now)/.5))
-    rl.draw_circle_gradient(int(center.x), int(center.y), 95, rl.Color(130, 0, 0, int(110*fade)), rl.BLANK)
+    draw_glow(center, 95, rl.Color(130, 0, 0, int(110*fade)), rl.BLANK)
     rl.draw_circle_v(center, 44, rl.Color(18, 5, 5, int(255*fade)))
     rl.draw_ring(center, 42, 44, 0, 360, 64, rl.Color(110, 40, 40, int(180*fade)))
-    rl.draw_circle_gradient(int(center.x), int(center.y), 35, rl.Color(255, 65, 25, int(255*fade)), rl.Color(75, 0, 0, int(255*fade)))
-    rl.draw_circle_gradient(int(center.x), int(center.y), 16, rl.Color(255, 190, 130, int(255*fade)), rl.Color(220, 0, 0, int(120*fade)))
+    draw_glow(center, 35, rl.Color(255, 65, 25, int(255*fade)), rl.Color(75, 0, 0, int(255*fade)))
+    draw_glow(center, 16, rl.Color(255, 190, 130, int(255*fade)), rl.Color(220, 0, 0, int(120*fade)))
     rl.draw_ellipse(int(center.x-13), int(center.y-18), 11, 5, rl.Color(255, 235, 230, int(160*fade)))

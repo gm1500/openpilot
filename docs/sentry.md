@@ -191,3 +191,7 @@ Local verification for this change: the PC encoder and recorder targets compiled
 native recorder integration decoded all saved streams. The VisionIPC encoder test could not
 run in the development sandbox because Unix socket creation is blocked. The touch/timeout
 policy was unit tested; the rendered settings and eye still need a device visual check.
+The eye's drawing calls are checked against the installed raylib C signatures using
+callbacks instead of an OpenGL context, including its first visible frame and the older
+raylib 5 gradient signature. This prevents the raylib 6 argument-count error that could
+terminate the UI when motion first displayed the eye after the screen timeout.
