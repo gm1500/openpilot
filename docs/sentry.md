@@ -21,8 +21,11 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   runs before the selected 15/30/60-second arming delay (default 30). With the default, motion
   arms 40 seconds after video is ready. The detector learns the changing exposure throughout
   both stages; automatic events and the eye wait until both finish. Manual saves work during
-  either stage. Missing frames/recording readiness or a capture restart resets both delays. Camera
-  preview/livestream pauses capture.
+  either stage. Missing camera frames or a capture restart resets both delays. A recorder-only
+  status delay or empty buffer pauses automatic save requests but keeps the camera arming clock
+  and existing event deadline; once buffered video is available again, detection resumes without
+  another countdown. Saving an event does not re-arm the cameras. Camera preview/livestream
+  pauses capture.
 - Samples all selected cameras at 5 Hz for luminance changes. The eye reacts immediately
   to smaller local movements. Saving instead requires about one second of sustained
   movement in the same connected region, allowing gaps no longer than half a second.

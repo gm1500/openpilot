@@ -134,7 +134,8 @@ def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp
 
 @pytest.mark.parametrize('arm_delay', [15, 30, 60])
 @pytest.mark.parametrize('eye_only', [False, True])
-def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_path, arm_delay, eye_only):
+@pytest.mark.parametrize('recorder_gap', [None, 'heartbeat', 'buffer'])
+def test_warmup_restarts_for_camera_loss_but_not_recorder_gaps(monkeypatch, tmp_path, arm_delay, eye_only, recorder_gap):
   class Params(dict):
     get_bool = dict.get
     def remove(self, key):
@@ -144,6 +145,8 @@ def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_
   clock = [100.]
   ready_at = 145.
   arm_at = ready_at+CAMERA_WARMUP_SECONDS
+  saving_at = arm_at+arm_delay+1.2
+  saved_at = arm_at+arm_delay+4.
   drop_at = arm_at+arm_delay+5.
   restart_at = drop_at+3.
   rearm_at = restart_at+CAMERA_WARMUP_SECONDS
@@ -171,6 +174,14 @@ def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_
       self['sentryRecorderState'].bufferBytes = 1000 if now >= 130. else 0
       previous = sent.get(round(now-.2, 1))
       self['sentryRecorderState'].recording = bool(previous and previous['recordUntilMonoTime'] > now*1e9)
+      # Persisting pre-roll can delay recorder status without restarting any
+      # cameras. Also cover recorder-only recovery with an empty RAM buffer.
+      if recorder_gap and saving_at <= now < saved_at:
+        self['sentryRecorderState'].recording = False
+        if recorder_gap == 'heartbeat':
+          self.recv_time['sentryRecorderState'] = saving_at-.2
+        else:
+          self['sentryRecorderState'].bufferBytes = 0
       if now == ready_at+2.:
         params['SentryManualTrigger'] = True
       if now >= stop_at:
@@ -227,6 +238,15 @@ def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_
   assert sent[arm_at+arm_delay+.4]['motion']
   assert sent[arm_at+arm_delay+.4]['recordUntilMonoTime'] == manual_until
   assert (sent[arm_at+arm_delay+1.2]['recordUntilMonoTime'] > manual_until) == (not eye_only)
+  assert sent[saved_at]['motion']  # Recorder recovery must not replay arming.
+  assert sent[saved_at]['phase'] == ('Watching' if eye_only else 'Recording')
+  assert all(armed for now, armed in samples if saving_at <= now < drop_at)
+  if recorder_gap:
+    assert all(s['capture'] and s['motion'] for now, s in sent.items() if saving_at <= now < saved_at)
+    last_gap = sent[round(saved_at-.2, 1)]
+    assert last_gap['phase'] == ('Starting recorder' if recorder_gap == 'heartbeat' else 'Waiting for encoded video')
+    assert last_gap['recordUntilMonoTime'] == sent[round(saved_at-.4, 1)]['recordUntilMonoTime']
+    assert (sent[saved_at]['recordUntilMonoTime'] > last_gap['recordUntilMonoTime']) == (not eye_only)
   assert all(not s['motion'] for now, s in sent.items() if drop_at+1. <= now < rearm_at+arm_delay)
   assert sent[rearm_at]['phase'] == f'Arming: {arm_delay} s'
   assert sent[rearm_at+arm_delay-1.]['phase'] == 'Arming: 1 s'

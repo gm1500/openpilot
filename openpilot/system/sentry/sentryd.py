@@ -168,18 +168,20 @@ def main():
               if stream in (1, 2) and result.active and (not best.active or result.score > best.score):
                 best, motion_camera = result, stream
           ready = sum(0 <= now-camera.last_received < 1. for camera in cameras.values())
+          recorder_fresh = recent(sm, 'sentryRecorderState', now)
+          recorder_ready = recorder_fresh and sm['sentryRecorderState'].bufferBytes > 0
           if ready != len(cameras):
             phase = f'Waiting for cameras ({ready}/{len(cameras)})'
             ready_since = None
-          elif not recent(sm, 'sentryRecorderState', now):
+          elif not recorder_fresh:
             phase = 'Starting recorder'
-            ready_since = None
-          elif not sm['sentryRecorderState'].bufferBytes:
+          elif not recorder_ready:
             phase = 'Waiting for encoded video'
-            ready_since = None
           else:
             # Camera exposure gets its own settling period before the user's
             # full arming delay. Both start only after working video arrives.
+            # Keep that clock across recorder-only gaps: saving pre-roll or
+            # syncing segments can delay status while cameras stay exposed.
             if ready_since is None:
               ready_since = now
             warmup_remaining = CAMERA_WARMUP_SECONDS-(now-ready_since)
@@ -191,13 +193,14 @@ def main():
           armed = ready_since is not None and now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
           if not armed:
             best = Motion()  # Exposure ramp cannot trigger an event or the eye.
+          if not armed or not recorder_ready:
             triggered = False
           manual = params.get_bool('SentryManualTrigger')
           if manual:
             params.remove('SentryManualTrigger')
           if manual or triggered:
             record_until = now+setting(params, 'SentryPostSeconds')
-          if sm['sentryRecorderState'].recording and now-sm.recv_time['sentryRecorderState'] < 2.:
+          if recorder_fresh and sm['sentryRecorderState'].recording:
             phase = 'Recording'
             if triggered or manual:
               record_until = now+setting(params, 'SentryPostSeconds')
