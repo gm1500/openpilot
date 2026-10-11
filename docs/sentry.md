@@ -34,7 +34,10 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   scattered snowflakes cannot pool their area to meet that floor. Fisheye size compensation
   is approximate, especially near the edges; this is not a physical object-size estimate.
   Exposure compensation, neighboring-pixel support and frame-to-frame change checks reject
-  noise and stationary background afterimages. The sensitivity slider changes pixel-change
+  noise and stationary background afterimages. At sensitivity 50, the minimum luma change is
+  18 levels for the forward cameras and 10 for the cabin's lower-contrast IR/window footage.
+  The cabin slider curve retains the same least/most-sensitive endpoints as the forward
+  cameras; its middle is calibrated separately. The sensitivity slider changes pixel-change
   thresholds and minimum saving area. This is motion detection, not object identification;
   large nearby droplets, heavy snow, shadows, reflections and passing traffic can still
   trigger it. Small/distant objects or brief movement may not save an event. There are no
@@ -174,13 +177,20 @@ and maximum parked time remain the shutdown limits. Upload behavior is automatic
 settings row.
 
 The eye follows the approximate image position of motion from the front wide or cabin lens;
-the cabin direction is mirrored. It reacts without the recording confirmation delay or larger
+the cabin direction is mirrored. Its target and cross-camera score use the pixels changing
+in the current frame, avoiding the center of a large fading background footprint. Horizontal
+travel is expanded 2.2 times for the cabin and 1.5 times for front-wide; vertical travel is
+expanded 1.4 times. Cabin window activity around image x=0.72–0.80 therefore reaches the
+opposite display edge, instead of staying about one-third of the way across. These are
+approximate display mappings, not calibrated physical angles. Existing smoothing remains.
+It reacts without the recording confirmation delay or larger
 area threshold, while still respecting camera warmup, arming and touch suppression.
 Three glass reflections form a symmetric arc across the upper lens, with the middle one
 highest. They shift toward the display center as the eye moves, with three times the
 previous reflection movement.
-Its diameter is four times the original, including the glow,
-and its full extent stays within the display. It appears on black at 100% brightness only after the normal
+Its diameter is four times the original, including the glow. Motion is bounded by the actual
+outer glow radius, with no extra border/padding: the full eye stays inside the display and
+the glow can touch its edge. It appears on black at 100% brightness only after the normal
 screen timeout, and fades off when motion stops. **Any touch clears the eye and suppresses it
 throughout the interactive screen period, even if motion continues. It becomes eligible again
 only at the next inactivity timeout.** Settings remain accessible through the normal interface.
@@ -204,6 +214,16 @@ power telemetry alone can miss upstream losses. Choose the voltage threshold for
 battery and verify with a meter before unattended operation.
 
 ## Validation
+
+The 50% calibration was replayed against the supplied two consecutive one-minute segments
+from all three cameras: garage opening/closing in both forward views and cabin-window
+activity. The forward cameras already confirmed these events at 50%; the cabin now confirms
+the window activity as well. No saves occurred in the sampled quiet intervals. Replay uses
+the decoded Y plane at 5 Hz and excludes the timestamp/GPS watermark from detection; live
+detection uses the original unwatermarked camera buffers. HEVC/downsampling makes this an
+approximation of live detection, and this one scene does not validate every lighting/weather
+condition. Synthetic regressions also cover small scattered regions, noise/exposure changes,
+the one-second confirmation, fresh-motion targeting and complete eye visibility at the edges.
 
 Build the native encoder and recorder, params and messaging extensions using the project's
 normal SCons environment. Run:

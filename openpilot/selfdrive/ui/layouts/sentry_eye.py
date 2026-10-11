@@ -12,6 +12,14 @@ def draw_glow(center, radius, inner, outer):
     rl.draw_circle_gradient(int(center.x), int(center.y), radius, inner, outer)
 
 
+def eye_target(x, y, camera):
+  # Mirror the inward camera. Side windows occupy the outer quarters of its
+  # fisheye image, so they should already aim toward the display's edges.
+  x = 1-x if camera == 1 else x
+  gain = 2.2 if camera == 1 else 1.5
+  return max(0., min(1., .5+(x-.5)*gain)), max(0., min(1., .5+(y-.5)*1.4))
+
+
 class SentryEye(Widget):
   def __init__(self):
     super().__init__()
@@ -25,14 +33,14 @@ class SentryEye(Widget):
     if not device.sentry_eye_visible:
       return
     state = ui_state.sm['sentryState']
-    # Approximate image-space tracking; mirror the inward camera on the display.
-    x = 1-state.motionX if state.motionCamera == 1 else state.motionX
     if state.motion and state.motionCamera in (1, 2):
-      self.x += (max(0., min(1., x))-self.x)*min(1., dt*5)
-      self.y += (max(0., min(1., state.motionY))-self.y)*min(1., dt*5)
-    # Four times the previous diameter, with the entire glow kept inside the display.
-    scale = min(4., rect.width/200, rect.height/200)
-    margin = 100*scale
+      x, y = eye_target(state.motionX, state.motionY, state.motionCamera)
+      self.x += (x-self.x)*min(1., dt*5)
+      self.y += (y-self.y)*min(1., dt*5)
+    # Clamp by the full glow radius, with no extra border/padding. Even at
+    # maximum travel the entire eye is rendered inside the display.
+    scale = min(4., rect.width/190, rect.height/190)
+    margin = 95*scale
     center = rl.Vector2(rect.x+margin+self.x*max(0, rect.width-2*margin), rect.y+margin+self.y*max(0, rect.height-2*margin))
     fade = max(0., min(1., (device.sentry_motion_until-now)/.5))
     draw_glow(center, 95*scale, rl.Color(130, 0, 0, int(110*fade)), rl.BLANK)

@@ -88,17 +88,21 @@ def regions(mask, changed):
     region = groups[key]
     width = right-left
     region.area += width
-    region.moving += int(np.count_nonzero(changed[y, left:right]))
-    region.sum_x += (left+right-1)*width/2.
-    region.sum_y += y*width
+    # Track the pixels changing NOW, not the center of a slowly fading
+    # background footprint left behind by the subject.
+    changed_x = np.flatnonzero(changed[y, left:right])+left
+    region.moving += changed_x.size
+    region.sum_x += int(changed_x.sum())
+    region.sum_y += y*changed_x.size
     region.left, region.right = min(left, region.left), max(right, region.right)
     region.bottom = y+1
   return list(groups.values())
 
 
 class MotionDetector:
-  def __init__(self, area_scale=1.):
+  def __init__(self, area_scale=1., midpoint_threshold=18.):
     self.area_scale = area_scale
+    self.midpoint_threshold = midpoint_threshold
     self.background = None
     self.previous = None
     self.last_time = None
@@ -106,6 +110,13 @@ class MotionDetector:
     self.candidate_since = None
     self.candidate_last = 0.
     self.candidate_region = None
+
+  @classmethod
+  def for_camera(cls, stream, width, height):
+    # Cabin IR/window motion has lower luma contrast in the supplied footage.
+    # Calibrate the slider's midpoint per camera while keeping the original
+    # least/most-sensitive endpoints, lens area floor and confirmation time.
+    return cls(camera_area_scale(stream, width, height), midpoint_threshold=10. if stream == 1 else 18.)
 
   def clear_candidate(self):
     self.candidate_since = None
@@ -138,7 +149,7 @@ class MotionDetector:
     difference = current-self.background
     # Reject uniform brightness changes (auto exposure, headlights), not local objects.
     difference -= np.median(difference)
-    threshold = 28.-20.*sensitivity
+    threshold = float(np.interp(sensitivity, (.01, .5, 1.), (27.8, self.midpoint_threshold, 8.)))
     movement = current-self.previous
     movement -= np.median(movement)
     changed = np.abs(movement) > max(6., threshold*.6)
@@ -159,7 +170,7 @@ class MotionDetector:
       return Motion()
     # A stationary new object or its background afterimage is not ongoing motion.
     moving = [r for r in regions(mask, changed) if r.area >= 9 and r.moving >= max(3, r.area*.01)]
-    eye = max(moving, key=lambda r: r.area, default=None)
+    eye = max(moving, key=lambda r: (r.moving, r.area), default=None)
     # Scale recording area by the lens, but never below the speck floor.
     # Scattered rain/snow cannot pool area. The immediate eye is independent.
     required = max(MIN_REGION_FRACTION, (.06-.045*sensitivity)*self.area_scale)*current.size
@@ -176,5 +187,5 @@ class MotionDetector:
       self.clear_candidate()
     if eye is None:
       return Motion()
-    return Motion(True, eye.area/current.size, eye.sum_x/eye.area/(current.shape[1]-1),
-                  eye.sum_y/eye.area/(current.shape[0]-1), triggered)
+    return Motion(True, eye.moving/current.size, eye.sum_x/eye.moving/(current.shape[1]-1),
+                  eye.sum_y/eye.moving/(current.shape[0]-1), triggered)

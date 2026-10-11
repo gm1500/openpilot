@@ -13,7 +13,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH, CAMERA_WARMUP_SECONDS
 from openpilot.system.sentry.clock import SentryClock
 from openpilot.system.sentry.location import vehicle_identity, parked_location, gps_location
-from openpilot.system.sentry.motion import MotionDetector, Motion, camera_area_scale
+from openpilot.system.sentry.motion import MotionDetector, Motion
 
 
 def recent(sm, service, now, timeout=2.):
@@ -58,7 +58,7 @@ class CameraMotion:
     self.last_received = now
     size = self.client.width, self.client.height
     if size != self.size:
-      self.detector = MotionDetector(area_scale=camera_area_scale(self.stream, *size))
+      self.detector = MotionDetector.for_camera(self.stream, *size)
       self.size = size
     image = np.frombuffer(buf.data, dtype=np.uint8, count=self.client.stride*self.client.height)
     image = image.reshape(self.client.height, self.client.stride)[:, :self.client.width]

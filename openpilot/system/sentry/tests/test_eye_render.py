@@ -69,6 +69,10 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
     for cx, cy, radius in glows:
       assert radius <= cx <= rect.width-radius
       assert radius <= cy <= rect.height-radius
+    # The full glow reaches the edge exactly, with no extra border/padding.
+    cx, cy, radius = glows[0]
+    assert min(cx, rect.width-cx) == radius
+    assert min(cy, rect.height-cy) == radius
     # Reflections follow the display position toward its center, staying inside
     # the lens even at the corners. The red light itself stays at the eye center.
     cx, cy, _ = glows[0]
@@ -86,3 +90,19 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
   device.sentry_eye_visible = False
   eye._render(rect)
   assert calls == ['draw_rectangle_rec']
+
+
+def test_eye_maps_cabin_windows_to_opposite_display_edges():
+  from openpilot.selfdrive.ui.layouts.sentry_eye import eye_target
+  assert eye_target(.5, .5, 1) == (.5, .5)
+  # Cabin windows sit well inside the distorted image boundaries. They should
+  # use the eye's full screen travel, with the inward camera mirrored.
+  assert eye_target(.75, .5, 1) == (0., .5)
+  assert eye_target(.25, .5, 1) == (1., .5)
+  assert eye_target(.72, .5, 1)[0] < .02
+  assert eye_target(.28, .5, 1)[0] > .98
+  assert eye_target(.25, .5, 2)[0] < .25
+  assert eye_target(.75, .5, 2)[0] > .75
+  for camera in (1, 2):
+    for x in (0., .25, .5, .75, 1.):
+      assert eye_target(x, .5, camera)[0]+eye_target(1-x, .5, camera)[0] == pytest.approx(1.)

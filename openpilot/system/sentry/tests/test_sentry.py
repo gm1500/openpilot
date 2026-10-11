@@ -18,14 +18,16 @@ def warm(detector, image):
     assert not detector.update(image, float(t)).active
 
 
-def test_exposure_and_noise_do_not_trigger():
-  d = MotionDetector()
+@pytest.mark.parametrize('stream', [0, 1, 2])
+@pytest.mark.parametrize('sensitivity', [50, 100])
+def test_exposure_and_noise_do_not_trigger(stream, sensitivity):
+  d = MotionDetector.for_camera(stream, 1928, 1208)
   base = np.full((80, 128), 70, dtype=np.float32)
   warm(d, base)
   rng = np.random.default_rng(2)
   for i in range(30):
     image = base+70+rng.normal(0, 2, base.shape)
-    assert not d.update(image, 3.+i*.2, 100).active
+    assert not d.update(image, 3.+i*.2, sensitivity).active
 
 
 def test_startup_fade_is_learned_during_warmup():
@@ -77,6 +79,58 @@ def test_sensitivity_detects_smaller_changes():
   assert result == [False, True]
 
 
+@pytest.mark.parametrize('stream,contrast,shape', [(0, 35, (24, 40)), (1, 14, (12, 16)), (2, 35, (12, 16))])
+def test_fifty_percent_detects_camera_scaled_motion(stream, contrast, shape):
+  base = np.full((80, 128), 70, dtype=np.float32)
+  detector = MotionDetector.for_camera(stream, 1928, 1208)
+  warm(detector, base)
+  results = []
+  for i in range(10):
+    image = base.copy()
+    x = 40+i*3
+    image[25:25+shape[0], x:x+shape[1]] += contrast
+    results.append(detector.update(image, 3.+i*.2, 50))
+  assert all(r.active for r in results)
+  assert not any(r.triggered for r in results[:5])
+  assert any(r.triggered for r in results[5:])
+
+
+@pytest.mark.parametrize('sensitivity', [1, 100])
+def test_cabin_calibration_preserves_slider_endpoints(sensitivity):
+  original = MotionDetector(area_scale=camera_area_scale(1, 1928, 1208))
+  calibrated = MotionDetector.for_camera(1, 1928, 1208)
+  base = np.full((80, 128), 70, dtype=np.float32)
+  for detector in (original, calibrated):
+    warm(detector, base)
+  # High-contrast motion remains identical at both ends; sensitivity 50 gets
+  # a lower cabin threshold, without raising maximum noise sensitivity.
+  for i in range(20):
+    image = base.copy()
+    image[25:40, 40+i:60+i] += 60
+    assert original.update(image, 3.+i*.2, sensitivity) == calibrated.update(image, 3.+i*.2, sensitivity)
+
+
+def test_eye_follows_fresh_motion_instead_of_large_background_footprint():
+  detector = MotionDetector()
+  base = np.full((80, 128), 70, dtype=np.float32)
+  warm(detector, base)
+  scene = base.copy()
+  scene[10:45, 10:40] += 100
+  assert detector.update(scene, 3., 50).x < .4
+  scene[15:19, 15:19] += 30  # A small fluctuation inside the large old footprint.
+  scene[30:40, 90:100] += 80  # New movement across the frame.
+  result = detector.update(scene, 3.2, 50)
+  assert result.active and result.x > .7
+  assert not result.triggered  # Eye movement is independent of the save timer.
+  # These values go directly into SentryState. NumPy scalar coordinates are
+  # rejected by pycapnp and would stop the controller on its first motion hit.
+  from openpilot.cereal import log
+  event = log.Event.new_message()
+  state = event.init('sentryState')
+  state.motionX, state.motionY, state.motionScore = result.x, result.y, result.score
+  assert event.to_bytes()
+
+
 @pytest.mark.parametrize('after', ['gone', 'stationary'])
 def test_short_motion_and_background_afterimage_do_not_save(after):
   base = np.full((80, 128), 70, dtype=np.float32)
@@ -98,7 +152,7 @@ def test_short_motion_and_background_afterimage_do_not_save(after):
 @pytest.mark.parametrize('stream', [0, 1, 2])
 def test_small_motion_moves_eye_without_saving(stream):
   base = np.full((80, 128), 70, dtype=np.float32)
-  d = MotionDetector(area_scale=camera_area_scale(stream, 1928, 1208))
+  d = MotionDetector.for_camera(stream, 1928, 1208)
   warm(d, base)
   for i in range(40):
     image = base.copy()
@@ -110,9 +164,10 @@ def test_small_motion_moves_eye_without_saving(stream):
 
 
 @pytest.mark.parametrize('stream', [0, 1, 2])
-def test_scattered_snow_cannot_combine_area_into_a_trigger(stream):
+@pytest.mark.parametrize('sensitivity', [50, 100])
+def test_scattered_snow_cannot_combine_area_into_a_trigger(stream, sensitivity):
   base = np.full((80, 128), 70, dtype=np.float32)
-  d = MotionDetector(area_scale=camera_area_scale(stream, 1928, 1208))
+  d = MotionDetector.for_camera(stream, 1928, 1208)
   warm(d, base)
   for i in range(60):
     image = base.copy()
@@ -121,7 +176,7 @@ def test_scattered_snow_cannot_combine_area_into_a_trigger(stream):
         shift = i % 3
         image[y+shift:y+shift+5, x+shift:x+shift+5] += 100
     assert np.count_nonzero(image-base) > .06*image.size
-    result = d.update(image, 3.+i*.2, 100)
+    result = d.update(image, 3.+i*.2, sensitivity)
     assert result.active  # The visual cue is deliberately more sensitive.
     assert not result.triggered
 
