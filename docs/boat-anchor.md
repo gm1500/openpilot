@@ -1,7 +1,10 @@
 # boat-anchor
 
-Based on comma master `ec95db3f1fa19f76940497fedfdb62e09ea19912`.
-Seven feature commits carry the working tune and policies onto that base.
+Merged comma master `6f4c0faf1f85132734e94aa39c67143f823b9324` (2026-10-10),
+including its tested tinygrad pin `d3f09c9bbd542fbfbe68c8569a1173550c408969`.
+The fork retains its working tune and policies. VOACC remains the default;
+Experimental and Conditional mode default off. Existing saved mode choices remain intact.
+See [upstream merge notes](upstream-2026-10-10.md) for validation and locationd findings.
 
 | Category | Behavior |
 | --- | --- |

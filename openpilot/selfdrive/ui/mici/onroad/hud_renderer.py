@@ -191,9 +191,6 @@ class HudRenderer(Widget):
     return self._lane_policy_icon.is_pressed or self._speed_limit_button.is_pressed or self._exp_button.is_pressed
 
   def _draw_model_source(self, rect: rl.Rectangle) -> None:
-    if ui_state.sm.recv_frame['selfdriveState'] < ui_state.started_frame:
-      return
-
     loading = ui_state.chestnut_state == ChestnutState.LOADING
     if loading:
       icon = self._txt_chestnut

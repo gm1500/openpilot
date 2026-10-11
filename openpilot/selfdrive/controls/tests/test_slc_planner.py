@@ -123,6 +123,15 @@ class TestSLCPlanner(OpenpilotTestCase):
     self.assertFalse(self.cruise.map_cruise.e2e_fallback)
     self.assertNotEqual(self.ack['longitudinalPlan'].conditionalExperimental.reason, 'noSpeedLimit')
 
+  def test_learned_accel_boost_does_not_follow_mode_switch(self):
+    self.planner.accel_boost.total_boost = .2
+    for mode in (LongitudinalMode.experimental, LongitudinalMode.voacc, LongitudinalMode.conditional):
+      with self.subTest(mode=mode):
+        set_longitudinal_mode(self.params, mode)
+        self.plan_step()
+        expected = -.3 if mode == LongitudinalMode.experimental else -.5
+        self.assertAlmostEqual(self.planner.model_accel, expected, places=6)
+
   def test_no_speed_entry_and_recovery_without_junction(self):
     self.outage()
     self.recover()
