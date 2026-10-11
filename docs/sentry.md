@@ -124,6 +124,13 @@ uploads Sentry's `rlog.zst` and every available selected-camera file (`fcamera.h
 `ecamera.hevc`, `dcamera.hevc`) on unmetered connections, usually Wi-Fi. No separate uploader
 toggle is required. Metered links retain the stock preview/log policy; full Sentry videos
 wait for an unmetered link. Disabling the narrow camera also disables the normal front preview.
+Full Sentry logs/videos request signed URLs through the documented batch upload endpoint
+(`POST /v1/:dongle_id/upload_urls/`), as Connect's Upload button does, using the device's
+own signed token. The previous automatic upload flow returned HTTP 412 for these files
+despite manual uploads working. Preview/qlog uploads retain their ordinary
+endpoint. The batch flow still requires server authorization; it does not override a refusal.
+Uploader logs distinguish `sentry.upload_url_failed` (URL request) from
+`sentry.upload_put_failed` (file transfer). Only a successful transfer marks a file uploaded.
 Uploads resume from on-disk files and per-file upload attributes after a restart. Failed or
 refused Sentry uploads, including HTTP 401/403/412, remain pending and use the uploader's
 normal retry/backoff; they are not marked as successful. Within each priority tier, remaining

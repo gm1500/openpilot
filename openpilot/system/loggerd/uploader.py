@@ -12,13 +12,14 @@ from collections.abc import Iterator
 from openpilot.cereal import log
 import openpilot.cereal.messaging as messaging
 from openpilot.system.sentry.storage import live_sentry_lock
-from openpilot.common.api import Api
+from openpilot.common.api import Api, API_HOST
 from openpilot.common.utils import get_upload_stream
 from openpilot.common.params import Params
 from openpilot.common.realtime import set_core_affinity
 from openpilot.common.hardware.hw import Paths
 from openpilot.system.loggerd.xattr_cache import getxattr, setxattr
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.version import get_version
 
 NetworkType = log.DeviceState.NetworkType
 UPLOAD_ATTR_NAME = 'user.upload'
@@ -160,14 +161,36 @@ class Uploader:
     return None
 
   def do_upload(self, key: str, fn: str):
-    url_resp = self.api.get("v1.4/" + self.dongle_id + "/upload_url/", timeout=10, path=key, access_token=self.api.get_token())
-    if url_resp.status_code == 412 or (is_sentry_file(fn) and url_resp.status_code != 200):
+    sentry = is_sentry_file(fn)
+    requested = sentry and os.path.basename(fn) in SENTRY_UPLOAD_PRIORITY
+    if requested:
+      # Connect explicitly requests full-file uploads through the batch API.
+      # It also supports device-signed tokens; ordinary upload_url requests
+      # can be declined with 412 even when a Connect-requested upload works.
+      url_resp = requests.post(API_HOST + "/v1/" + self.dongle_id + "/upload_urls/",
+                               json={"paths": [key], "expiry_days": 1}, timeout=10,
+                               headers={"Authorization": "JWT " + self.api.get_token(),
+                                        "User-Agent": "openpilot-" + get_version()}, allow_redirects=False)
+    else:
+      url_resp = self.api.get("v1.4/" + self.dongle_id + "/upload_url/", timeout=10, path=key, access_token=self.api.get_token())
+    if url_resp.status_code == 412 or (sentry and url_resp.status_code != 200):
+      if sentry:
+        cloudlog.event("sentry.upload_url_failed", key=key, status_code=url_resp.status_code,
+                       endpoint="batch" if requested else "ordinary")
       return url_resp
 
     url_resp_json = json.loads(url_resp.text)
+    if requested:
+      if not isinstance(url_resp_json, list) or len(url_resp_json) != 1 or not isinstance(url_resp_json[0], dict):
+        raise ValueError("Invalid Sentry batch upload URL response")
+      url_resp_json = url_resp_json[0]
+      if not isinstance(url_resp_json.get('url'), str) or not url_resp_json['url']:
+        raise ValueError("Missing Sentry batch upload URL")
     url = url_resp_json['url']
-    headers = url_resp_json['headers']
-    cloudlog.debug("upload_url v1.4 %s %s", url, str(headers))
+    # Connect supplies this header when the batch endpoint returns only URLs.
+    headers = {"x-ms-blob-type": "BlockBlob", **url_resp_json.get('headers', {})} if requested else url_resp_json['headers']
+    if not sentry:
+      cloudlog.debug("upload_url v1.4 %s %s", url, str(headers))
 
     if fake_upload:
       return FakeResponse()
@@ -177,6 +200,8 @@ class Uploader:
       compress = key.endswith('.zst') and not fn.endswith('.zst')
       stream, _ = get_upload_stream(fn, compress)
       response = requests.put(url, data=stream, headers=headers, timeout=10)
+      if sentry and response.status_code not in (200, 201):
+        cloudlog.event("sentry.upload_put_failed", key=key, status_code=response.status_code)
       return response
     finally:
       if stream:

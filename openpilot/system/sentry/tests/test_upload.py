@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -64,12 +65,73 @@ def test_sentry_upload_url_refusal_retains_http_status(uploader, monkeypatch, st
   directory = event_files(uploader)
   response = SimpleNamespace(status_code=status, text='{"error":"upload refused"}')
   uploader.api = SimpleNamespace(get=lambda *args, **kwargs: response, get_token=lambda: 'test-token')
+  monkeypatch.setattr(upload.requests, 'post', lambda *args, **kwargs: response)
 
   def unexpected_put(*args, **kwargs):
     pytest.fail('A refused upload URL must not issue a file PUT')
 
   monkeypatch.setattr(upload.requests, 'put', unexpected_put)
   assert uploader.do_upload('route/ecamera.hevc', str(directory/'ecamera.hevc')) is response
+
+
+@pytest.mark.parametrize('name', ['rlog.zst', 'fcamera.hevc', 'ecamera.hevc', 'dcamera.hevc'])
+def test_sentry_full_files_request_connect_batch_urls(uploader, monkeypatch, name):
+  directory = event_files(uploader)
+  key, fn = directory.name+'/'+name, str(directory/name)
+  uploader.api = SimpleNamespace(get_token=lambda: 'test-device-token')
+  signed_url = 'https://storage.example/authorized-upload'
+  posts, puts = [], []
+
+  def post(url, **kwargs):
+    posts.append((url, kwargs))
+    return SimpleNamespace(status_code=200, text=json.dumps([{'url': signed_url}]))
+
+  def put(url, **kwargs):
+    puts.append((url, kwargs['data'].read(), kwargs['headers']))
+    # Merely obtaining a URL must not mark the file uploaded.
+    assert getxattr(fn, upload.UPLOAD_ATTR_NAME) is None
+    return SimpleNamespace(status_code=201, request=SimpleNamespace(headers={'Content-Length': '7'}))
+
+  monkeypatch.setattr(upload.requests, 'post', post)
+  monkeypatch.setattr(upload.requests, 'put', put)
+  assert uploader.upload(name, key, fn, upload.NetworkType.wifi, False)
+  assert len(posts) == 1
+  url, kwargs = posts[0]
+  assert url == upload.API_HOST+'/v1/test-device/upload_urls/'
+  assert kwargs['json'] == {'paths': [key], 'expiry_days': 1}
+  assert kwargs['headers']['Authorization'] == 'JWT test-device-token'
+  assert kwargs['allow_redirects'] is False
+  assert puts == [(signed_url, b'footage', {'x-ms-blob-type': 'BlockBlob'})]
+  assert getxattr(fn, upload.UPLOAD_ATTR_NAME) == upload.UPLOAD_ATTR_VALUE
+
+
+@pytest.mark.parametrize('payload', [[], {}, [{'url': ''}], [{'error': 'denied'}], [{'url': 'a'}, {'url': 'b'}]])
+def test_malformed_sentry_upload_url_is_not_transferred_or_marked_uploaded(uploader, monkeypatch, payload):
+  directory = event_files(uploader)
+  fn = str(directory/'fcamera.hevc')
+  uploader.api = SimpleNamespace(get_token=lambda: 'test-device-token')
+  monkeypatch.setattr(upload.requests, 'post', lambda *args, **kwargs: SimpleNamespace(status_code=200, text=json.dumps(payload)))
+  monkeypatch.setattr(upload.requests, 'put', lambda *args, **kwargs: pytest.fail('Malformed response must not cause a PUT'))
+  assert not uploader.upload('fcamera.hevc', directory.name+'/fcamera.hevc', fn, upload.NetworkType.wifi, False)
+  assert getxattr(fn, upload.UPLOAD_ATTR_NAME) is None
+
+
+@pytest.mark.parametrize('sentry', [False, True])
+def test_preview_keeps_ordinary_upload_endpoint(uploader, monkeypatch, sentry):
+  directory = event_files(uploader)
+  if not sentry:
+    (directory/'.sentry').unlink()
+  calls = []
+
+  def get(endpoint, **kwargs):
+    calls.append((endpoint, kwargs))
+    return SimpleNamespace(status_code=200, text=json.dumps({'url': 'https://storage.example/preview', 'headers': {}}))
+
+  uploader.api = SimpleNamespace(get=get, get_token=lambda: 'test-token')
+  monkeypatch.setattr(upload.requests, 'post', lambda *args, **kwargs: pytest.fail('Preview must not use batch API'))
+  monkeypatch.setattr(upload.requests, 'put', lambda *args, **kwargs: SimpleNamespace(status_code=200))
+  assert uploader.do_upload(directory.name+'/qcamera.ts', str(directory/'qcamera.ts')).status_code == 200
+  assert calls[0][0] == 'v1.4/test-device/upload_url/'
 
 
 @pytest.mark.parametrize('status', [401, 403, 412, 500, None])
