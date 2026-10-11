@@ -192,10 +192,12 @@ opposite display edge, instead of staying about one-third of the way across. The
 approximate display mappings, not calibrated physical angles. Existing smoothing remains.
 It reacts without the recording confirmation delay or larger
 area threshold, while still respecting camera warmup, arming and touch suppression.
-Three glass reflections form a symmetric arc across the upper lens, with the middle one
-highest. They shift toward the display center as the eye moves, with three times the
-previous reflection movement. The two side reflections and their halos tilt tangent to
-the glass at their current positions; the tilt follows parallax while the middle stays level.
+Three glass reflections form a symmetric arc across the upper lens when the eye is centered.
+As the eye moves, they rotate together around the lens center toward a virtual overhead light,
+with a subtle rotation limited to six degrees in either direction.
+Their radius and angular spacing stay fixed, so the animation follows the rounded glass
+instead of shifting the reflections sideways/upward. Each reflection and its halo turns
+tangent to the curve, including the middle reflection as the arc rotates.
 Its diameter is four times the original, including the glow. Motion is bounded by the actual
 outer glow radius, with no extra border/padding: the full eye stays inside the display and
 the glow can touch its edge. It appears on black at 100% brightness only after the normal

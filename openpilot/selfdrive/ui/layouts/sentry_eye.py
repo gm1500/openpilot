@@ -49,16 +49,16 @@ class SentryEye(Widget):
     rl.draw_ring(center, 42*scale, 44*scale, 0, 360, 64, rl.Color(110, 40, 40, int(180*fade)))
     draw_glow(center, 35*scale, rl.Color(255, 65, 25, int(255*fade)), rl.Color(75, 0, 0, int(255*fade)))
     draw_glow(center, 16*scale, rl.Color(255, 190, 130, int(255*fade)), rl.Color(220, 0, 0, int(120*fade)))
-    # Three lights across the upper glass, symmetric at the display center.
-    # Stronger parallax follows the smoothed display position, keeping every
-    # highlight inside the lens as it shifts toward the display center.
-    shift_x = (.5-(center.x-rect.x)/max(rect.width, 1))*24
-    shift_y = (.5-(center.y-rect.y)/max(rect.height, 1))*24
-    for dx, dy, rx, ry in ((-17, -23, 4.4, 2.2), (0, -29, 5.2, 2.4), (17, -23, 4.4, 2.2)):
-      offset_x, offset_y = dx+shift_x, dy+shift_y
-      # Side lights lie tangent to the curved glass. Include parallax in the
-      # angle so the tilt follows their current position around the lens.
-      angle = math.degrees(math.atan2(offset_x, -offset_y)) if dx else 0.
+    # Rotate three lights together along the upper glass. A fixed radius and
+    # angular spacing make them sweep around the lens rather than slide over it.
+    # The virtual overhead light changes the arc's angle with screen position.
+    light_x = .5-(center.x-rect.x)/max(rect.width, 1)
+    light_y = 1.+.6*(.5-(center.y-rect.y)/max(rect.height, 1))
+    rotation = max(-6., min(6., .3*math.degrees(math.atan2(light_x, light_y))))
+    for base_angle, rx, ry in ((-36., 4.4, 2.2), (0., 5.2, 2.4), (36., 4.4, 2.2)):
+      angle = base_angle+rotation
+      offset_x = 29.*math.sin(math.radians(angle))
+      offset_y = -29.*math.cos(math.radians(angle))
       rl.rl_push_matrix()
       try:
         rl.rl_translatef(center.x+offset_x*scale, center.y+offset_y*scale, 0.)

@@ -76,14 +76,13 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
   assert glows[0][2] == 380  # Original 95 px glow, now four times the diameter.
   # All three lights sit above the lens center, with the middle one highest.
   left, middle, right = reflections[1::2]
-  assert left[0]+right[0] == rect.width
+  assert left[0]+right[0] == pytest.approx(rect.width)
   assert left[1:4] == pytest.approx(right[1:4])
   assert middle[0] == rect.width/2
   assert middle[1] < left[1] < rect.height/2
   assert -45 < left[4] < -30 and 30 < right[4] < 45
   assert left[4] == pytest.approx(-right[4])
   assert middle[4] == 0
-  centered_angles = (left[4], right[4])
   assert transforms == [(0., 0., 0.)]  # No transform leaks into other UI drawing.
   for x, y in ((0., 0.), (0., 1.), (1., 0.), (1., 1.)):
     eye.x, eye.y = x, y
@@ -97,21 +96,22 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
     cx, cy, radius = glows[0]
     assert min(cx, rect.width-cx) == radius
     assert min(cy, rect.height-cy) == radius
-    # Reflections follow the display position toward its center, staying inside
-    # the lens even at the corners. The red light itself stays at the eye center.
+    # The reflections rotate as one arc toward the display center. Their
+    # radii/spacing stay fixed instead of translating across the glass.
     cx, cy, _ = glows[0]
     reflected_x = sum(r[0] for r in reflections)/len(reflections)
-    reflected_y = sum(r[1] for r in reflections)/len(reflections)
     assert (reflected_x-cx)*(rect.width/2-cx) > 0
-    assert (reflected_y-cy+25*4)*(rect.height/2-cy) > 0
-    assert abs(reflected_x-cx) > 25  # More visible than the old ~10 px shift.
-    assert abs(reflected_y-cy+25*4) > 10
-    for rx, ry, width, height, _ in reflections:
+    assert 5 < abs(reflected_x-cx) < 12  # Subtle arc rotation, not a large sweep.
+    for rx, ry, width, height, angle in reflections:
       assert ry+height < cy
       assert ((abs(rx-cx)+width)**2+(abs(ry-cy)+height)**2)**.5 < 44*4
+      assert math.hypot(rx-cx, ry-cy) == pytest.approx(29*4, abs=.001)
+      # Each long axis remains tangent to the circle, including the middle.
+      assert (rx-cx)*math.cos(math.radians(angle))+(ry-cy)*math.sin(math.radians(angle)) == pytest.approx(0., abs=.001)
     left, middle, right = reflections[1::2]
-    assert left[4] < 0 < right[4] and middle[4] == 0
-    assert all(abs(angle-initial) > 1 for angle, initial in zip((left[4], right[4]), centered_angles, strict=True))
+    assert left[4] < 0 < right[4] and 2 < abs(middle[4]) <= 6
+    assert middle[4]-left[4] == pytest.approx(36.)
+    assert right[4]-middle[4] == pytest.approx(36.)
     assert transforms == [(0., 0., 0.)]
 
   calls.clear()
