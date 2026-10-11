@@ -122,59 +122,27 @@ These are written directly to the saved route; the UI retains ownership of the l
 publisher. Log contents are tested locally; bookmark appearance in Connect still needs
 verification against an uploaded device event.
 
-Logs and preview enter the ordinary uploader. Once those are queued, it automatically
-uploads Sentry's `rlog.zst` and every available selected-camera file (`fcamera.hevc`,
-`ecamera.hevc`, `dcamera.hevc`) on unmetered connections, usually Wi-Fi. No separate uploader
-toggle is required. Metered links retain the stock preview/log policy; full Sentry videos
-wait for an unmetered link. Disabling the narrow camera also disables the normal front preview.
-Full Sentry logs/videos request signed URLs through the documented batch upload endpoint
-(`POST /v1/:dongle_id/upload_urls/`), as Connect's Upload button does. Device authorization
-has returned HTTP 412 through both ordinary and batch endpoints even when manual Connect
-uploads work. An optional one-time setup uses the owner's account authorization, matching
-Connect's manual request. Preview/qlog uploads retain their ordinary device authorization.
-The batch flow still requires server authorization; it does not override a refusal.
-Uploader logs distinguish `sentry.upload_url_failed` (URL request) from
-`sentry.upload_put_failed` (file transfer), and record whether URL authorization used the
-device or account. The **Event uploads** settings row shows recent request/transfer failures
-or the last file's success; it does not claim that the whole route is uploaded.
-Only a successful transfer marks a file uploaded.
-Uploads resume from on-disk files and per-file upload attributes after a restart. Failed or
-refused Sentry uploads, including HTTP 401/403/412, remain pending and use the uploader's
-normal retry/backoff; they are not marked as successful. Within each priority tier, remaining
-files get a turn before a failed file is retried, so one rejected log or camera cannot block
-the other files in that tier. Failures include an explicit HTTP status in the uploader log.
-This does not override Connect's
-account or server policies. Native files, indexes and queue behavior are tested locally;
-server-side route recognition, map display and all-camera playback still need device validation.
+Qlogs and the front preview use the ordinary route uploader, so Connect can index events
+and display their motion bookmarks. The stock metered-connection policy still applies:
+qlogs upload normally, and previews on metered links require viewing the route in Connect.
+Disabling the narrow camera also disables the normal front preview.
 
-### Optional Connect account setup
+Full logs (`rlog.zst`) and the selected-camera videos (`fcamera.hevc`, `ecamera.hevc`,
+`dcamera.hevc`) stay on the device until requested manually from Connect. Open the event
+route and use its upload controls to request the camera footage or all files. These requests
+use the normal Athena upload queue. Sentry does not request batch upload URLs or retry full
+files automatically, including files saved by earlier builds.
 
-After saving a Sentry event, run over interactive SSH:
+The optional Sentry account-token setup has been removed. No account token is needed on the
+device for this workflow. On startup, the uploader removes the obsolete
+`/persist/comma/sentry_connect.json` credential if present; it never reads or uses that file.
+The **Event uploads** settings row now says **Request in Connect**.
 
-```sh
-cd /data/openpilot
-python -m openpilot.system.sentry.connect
-```
-
-Open `https://jwt.comma.ai`, sign into the account that owns the device, then paste the
-account token into the hidden terminal prompt. Never paste it into a chat, command argument,
-or source file. Setup checks device ownership and requests a URL for an existing completed
-video before saving authorization. It does not transfer footage or display the signed URL.
-If the account also receives HTTP 412, setup stops without saving the token; the server's
-remaining precondition must be resolved before automatic uploads can use that account.
-
-The account credential is stored with mode 0600 at
-`/persist/comma/sentry_connect.json`, outside Params and route logs. It is bound to this device
-and the verified official comma API host. It authorizes access to the comma account, so use
-it only on a device you control. The token is sent only to the official API; video storage
-PUTs receive only the signed URL's upload headers. Once linked, the existing queue picks it up
-on its next normal retry (up to four minutes), without a reboot. No account token is needed
-for the ordinary preview/log uploader. If the token expires or is revoked, rerun setup.
-To remove the saved account authorization and return to device authorization:
-
-```sh
-python -m openpilot.system.sentry.connect --clear
-```
+Failed or refused automatic Sentry preview/qlog uploads remain pending and use the normal
+retry/backoff. They are not marked successful, and a failed file does not block the remaining
+preview/qlog files. Local queue tests cover locks, restarts, metered policy, refusal handling,
+and retaining all three camera files for manual requests. Connect's live server behavior is
+not exercised by those tests.
 
 Sentry no longer sets a preservation attribute or uses a separate event-storage budget.
 Its events follow normal route cleanup when storage is low, including events from older
@@ -216,8 +184,8 @@ a numeric UTC offset, with explicitly labeled UTC as the fallback. Native route/
 remain UTC. The coordinate line is omitted when the fixed parking position is unknown.
 The single watermark switch turns all three fields on/off together. Existing voltage settings
 above 11.8 V are clamped to the new maximum. There is no sentry energy-budget limit; voltage
-and maximum parked time remain the shutdown limits. Upload behavior is automatic and has no
-settings row.
+and maximum parked time remain the shutdown limits. Full camera uploads are requested
+manually in Connect, as indicated by the read-only Event uploads row.
 
 The eye follows the approximate image position of motion from the front wide or cabin lens;
 the cabin direction is mirrored. Its target and cross-camera score use the pixels changing
@@ -243,8 +211,8 @@ only at the next inactivity timeout.** Settings remain accessible through the no
 To stop an active session, tap the display, open **Settings → Sentry**, and press **STOP**
 at the top or turn **Enable Sentry** off. Turning it off remains available even if ignition
 is reported. Capture/GPS process gates and the eye honor the master switch directly;
-the current event is finalized and already saved events stay in the upload queue. Sentry stays
-disabled until you explicitly enable it again while offroad.
+the current event is finalized and saved events remain available for manual upload from
+Connect. Sentry stays disabled until you explicitly enable it again while offroad.
 
 Sentry's cutoff/time limits replace the stock offroad software limits only while the
 controller has a fresh parked-session lease. `DisablePowerDown` does not bypass sentry's cutoff.
@@ -314,8 +282,9 @@ sudo reboot
 
 The tests cover brightness/noise rejection, sensitivity and centroid tracking, checkpoint
 validation, bounded one-shot GPS acquisition, expired leases, battery override, driving-process
-gates, tap suppression/full brightness, ordinary event cleanup, all-camera upload/retry handling, timezone/DST and native video/log
-creation. The recorder test replays real HEVC/H264 packets, checks no idle route writes,
+gates, tap suppression/full brightness, ordinary event cleanup, manual camera upload policy,
+preview retry handling, timezone/DST and native video/log creation. The recorder test replays
+real HEVC/H264 packets, checks no idle route writes,
 decodes every saved camera stream, validates indexes and tests ignition finalization.
 The encoder test uses three synthetic VisionIPC camera streams and checks watermark output
 without modifying the shared camera buffer. PC main-camera encoding uses the existing lossless

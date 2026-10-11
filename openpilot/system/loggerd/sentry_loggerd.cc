@@ -43,8 +43,8 @@ struct Segment {
   std::deque<Packet> packets;
 };
 
-// All files stay locked until video and logs are finalized. The uploader recognizes
-// .sentry and queues every selected camera on unmetered connections.
+// All files stay locked until video and logs are finalized. The ordinary uploader
+// sends qlog/preview; full logs and camera videos remain available for Connect requests.
 class SavedSegment {
 public:
   std::string path;

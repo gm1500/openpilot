@@ -1,7 +1,20 @@
-"""Identify a live recorder lock when the ordinary uploader restarts."""
+"""Sentry storage cleanup and live recorder lock detection."""
 import os
 from pathlib import Path
 import time
+
+from openpilot.common.hardware.hw import Paths
+from openpilot.common.swaglog import cloudlog
+
+
+def remove_legacy_upload_authorization():
+  # Automatic full-file uploads and their account setup have been removed.
+  # Delete only their obsolete credential file, without reading it.
+  path = Path(Paths.persist_root())/'comma'/'sentry_connect.json'
+  try:
+    path.unlink(missing_ok=True)
+  except OSError:
+    cloudlog.warning('Could not remove obsolete Sentry upload authorization file: %s', path)
 
 
 def live_sentry_lock(directory):

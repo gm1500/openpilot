@@ -11,8 +11,7 @@ from collections.abc import Iterator
 
 from openpilot.cereal import log
 import openpilot.cereal.messaging as messaging
-from openpilot.system.sentry.storage import live_sentry_lock
-from openpilot.system.sentry.connect import account_token, upload_url_request, upload_url_data, set_upload_status
+from openpilot.system.sentry.storage import live_sentry_lock, remove_legacy_upload_authorization
 from openpilot.common.api import Api
 from openpilot.common.utils import get_upload_stream
 from openpilot.common.params import Params
@@ -24,7 +23,6 @@ from openpilot.common.swaglog import cloudlog
 NetworkType = log.DeviceState.NetworkType
 UPLOAD_ATTR_NAME = 'user.upload'
 UPLOAD_ATTR_VALUE = b'1'
-SENTRY_UPLOAD_PRIORITY = {'rlog': 2, 'rlog.zst': 2, 'fcamera.hevc': 3, 'ecamera.hevc': 4, 'dcamera.hevc': 5}
 
 MAX_UPLOAD_SIZES = {
   "qlog": 25*1e6,  # can't be too restrictive here since we use qlogs to find
@@ -82,6 +80,7 @@ def clear_locks(root: str) -> None:
 
 class Uploader:
   def __init__(self, dongle_id: str, root: str):
+    remove_legacy_upload_authorization()
     self.dongle_id = dongle_id
     self.api = Api(dongle_id)
     self.root = root
@@ -109,8 +108,7 @@ class Uploader:
       if any(name.endswith(".lock") for name in names):
         continue
 
-      priority = self.immediate_priority | SENTRY_UPLOAD_PRIORITY if '.sentry' in names else self.immediate_priority
-      for name in sorted(names, key=lambda n: priority.get(n, 1000)):
+      for name in sorted(names, key=lambda n: self.immediate_priority.get(n, 1000)):
         key = os.path.join(logdir, name)
         fn = os.path.join(path, name)
         # skip files already uploaded
@@ -132,8 +130,6 @@ class Uploader:
 
           if name == "qcamera.ts" and not any(logdir.startswith(r.split('|')[-1]) for r in requested_routes):
             continue
-          if '.sentry' in names and name in SENTRY_UPLOAD_PRIORITY:
-            continue
 
         yield name, key, fn
 
@@ -153,38 +149,20 @@ class Uploader:
       if name in self.immediate_priority:
         return name, key, fn
 
-    if not metered:
-      for name, key, fn in upload_files:
-        if name in SENTRY_UPLOAD_PRIORITY and is_sentry_file(fn):
-          return name, key, fn
-
+    # Full Sentry logs and HEVC videos stay local for manual Connect requests,
+    # handled by Athena. Only the ordinary qlog/preview policy applies here.
     return None
 
   def do_upload(self, key: str, fn: str):
     sentry = is_sentry_file(fn)
-    requested = sentry and os.path.basename(fn) in SENTRY_UPLOAD_PRIORITY
-    auth = 'device'
-    if requested:
-      # The device token can be refused even by the batch API. A locally
-      # verified owner token uses the same authorization as Connect's button.
-      token = account_token(self.dongle_id)
-      auth = 'account' if token else 'device'
-      set_upload_status('Requesting upload')
-      url_resp = upload_url_request(self.dongle_id, key, token or self.api.get_token())
-    else:
-      url_resp = self.api.get("v1.4/" + self.dongle_id + "/upload_url/", timeout=10, path=key, access_token=self.api.get_token())
+    url_resp = self.api.get("v1.4/" + self.dongle_id + "/upload_url/", timeout=10, path=key, access_token=self.api.get_token())
     if url_resp.status_code == 412 or (sentry and url_resp.status_code != 200):
       if sentry:
-        cloudlog.event("sentry.upload_url_failed", key=key, status_code=url_resp.status_code,
-                       endpoint="batch" if requested else "ordinary", auth=auth)
-        set_upload_status(f'Connect rejected request ({url_resp.status_code})')
+        cloudlog.event("sentry.upload_url_failed", key=key, status_code=url_resp.status_code)
       return url_resp
 
-    if requested:
-      url, headers = upload_url_data(url_resp)
-    else:
-      url_resp_json = json.loads(url_resp.text)
-      url, headers = url_resp_json['url'], url_resp_json['headers']
+    url_resp_json = json.loads(url_resp.text)
+    url, headers = url_resp_json['url'], url_resp_json['headers']
     if not sentry:
       cloudlog.debug("upload_url v1.4 %s %s", url, str(headers))
 
@@ -195,12 +173,9 @@ class Uploader:
     try:
       compress = key.endswith('.zst') and not fn.endswith('.zst')
       stream, _ = get_upload_stream(fn, compress)
-      if sentry:
-        set_upload_status('Uploading event files')
       response = requests.put(url, data=stream, headers=headers, timeout=10)
       if sentry and response.status_code not in (200, 201):
         cloudlog.event("sentry.upload_put_failed", key=key, status_code=response.status_code)
-        set_upload_status(f'Transfer failed ({response.status_code})')
       return response
     finally:
       if stream:
@@ -230,16 +205,12 @@ class Uploader:
         stat = self.do_upload(key, fn)
       except Exception as e:
         last_exc = (e, traceback.format_exc())
-        if is_sentry_file(fn):
-          set_upload_status('Upload error; retrying')
 
       # A refused Sentry upload is still pending, not successfully backed up.
       # Keep the local file eligible for retry through the normal backoff.
       accepted = (200, 201) if is_sentry_file(fn) else (200, 201, 401, 403, 412)
       if stat is not None and stat.status_code in accepted:
         self.last_filename = fn
-        if is_sentry_file(fn):
-          set_upload_status('Last file uploaded')
         dt = time.monotonic() - start_time
         if stat.status_code == 412:
           cloudlog.event("upload_ignored", key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)

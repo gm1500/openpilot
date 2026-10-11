@@ -5,7 +5,6 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.ui.ui_state import ui_state, device
 from openpilot.system.sentry.config import setting, RANGES, ARM_DELAYS, CAMERA_WARMUP_SECONDS
 from openpilot.system.sentry.clock import time_status
-from openpilot.system.sentry.connect import upload_status
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.list_view import ListItem, MultipleButtonAction, toggle_item, text_item, button_item
@@ -97,7 +96,7 @@ class SentryLayout(Widget):
                                      initial_state=setting(self.params, 'SentryEnabled'),
                                      callback=self._set_sentry_enabled, enabled=self._can_toggle_sentry)
     self._stop_button = button_item('Sentry', 'STOP',
-                                   'Stops parked capture and the red eye. Saved events stay in the upload queue.',
+                                   'Stops parked capture and the red eye. Saved events remain available for manual upload from Connect.',
                                    callback=lambda: self._set_sentry_enabled(False),
                                    enabled=lambda: setting(self.params, 'SentryEnabled'))
     self._stop_button.action_item.set_value(self.phase_status)
@@ -132,10 +131,9 @@ class SentryLayout(Widget):
     ):
       items.append(SentrySlider(self.params, key, title, unit, step))
     items.extend([
-      text_item('Event uploads', upload_status,
-                'Saved footage from every selected camera uploads on unmetered connections, usually Wi-Fi. ' +
-                'If Connect rejects automatic requests, link your account once using the Sentry SSH setup. ' +
-                'Events use normal route storage cleanup.'),
+      text_item('Event uploads', 'Request in Connect',
+                'Previews and motion bookmarks use normal route uploads. Request full camera videos and logs from Connect when needed. ' +
+                'Saved events follow normal storage cleanup.'),
       text_item('Battery protection', 'Sentry cutoff',
                 'While Sentry is active, its voltage and time limits replace the stock offroad software limits. ' +
                 'Default cutoff is 11.8 V; adjustable down to 11.0 V. Hardware protections remain active.'),
