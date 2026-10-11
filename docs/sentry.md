@@ -187,7 +187,8 @@ It reacts without the recording confirmation delay or larger
 area threshold, while still respecting camera warmup, arming and touch suppression.
 Three glass reflections form a symmetric arc across the upper lens, with the middle one
 highest. They shift toward the display center as the eye moves, with three times the
-previous reflection movement.
+previous reflection movement. The two side reflections and their halos tilt tangent to
+the glass at their current positions; the tilt follows parallax while the middle stays level.
 Its diameter is four times the original, including the glow. Motion is bounded by the actual
 outer glow radius, with no extra border/padding: the full eye stays inside the display and
 the glow can touch its edge. It appears on black at 100% brightness only after the normal

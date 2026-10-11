@@ -1,4 +1,5 @@
 """Exercise real raylib argument conversion without requiring an OpenGL window."""
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -21,12 +22,17 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
   calls = []
   glows = []
   reflections = []
+  transforms = [(0., 0., 0.)]
   functions = {
     'draw_rectangle_rec': 'DrawRectangleRec',
     'draw_circle_gradient': 'DrawCircleGradient',
     'draw_circle_v': 'DrawCircleV',
     'draw_ring': 'DrawRing',
     'draw_ellipse': 'DrawEllipse',
+    'rl_push_matrix': 'rlPushMatrix',
+    'rl_pop_matrix': 'rlPopMatrix',
+    'rl_translatef': 'rlTranslatef',
+    'rl_rotatef': 'rlRotatef',
   }
   for python_name, native_name in functions.items():
     signature = rl.ffi.typeof(getattr(rl.rl, native_name))
@@ -34,13 +40,26 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
       signature = rl.ffi.typeof('void(*)(int, int, float, struct Color, struct Color)')
     def capture(*args, name=python_name):
       calls.append(name)
+      tx, ty, angle = transforms[-1]
+      cosine, sine = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+      if name == 'rl_push_matrix':
+        transforms.append(transforms[-1])
+      elif name == 'rl_pop_matrix':
+        transforms.pop()
+      elif name == 'rl_translatef':
+        transforms[-1] = (tx+args[0]*cosine-args[1]*sine, ty+args[0]*sine+args[1]*cosine, angle)
+      elif name == 'rl_rotatef':
+        transforms[-1] = (tx, ty, angle+args[0])
       if name == 'draw_circle_gradient':
         if gradient_api == 'legacy':
           glows.append((args[0], args[1], args[2]))
         else:
           glows.append((args[0].x, args[0].y, args[1]))
       if name == 'draw_ellipse':
-        reflections.append((args[0], args[1], args[2], args[3]))
+        # Capture the transformed center and rotated ellipse's bounding box.
+        reflections.append((tx+args[0]*cosine-args[1]*sine, ty+args[0]*sine+args[1]*cosine,
+                            math.hypot(args[2]*cosine, args[3]*sine),
+                            math.hypot(args[2]*sine, args[3]*cosine), angle))
     callback = rl.ffi.callback(signature, capture)
     monkeypatch.setattr(rl, python_name, rl._wrap_function(callback))
 
@@ -58,9 +77,14 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
   # All three lights sit above the lens center, with the middle one highest.
   left, middle, right = reflections[1::2]
   assert left[0]+right[0] == rect.width
-  assert left[1:] == right[1:]
+  assert left[1:4] == pytest.approx(right[1:4])
   assert middle[0] == rect.width/2
   assert middle[1] < left[1] < rect.height/2
+  assert -45 < left[4] < -30 and 30 < right[4] < 45
+  assert left[4] == pytest.approx(-right[4])
+  assert middle[4] == 0
+  centered_angles = (left[4], right[4])
+  assert transforms == [(0., 0., 0.)]  # No transform leaks into other UI drawing.
   for x, y in ((0., 0.), (0., 1.), (1., 0.), (1., 1.)):
     eye.x, eye.y = x, y
     glows.clear()
@@ -82,9 +106,13 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
     assert (reflected_y-cy+25*4)*(rect.height/2-cy) > 0
     assert abs(reflected_x-cx) > 25  # More visible than the old ~10 px shift.
     assert abs(reflected_y-cy+25*4) > 10
-    for rx, ry, width, height in reflections:
+    for rx, ry, width, height, _ in reflections:
       assert ry+height < cy
       assert ((abs(rx-cx)+width)**2+(abs(ry-cy)+height)**2)**.5 < 44*4
+    left, middle, right = reflections[1::2]
+    assert left[4] < 0 < right[4] and middle[4] == 0
+    assert all(abs(angle-initial) > 1 for angle, initial in zip((left[4], right[4]), centered_angles, strict=True))
+    assert transforms == [(0., 0., 0.)]
 
   calls.clear()
   device.sentry_eye_visible = False

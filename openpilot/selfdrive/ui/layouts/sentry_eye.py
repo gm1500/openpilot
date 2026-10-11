@@ -1,3 +1,4 @@
+import math
 import time
 import pyray as rl
 
@@ -54,7 +55,15 @@ class SentryEye(Widget):
     shift_x = (.5-(center.x-rect.x)/max(rect.width, 1))*24
     shift_y = (.5-(center.y-rect.y)/max(rect.height, 1))*24
     for dx, dy, rx, ry in ((-17, -23, 4.4, 2.2), (0, -29, 5.2, 2.4), (17, -23, 4.4, 2.2)):
-      x = int(center.x+(dx+shift_x)*scale)
-      y = int(center.y+(dy+shift_y)*scale)
-      rl.draw_ellipse(x, y, (rx+1.3)*scale, (ry+1.)*scale, rl.Color(255, 185, 170, int(40*fade)))
-      rl.draw_ellipse(x, y, rx*scale, ry*scale, rl.Color(255, 235, 230, int(170*fade)))
+      offset_x, offset_y = dx+shift_x, dy+shift_y
+      # Side lights lie tangent to the curved glass. Include parallax in the
+      # angle so the tilt follows their current position around the lens.
+      angle = math.degrees(math.atan2(offset_x, -offset_y)) if dx else 0.
+      rl.rl_push_matrix()
+      try:
+        rl.rl_translatef(center.x+offset_x*scale, center.y+offset_y*scale, 0.)
+        rl.rl_rotatef(angle, 0., 0., 1.)
+        rl.draw_ellipse(0, 0, (rx+1.3)*scale, (ry+1.)*scale, rl.Color(255, 185, 170, int(40*fade)))
+        rl.draw_ellipse(0, 0, rx*scale, ry*scale, rl.Color(255, 235, 230, int(170*fade)))
+      finally:
+        rl.rl_pop_matrix()
