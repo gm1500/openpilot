@@ -48,6 +48,43 @@ def messages(path):
 
 
 @pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
+def test_recorder_waits_for_publishers_at_startup(tmp_path, monkeypatch):
+  monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
+  with OpenpilotPrefix():
+    messaging.reset_context()
+    status = messaging.SubMaster(['sentryRecorderState'])
+    pm = messaging.PubMaster(['sentryState', 'pandaStates', 'deviceState'])
+    with (tmp_path/'startup.log').open('w') as logfile:
+      process = subprocess.Popen([str(BINARY)], cwd=BINARY.parent, stdout=logfile, stderr=subprocess.STDOUT)
+      try:
+        # Neither the controller nor panda/hardwared has published yet. Then
+        # introduce each service independently, as happens on a real cold boot.
+        for service in (None, 'sentryState', 'pandaStates', 'deviceState'):
+          if service is not None:
+            msg = messaging.new_message(service, 1 if service == 'pandaStates' else None, valid=True)
+            if service == 'sentryState':
+              msg.sentryState.capture = True
+            if service == 'pandaStates':
+              msg.pandaStates[0].pandaType = log.PandaState.PandaType.tres
+            pm.send(service, msg)
+          deadline = time.monotonic()+3.
+          while time.monotonic() < deadline:
+            assert process.poll() is None, (tmp_path/'startup.log').read_text()
+            status.update(100)
+            if status.updated['sentryRecorderState']:
+              assert not status['sentryRecorderState'].recording
+              break
+          else:
+            pytest.fail('recorder did not report its waiting state')
+        assert not list((tmp_path/'routes').iterdir())
+      finally:
+        if process.poll() is None:
+          process.send_signal(signal.SIGINT)
+          process.wait(timeout=8)
+        assert process.returncode == 0, (tmp_path/'startup.log').read_text()
+
+
+@pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
 def test_native_ram_event_and_ignition_handoff(tmp_path, monkeypatch):
   monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
   hevc, h264 = sample_packet('libx265'), sample_packet('libx264')

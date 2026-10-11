@@ -16,6 +16,7 @@
 #include "common/timing.h"
 #include "common/util.h"
 #include "common/hardware/hw.h"
+#include "system/sentry/state.h"
 
 #define MAX_IR_PANDA_VAL 50
 #define CUTOFF_IL 400
@@ -331,10 +332,9 @@ void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control, 
     }
 
     // Sentry uses automatic exposure-based IR whenever its cabin camera is selected.
-    auto sentry = sm["sentryState"].getSentryState();
-    bool sentry_active = !is_onroad && sentry.getCapture() &&
-                         nanos_since_boot() - sm["sentryState"].getLogMonoTime() < 2e9;
-    bool ir_disabled = sentry_active ? !(sentry.getCameraMask() & 2) :
+    auto sentry = sentry_state(sm["sentryState"], sm.rcv_time("sentryState"), nanos_since_boot());
+    bool sentry_active = !is_onroad && sentry && sentry->getCapture();
+    bool ir_disabled = sentry_active ? !(sentry->getCameraMask() & 2) :
                                       (!is_onroad && params.getBool("DisableDriverCameraIR"));
     if (nanos_since_boot() - last_cabin_camera_t > 1e9 || ir_disabled) ir_pwr = 0;
 

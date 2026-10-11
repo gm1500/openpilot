@@ -7,6 +7,7 @@
 #include <media/msm_media_info.h>
 #endif
 #include "system/loggerd/encoder/encoder.h"
+#include "system/sentry/state.h"
 
 // Private low-resolution buffers: never draw onto camerad's shared buffers.
 // The V4L input-done callback releases each buffer only after hardware consumes it.
@@ -90,8 +91,9 @@ public:
       char stamp[32];
       strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S UTC", &utc);
       text(buf, std::string(stamp)+" "+name, 290);
-      auto state = sm["sentryState"].getSentryState();
-      text(buf, state.getLocationValid() ? util::string_format("POS %.5f,%.5f", state.getLatitude(), state.getLongitude()) : "POS UNAVAILABLE", 310);
+      auto state = sentry_state(sm["sentryState"], sm.rcv_time("sentryState"), nanos_since_boot());
+      text(buf, state && state->getLocationValid() ?
+                util::string_format("POS %.5f,%.5f", state->getLatitude(), state->getLongitude()) : "POS UNAVAILABLE", 310);
     }
     buf->sync(VISIONBUF_SYNC_TO_DEVICE);
     return buf;

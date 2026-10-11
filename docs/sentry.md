@@ -136,6 +136,11 @@ pytest openpilot/system/sentry/tests
 
 The native video tests additionally require PyAV (`pip install av`), and the VisionIPC test
 requires permission to create Unix sockets.
+The native state-reader regression compiles a small C++ program with the installed Cap'n Proto
+dependencies. It covers subscriptions before their first message, invalid/wrong-type messages,
+and expired leases. Panda, the recorder and watermark rendering share this guarded reader so
+none can crash merely because the sentry publisher starts later. The recorder is also tested
+with no publishers initially and staggered controller/panda/device messages.
 
 The tests cover brightness/noise rejection, sensitivity and centroid tracking, checkpoint
 validation, bounded one-shot GPS acquisition, expired leases, battery override, driving-process

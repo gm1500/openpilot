@@ -13,6 +13,7 @@
 #include "system/loggerd/encoder/encoder.h"
 #include "system/loggerd/loggerd.h"
 #include "system/loggerd/video_writer.h"
+#include "system/sentry/state.h"
 
 namespace fs = std::filesystem;
 ExitHandler do_exit;
@@ -292,11 +293,17 @@ int main() {
   while (!do_exit) {
     sm.update(0);
     uint64_t now = nanos_since_boot();
-    auto state = sm["sentryState"].getSentryState();
+    auto sentry = sentry_state(sm["sentryState"], sm.rcv_time("sentryState"), now);
+    auto state = sentry.value_or(cereal::SentryState::Reader{});
     bool ignition = false;
-    for (auto panda : sm["pandaStates"].getPandaStates()) ignition |= panda.getIgnitionLine() || panda.getIgnitionCan();
-    bool capture = sm.valid("sentryState") && sm.rcv_time("sentryState")+2*SECOND > now && state.getCapture() &&
-                   sm.valid("pandaStates") && sm.rcv_time("pandaStates")+2*SECOND > now &&
+    bool has_panda = sm["pandaStates"].isPandaStates() && sm["pandaStates"].getPandaStates().size() > 0;
+    if (has_panda) {
+      for (auto panda : sm["pandaStates"].getPandaStates()) ignition |= panda.getIgnitionLine() || panda.getIgnitionCan();
+    }
+    bool capture = sentry && state.getCapture() && has_panda &&
+                   sm.valid("pandaStates") && sm.rcv_time("pandaStates") <= now && sm.rcv_time("pandaStates")+2*SECOND > now &&
+                   sm.valid("deviceState") && sm.rcv_time("deviceState") <= now && sm.rcv_time("deviceState")+2*SECOND > now &&
+                   sm["deviceState"].isDeviceState() &&
                    !ignition && !sm["deviceState"].getDeviceState().getStarted();
     if (!capture) recorder.reset();
     for (int c = 0; c < 4; ++c) {
