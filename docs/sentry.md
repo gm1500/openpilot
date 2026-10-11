@@ -94,7 +94,7 @@ through instantaneous power loss.
 | Thermal pause | 70 °C, resume 8 °C cooler |
 | Event storage budget | 2 GiB |
 | Cameras: Narrow / Wide / Cabin | All on; three independent buttons in one row |
-| Cabin IR | Automatic with cabin camera; no separate setting |
+| Cabin IR | Stock automatic exposure/timeout behavior; no separate setting |
 | Red eye | On |
 | Video watermark | On: UTC timestamp, camera name and parking coordinates |
 
@@ -130,7 +130,7 @@ Build the native encoder and recorder, params and messaging extensions using the
 normal SCons environment. Run:
 
 ```sh
-scons -j4 --minimal openpilot/system/loggerd/encoderd openpilot/system/loggerd/sentry_loggerd
+scons -j4 --minimal openpilot/selfdrive/pandad/pandad openpilot/system/loggerd/encoderd openpilot/system/loggerd/sentry_loggerd
 pytest openpilot/system/sentry/tests
 ```
 
@@ -138,9 +138,29 @@ The native video tests additionally require PyAV (`pip install av`), and the Vis
 requires permission to create Unix sockets.
 The native state-reader regression compiles a small C++ program with the installed Cap'n Proto
 dependencies. It covers subscriptions before their first message, invalid/wrong-type messages,
-and expired leases. Panda, the recorder and watermark rendering share this guarded reader so
-none can crash merely because the sentry publisher starts later. The recorder is also tested
+and expired leases. The recorder and watermark rendering share this guarded reader so
+neither can crash merely because the sentry publisher starts later. The recorder is also tested
 with no publishers initially and staggered controller/panda/device messages.
+The native service-registry checks link the built messaging library and start panda,
+recorder and encoder subscriptions/publications without hardware. This catches stale
+native service tables that Python-only tests cannot detect. Unknown-service errors now
+print the missing name. The socketmaster object explicitly depends on both `services.py`
+and its generated header so additions invalidate the native library's build cache entry.
+Panda firmware and `pandad` retain their pre-sentry code; there is no `sentryState`
+subscription in panda. The selected battery cutoff is enforced in
+`openpilot/system/hardware/power_monitoring.py`, with capture stopping in `sentryd`
+at the same threshold. Cabin IR follows the existing camera exposure and timeout logic.
+
+If panda repeatedly connects and then aborts at the `services.count(...)` assertion on
+an older build, check the console error before treating it as a hardware/firmware failure.
+After updating, remove only the generated registry/library artifacts and let startup
+rebuild them:
+
+```sh
+cd /data/openpilot
+rm -f prebuilt openpilot/cereal/services.h openpilot/cereal/messaging/socketmaster.o openpilot/cereal/libsocketmaster.a
+sudo reboot
+```
 
 The tests cover brightness/noise rejection, sensitivity and centroid tracking, checkpoint
 validation, bounded one-shot GPS acquisition, expired leases, battery override, driving-process

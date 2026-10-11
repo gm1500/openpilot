@@ -16,7 +16,6 @@
 #include "common/timing.h"
 #include "common/util.h"
 #include "common/hardware/hw.h"
-#include "system/sentry/state.h"
 
 #define MAX_IR_PANDA_VAL 50
 #define CUTOFF_IL 400
@@ -281,7 +280,7 @@ void process_panda_state(Panda *panda, PubMaster *pm, bool engaged, bool is_onro
 
 void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control, bool is_onroad) {
   static Params params;
-  static SubMaster sm({"deviceState", "cabinCameraState", "sentryState"});
+  static SubMaster sm({"deviceState", "cabinCameraState"});
 
   static uint64_t last_cabin_camera_t = 0;
   static uint16_t prev_fan_speed = 999;
@@ -331,12 +330,10 @@ void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control, 
       }
     }
 
-    // Sentry uses automatic exposure-based IR whenever its cabin camera is selected.
-    auto sentry = sentry_state(sm["sentryState"], sm.rcv_time("sentryState"), nanos_since_boot());
-    bool sentry_active = !is_onroad && sentry && sentry->getCapture();
-    bool ir_disabled = sentry_active ? !(sentry->getCameraMask() & 2) :
-                                      (!is_onroad && params.getBool("DisableDriverCameraIR"));
-    if (nanos_since_boot() - last_cabin_camera_t > 1e9 || ir_disabled) ir_pwr = 0;
+    // Disable IR on input timeout or when requested offroad.
+    if (nanos_since_boot() - last_cabin_camera_t > 1e9 || (!is_onroad && params.getBool("DisableDriverCameraIR"))) {
+      ir_pwr = 0;
+    }
 
     // turn off IR leds if body
     if (!not_car_checked && is_onroad) {
