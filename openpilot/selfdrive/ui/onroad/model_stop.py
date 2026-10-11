@@ -77,8 +77,8 @@ class ModelStop:
     dt = now - self._update_time if self._update_time is not None else 0.
     state = sm['selfdriveState']
     candidate = None
-    # Confirmed stops use the published target without UI smoothing. Green is
-    # an approach preview, with separate display filtering and brief retention.
+    # Confirmed stops keep the published distance. Both stages project within
+    # the latest path; green additionally filters/retains its preview distance.
     if getattr(state, 'enabled', False) and not state.experimentalMode:
       self._distance = self._timestamp = None
       if not fresh('longitudinalPlan'):
@@ -172,29 +172,29 @@ class ModelStop:
       return None
     # The planner and UI may be on adjacent model frames. Clamp the preview to
     # current road geometry instead of sending a distant cue to the stop dock.
-    marker = self.predict_target(model, speed, self._approach_distance, clip_to_path=True)
+    marker = self.predict_target(model, speed, self._approach_distance, preview=True)
     if marker.position is None:
       return None
     return replace(marker, label='E2E APPROACH', trajectory_only=True)
 
-  def predict_target(self, model, speed, distance, *, clip_to_path=False):
-    """Project a distance; only an approach preview may clip to the latest path."""
+  def predict_target(self, model, speed, distance, *, preview=False):
+    """Clip only the drawing to current geometry; preserve a confirmed distance."""
     marker = StopMarker(None, 0., distance, speed < .3, 'STOP TARGET')
     arrays = (model.position.x, model.position.y, model.position.z, model.orientation.y, model.orientation.z)
     if any(len(a) != len(ModelConstants.T_IDXS) or not all(math.isfinite(x) for x in a) for a in arrays):
       return marker
     path = np.asarray(arrays[:3], dtype=float).T
     arc = np.r_[0., np.cumsum(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1))]
-    if clip_to_path:
-      distance = min(distance, float(arc[-1]))
-    if distance > arc[-1] + 1e-6:
-      return marker  # no invented projection beyond the available path
+    # Planner and UI consume adjacent model frames. A shorter new path is not
+    # missing geometry: use its endpoint instead of bouncing a distant target
+    # to the bottom-of-screen dock. Never extrapolate beyond the available road.
+    projected_distance = min(distance, float(arc[-1]))
     unique = np.r_[True, np.diff(arc) > 1e-6]
-    point = np.array([np.interp(distance, arc[unique], path[unique, i]) for i in range(3)])
-    pitch = float(np.interp(distance, arc[unique], np.unwrap(model.orientation.y)[unique]))
-    yaw = float(np.interp(distance, arc[unique], np.unwrap(model.orientation.z)[unique]))
+    point = np.array([np.interp(projected_distance, arc[unique], path[unique, i]) for i in range(3)])
+    pitch = float(np.interp(projected_distance, arc[unique], np.unwrap(model.orientation.y)[unique]))
+    yaw = float(np.interp(projected_distance, arc[unique], np.unwrap(model.orientation.z)[unique]))
     point += self.offset * np.array([math.cos(yaw) * math.cos(pitch), math.sin(yaw) * math.cos(pitch), -math.sin(pitch)])
-    return StopMarker(tuple(point), yaw, distance, speed < .3, 'STOP TARGET')
+    return StopMarker(tuple(point), yaw, projected_distance if preview else distance, speed < .3, 'STOP TARGET')
 
   def predict(self, model, speed, timestamp):
     intent = model_intent(model, speed)

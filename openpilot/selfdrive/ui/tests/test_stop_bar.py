@@ -150,7 +150,31 @@ class TestStopBar(unittest.TestCase):
     self.stop.update(self.sm, 1, 100.06)
     self.assertFalse(self.stop.marker.trajectory_only)
     self.assertEqual(self.stop.marker.distance, 15.)  # real stop keeps its exact planner distance
-    self.assertIsNone(self.stop.marker.position)
+    self.assertAlmostEqual(self.stop.marker.position[0], 12.8 + 1.52)
+
+  def test_adjacent_path_endpoints_do_not_send_confirmed_stop_to_dock(self):
+    self.sm['carState'].vEgo = 8.
+    self.sm['longitudinalPlan'].stopTarget.distance = 30.
+    for frame, length in enumerate((31., 29., 30.2, 28.8, 32.)):
+      prediction = model()
+      prediction.position.x *= length / 16.
+      self.sm['modelV2'] = prediction
+      now = 100. + frame * .05
+      self.sm.stamp(now)
+      self.stop.update(self.sm, 1, now)
+      marker = self.stop.marker
+      self.assertEqual(marker.distance, 30.)
+      self.assertAlmostEqual(marker.position[0], min(30., length) + 1.52)
+      def project(x, y, z):
+        return (1080. + 900. * y / x, 300. + 900. * z / x)
+      _, docked = stop_bar_geometry(marker, 1.5, project, self.rect)
+      self.assertFalse(docked)
+      self.assertEqual(self.sm['longitudinalPlan'].stopTarget.distance, 30.)
+    # A truly nearer planner target moves immediately, with no smoothing lag.
+    self.sm['longitudinalPlan'].stopTarget.distance = 12.
+    self.stop.update(self.sm, 1, now + .01)
+    self.assertAlmostEqual(self.stop.marker.position[0], 13.52)
+    self.assertEqual(self.stop.marker.distance, 12.)
 
   def test_green_preview_smooths_range_changes_in_both_directions(self):
     self.set_trajectory_only()

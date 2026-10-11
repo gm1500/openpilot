@@ -138,6 +138,22 @@ labeled STOP TARGET. Its display-only brake retention remains until release.
 Both stages share the same thickness and rounded trapezoid profile. Green
 previews the smoothed endpoint; yellow shows the committed stopping position.
 
+Confirmed STOP TARGET bars now also clip their drawing to the latest model
+path endpoint when the planner's target extends beyond that path. Adjacent
+planner/model frames can disagree on path length; this no longer sends a valid
+distant target to the near-screen dock. The displayed numeric distance stays
+exactly the planner's target, including during brake hold. No target smoothing,
+projection extrapolation or control change is added. Invalid geometry retains
+the existing unavailable-position behavior.
+
+On route 2eb, asynchronous UI replay of segments 27–29 reduced unprojectable
+moving STOP TARGET frames from 14 to zero in segment 28 and seven to zero in
+segment 29. Their seven and four road/dock toggles also became zero. Displayed
+distances, labels, brake-hold state and visibility were identical throughout.
+All 39 model-stop and stop-bar tests passed. This replay validates the geometry
+selection rather than a rendered camera recording or closed-loop control.
+
+
 Comma 3/3X draws a solid ground-perspective trapezoid with subtly rounded corners.
 Both edges stay horizontal; the far edge is 80% of the near edge's width, including
 when docked. Its fixed 450 px near-edge width is about 2.5 times
