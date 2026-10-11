@@ -6,6 +6,13 @@ import pytest
 from openpilot.common.params import Params
 from openpilot.system.loggerd import uploader as upload
 from openpilot.system.loggerd.xattr_cache import getxattr, setxattr
+from openpilot.system.sentry import connect
+
+
+@pytest.fixture(autouse=True)
+def isolate_account(tmp_path, monkeypatch):
+  monkeypatch.setattr(connect, 'credential_path', lambda: tmp_path/'persist'/'sentry_connect.json')
+  monkeypatch.setattr(connect, 'STATUS_PATH', tmp_path/'upload_status.json')
 
 
 @pytest.fixture
@@ -75,10 +82,12 @@ def test_sentry_upload_url_refusal_retains_http_status(uploader, monkeypatch, st
 
 
 @pytest.mark.parametrize('name', ['rlog.zst', 'fcamera.hevc', 'ecamera.hevc', 'dcamera.hevc'])
-def test_sentry_full_files_request_connect_batch_urls(uploader, monkeypatch, name):
+@pytest.mark.parametrize('account', [False, True])
+def test_sentry_full_files_request_connect_batch_urls(uploader, monkeypatch, name, account):
   directory = event_files(uploader)
   key, fn = directory.name+'/'+name, str(directory/name)
   uploader.api = SimpleNamespace(get_token=lambda: 'test-device-token')
+  monkeypatch.setattr(upload, 'account_token', lambda dongle: 'test-account-token' if account else None)
   signed_url = 'https://storage.example/authorized-upload'
   posts, puts = [], []
 
@@ -97,12 +106,59 @@ def test_sentry_full_files_request_connect_batch_urls(uploader, monkeypatch, nam
   assert uploader.upload(name, key, fn, upload.NetworkType.wifi, False)
   assert len(posts) == 1
   url, kwargs = posts[0]
-  assert url == upload.API_HOST+'/v1/test-device/upload_urls/'
+  assert url == connect.API_HOST+'/v1/test-device/upload_urls/'
   assert kwargs['json'] == {'paths': [key], 'expiry_days': 1}
-  assert kwargs['headers']['Authorization'] == 'JWT test-device-token'
+  assert kwargs['headers']['Authorization'] == ('JWT test-account-token' if account else 'JWT test-device-token')
   assert kwargs['allow_redirects'] is False
   assert puts == [(signed_url, b'footage', {'x-ms-blob-type': 'BlockBlob'})]
   assert getxattr(fn, upload.UPLOAD_ATTR_NAME) == upload.UPLOAD_ATTR_VALUE
+  assert connect.upload_status() == 'Last file uploaded'
+
+
+def test_pending_videos_resume_with_verified_account_without_restart(uploader, monkeypatch):
+  directory = event_files(uploader)
+  for name in ('qlog.zst', 'qcamera.ts'):
+    setxattr(str(directory/name), upload.UPLOAD_ATTR_NAME, upload.UPLOAD_ATTR_VALUE)
+  uploader.api = SimpleNamespace(get_token=lambda: 'device-token')
+
+  def post(url, **kwargs):
+    owner = kwargs['headers']['Authorization'] == 'JWT owner-token'
+    return SimpleNamespace(status_code=200 if owner else 412,
+                           text=json.dumps([{'url': 'https://storage.example/upload'}]) if owner else '{}')
+
+  monkeypatch.setattr(connect.requests, 'post', post)
+  monkeypatch.setattr(connect.requests, 'get', lambda *args, **kwargs: SimpleNamespace(
+    status_code=200, json=lambda: {'dongle_id': 'test-device', 'is_owner': True}))
+  puts = []
+  def put(url, **kwargs):
+    assert 'Authorization' not in kwargs['headers']
+    puts.append(kwargs['data'].read())
+    return SimpleNamespace(status_code=201, request=SimpleNamespace(headers={'Content-Length': '7'}))
+  monkeypatch.setattr(connect.requests, 'put', put)
+
+  assert uploader.step(upload.NetworkType.wifi, False) is False
+  assert connect.upload_status() == 'Connect rejected request (412)'
+  assert not puts
+  connect.authorize_account('owner-token', 'test-device', directory.name+'/fcamera.hevc')
+  assert not puts  # Setup only validates authorization; it never transfers video.
+  assert uploader.step(upload.NetworkType.wifi, True) is None
+  for _ in range(4):
+    assert uploader.step(upload.NetworkType.wifi, False) is True
+  assert puts == [b'footage']*4
+  assert uploader.next_file_to_upload(False) is None
+
+
+@pytest.mark.parametrize('status', [401, 403, 412])
+def test_account_refusal_keeps_file_pending_without_device_fallback(uploader, monkeypatch, status):
+  directory = event_files(uploader)
+  monkeypatch.setattr(upload, 'account_token', lambda dongle: 'owner-token')
+  uploader.api = SimpleNamespace(get_token=lambda: pytest.fail('Do not fall back after account refusal'))
+  monkeypatch.setattr(connect.requests, 'post', lambda *args, **kwargs: SimpleNamespace(status_code=status))
+  monkeypatch.setattr(connect.requests, 'put', lambda *args, **kwargs: pytest.fail('Refused URL must never cause a PUT'))
+  fn = str(directory/'ecamera.hevc')
+  assert not uploader.upload('ecamera.hevc', directory.name+'/ecamera.hevc', fn, upload.NetworkType.wifi, False)
+  assert getxattr(fn, upload.UPLOAD_ATTR_NAME) is None
+  assert connect.upload_status() == f'Connect rejected request ({status})'
 
 
 @pytest.mark.parametrize('payload', [[], {}, [{'url': ''}], [{'error': 'denied'}], [{'url': 'a'}, {'url': 'b'}]])
@@ -122,6 +178,7 @@ def test_preview_keeps_ordinary_upload_endpoint(uploader, monkeypatch, sentry):
   if not sentry:
     (directory/'.sentry').unlink()
   calls = []
+  monkeypatch.setattr(upload, 'account_token', lambda dongle: pytest.fail('Preview must not use the account token'))
 
   def get(endpoint, **kwargs):
     calls.append((endpoint, kwargs))

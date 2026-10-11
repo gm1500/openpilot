@@ -128,12 +128,16 @@ uploads Sentry's `rlog.zst` and every available selected-camera file (`fcamera.h
 toggle is required. Metered links retain the stock preview/log policy; full Sentry videos
 wait for an unmetered link. Disabling the narrow camera also disables the normal front preview.
 Full Sentry logs/videos request signed URLs through the documented batch upload endpoint
-(`POST /v1/:dongle_id/upload_urls/`), as Connect's Upload button does, using the device's
-own signed token. The previous automatic upload flow returned HTTP 412 for these files
-despite manual uploads working. Preview/qlog uploads retain their ordinary
-endpoint. The batch flow still requires server authorization; it does not override a refusal.
+(`POST /v1/:dongle_id/upload_urls/`), as Connect's Upload button does. Device authorization
+has returned HTTP 412 through both ordinary and batch endpoints even when manual Connect
+uploads work. An optional one-time setup uses the owner's account authorization, matching
+Connect's manual request. Preview/qlog uploads retain their ordinary device authorization.
+The batch flow still requires server authorization; it does not override a refusal.
 Uploader logs distinguish `sentry.upload_url_failed` (URL request) from
-`sentry.upload_put_failed` (file transfer). Only a successful transfer marks a file uploaded.
+`sentry.upload_put_failed` (file transfer), and record whether URL authorization used the
+device or account. The **Event uploads** settings row shows recent request/transfer failures
+or the last file's success; it does not claim that the whole route is uploaded.
+Only a successful transfer marks a file uploaded.
 Uploads resume from on-disk files and per-file upload attributes after a restart. Failed or
 refused Sentry uploads, including HTTP 401/403/412, remain pending and use the uploader's
 normal retry/backoff; they are not marked as successful. Within each priority tier, remaining
@@ -142,6 +146,35 @@ the other files in that tier. Failures include an explicit HTTP status in the up
 This does not override Connect's
 account or server policies. Native files, indexes and queue behavior are tested locally;
 server-side route recognition, map display and all-camera playback still need device validation.
+
+### Optional Connect account setup
+
+After saving a Sentry event, run over interactive SSH:
+
+```sh
+cd /data/openpilot
+python -m openpilot.system.sentry.connect
+```
+
+Open `https://jwt.comma.ai`, sign into the account that owns the device, then paste the
+account token into the hidden terminal prompt. Never paste it into a chat, command argument,
+or source file. Setup checks device ownership and requests a URL for an existing completed
+video before saving authorization. It does not transfer footage or display the signed URL.
+If the account also receives HTTP 412, setup stops without saving the token; the server's
+remaining precondition must be resolved before automatic uploads can use that account.
+
+The account credential is stored with mode 0600 at
+`/persist/comma/sentry_connect.json`, outside Params and route logs. It is bound to this device
+and the verified official comma API host. It authorizes access to the comma account, so use
+it only on a device you control. The token is sent only to the official API; video storage
+PUTs receive only the signed URL's upload headers. Once linked, the existing queue picks it up
+on its next normal retry (up to four minutes), without a reboot. No account token is needed
+for the ordinary preview/log uploader. If the token expires or is revoked, rerun setup.
+To remove the saved account authorization and return to device authorization:
+
+```sh
+python -m openpilot.system.sentry.connect --clear
+```
 
 Sentry no longer sets a preservation attribute or uses a separate event-storage budget.
 Its events follow normal route cleanup when storage is low, including events from older
