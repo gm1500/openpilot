@@ -10,7 +10,7 @@ from openpilot.common.hardware import HARDWARE
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
-from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH
+from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH, CAMERA_WARMUP_SECONDS
 from openpilot.system.sentry.clock import SentryClock
 from openpilot.system.sentry.location import vehicle_identity, parked_location, gps_location
 from openpilot.system.sentry.motion import MotionDetector, Motion
@@ -68,7 +68,7 @@ def main():
   pm = messaging.PubMaster(['sentryState'])
   rk = Ratekeeper(5, print_delay_threshold=None)
   off_since = None
-  arm_since = None
+  ready_since = None
   location = None
   cameras = {}
   cooldown = False
@@ -87,10 +87,11 @@ def main():
       session = not phase
       capture, gps_request = False, False
       best, motion_camera = Motion(), 2
+      triggered = False
       camera_mask = sum(1 << i for i, key in enumerate(('SentryNarrowCamera', 'SentryCabinCamera', 'SentryWideCamera')) if setting(params, key))
       if not session:
         off_since, location, cameras = None, None, {}
-        arm_since = None
+        ready_since = None
         record_until, cooldown, gps_finished, low_since = 0., False, False, None
         cutoff_reason = ''
       else:
@@ -147,50 +148,56 @@ def main():
         if capture:
           if camera_mask != last_camera_mask:
             cameras.clear()
-            arm_since = None
+            ready_since = None
           last_camera_mask = camera_mask
           arm_delay = setting(params, 'SentryArmDelay')
-          armed = arm_since is not None and now-arm_since >= arm_delay
+          armed = ready_since is not None and now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
           for stream in (2, 1, 0):
             if camera_mask & (1 << stream):
               if stream not in cameras:
                 cameras[stream] = CameraMotion(stream)
               result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'), armed)
+              triggered |= result.triggered
               # Wide cameras drive the eye. Narrow camera can still trigger recording.
-              if result.active and (not best.active or (stream in (1, 2) and result.score > best.score)):
+              if stream in (1, 2) and result.active and (not best.active or result.score > best.score):
                 best, motion_camera = result, stream
           ready = sum(0 <= now-camera.last_received < 1. for camera in cameras.values())
           if ready != len(cameras):
             phase = f'Waiting for cameras ({ready}/{len(cameras)})'
-            arm_since = None
+            ready_since = None
           elif not recent(sm, 'sentryRecorderState', now):
             phase = 'Starting recorder'
-            arm_since = None
+            ready_since = None
           elif not sm['sentryRecorderState'].bufferBytes:
             phase = 'Waiting for encoded video'
-            arm_since = None
+            ready_since = None
           else:
-            # The selected delay starts with working video, not the offroad
-            # transition. Delayed camera startup must get the entire warmup.
-            if arm_since is None:
-              arm_since = now
-            remaining = max(0., arm_delay-(now-arm_since))
-            phase = f'Arming: {math.ceil(remaining)} s' if remaining else 'Watching'
-          armed = arm_since is not None and now-arm_since >= arm_delay
+            # Camera exposure gets its own settling period before the user's
+            # full arming delay. Both start only after working video arrives.
+            if ready_since is None:
+              ready_since = now
+            warmup_remaining = CAMERA_WARMUP_SECONDS-(now-ready_since)
+            if warmup_remaining > 0:
+              phase = f'Camera warmup: {math.ceil(warmup_remaining)} s'
+            else:
+              remaining = max(0., arm_delay+warmup_remaining)
+              phase = f'Arming: {math.ceil(remaining)} s' if remaining else 'Watching'
+          armed = ready_since is not None and now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
           if not armed:
             best = Motion()  # Exposure ramp cannot trigger an event or the eye.
+            triggered = False
           manual = params.get_bool('SentryManualTrigger')
           if manual:
             params.remove('SentryManualTrigger')
-          if manual or (armed and best.active):
+          if manual or triggered:
             record_until = now+setting(params, 'SentryPostSeconds')
           if sm['sentryRecorderState'].recording and now-sm.recv_time['sentryRecorderState'] < 2.:
             phase = 'Recording'
-            if best.active or manual:
+            if triggered or manual:
               record_until = now+setting(params, 'SentryPostSeconds')
         else:
           cameras.clear()
-          arm_since = None
+          ready_since = None
           record_until = 0.
         error = sm['sentryRecorderState'].error if now-sm.recv_time['sentryRecorderState'] < 2. else ''
         if capture and error:

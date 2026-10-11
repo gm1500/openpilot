@@ -7,6 +7,7 @@ import time
 
 RUNTIME_PATH = Path('/dev/shm/openpilot_sentry.json')
 LEASE_SECONDS = 2.0
+CAMERA_WARMUP_SECONDS = 10.
 ARM_DELAYS = (15, 30, 60)
 DEFAULTS = {
   'SentryEnabled': True, 'SentrySensitivity': 75, 'SentryArmDelay': 30,

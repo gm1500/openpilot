@@ -3,7 +3,7 @@ import time
 
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.ui_state import ui_state, device
-from openpilot.system.sentry.config import setting, RANGES, ARM_DELAYS
+from openpilot.system.sentry.config import setting, RANGES, ARM_DELAYS, CAMERA_WARMUP_SECONDS
 from openpilot.system.sentry.clock import time_status
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.widgets import Widget
@@ -105,18 +105,20 @@ class SentryLayout(Widget):
       self._enable_toggle,
       ListItem('Cameras', description='Each camera switches independently. Green means on. Cabin infrared adjusts automatically.',
                action_item=SentryCameraButtons(self.params)),
-      self.toggle('SentryEye', 'Red eye', 'A large, bright eye follows motion after the screen times out. Tap to dismiss until the next timeout.'),
+      self.toggle('SentryEye', 'Red eye', 'Reacts immediately to smaller movements after the screen times out. ' +
+                  'Saving requires a larger region moving for 3 seconds. Tap to dismiss until the next timeout.'),
       self.toggle('SentryWatermark', 'Video watermark',
                   'Local timestamp with UTC offset, camera name and parking coordinates when available. Uses UTC until the timezone is known.'),
-      ListItem('Arming delay', description='Camera exposure warmup after live video is ready. Footage buffers during the delay; motion and the eye wait.',
+      ListItem('Arming delay', description=f'Starts after {CAMERA_WARMUP_SECONDS:g} seconds of camera warmup. ' +
+               'Footage buffers throughout; motion saves and the eye wait until both stages finish.',
                action_item=SentryArmButtons(self.params)),
       SentrySlider(self.params, 'SentrySensitivity', 'Motion sensitivity'),
       button_item('Save an event now', 'SAVE', callback=lambda: self.params.put_bool('SentryManualTrigger', True),
                   enabled=lambda: ui_state.sentry_active),
       text_item('Buffered footage', self.buffer_status),
-      text_item('Current time', lambda: time_status(self.params),
+      text_item('Current time', self.clock_status,
                 'Uses the device clock, synchronized by the system through the network or GPS. ' +
-                'The local timezone is remembered from the last known position; continuous GPS is not needed.'),
+                'Uses the remembered geographic timezone, or the cellular network offset when available. Continuous GPS is not needed.'),
       text_item('Battery voltage', self.voltage_status),
     ]
     for key, title, unit, step in (
@@ -170,6 +172,11 @@ class SentryLayout(Widget):
     if not sm.valid['peripheralState'] or not 0 <= time.monotonic()-sm.recv_time['peripheralState'] < 3.:
       return 'Unavailable'
     return f"{sm['peripheralState'].voltage/1000.:.1f} V"
+
+  def clock_status(self):
+    sm = ui_state.sm
+    fresh = sm.valid['sentryState'] and 0 <= time.monotonic()-sm.recv_time['sentryState'] < 2.
+    return time_status(self.params, sm['sentryState'] if fresh else None)
 
   def buffer_status(self):
     state = ui_state.sm['sentryRecorderState']

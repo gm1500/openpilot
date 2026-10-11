@@ -101,10 +101,15 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
     with (tmp_path/'recorder.log').open('w') as logfile:
       process = subprocess.Popen([str(BINARY)], cwd=BINARY.parent, stdout=logfile, stderr=subprocess.STDOUT)
       try:
+        record_until = 0
         def control(trigger=False, ignition=False, capture=True):
+          nonlocal record_until
+          if trigger:
+            record_until = time.monotonic_ns()+10_000_000_000
           msg = messaging.new_message('sentryState', valid=True)
           msg.sentryState.capture = capture
-          msg.sentryState.recordUntilMonoTime = time.monotonic_ns()+10_000_000_000 if trigger else 0
+          msg.sentryState.motion = True  # Eye-only movement must never save or bookmark.
+          msg.sentryState.recordUntilMonoTime = record_until
           msg.sentryState.locationValid = True
           msg.sentryState.locationSource = 'slcParked'
           msg.sentryState.locationSavedAt = time.time()-600  # noqa: TID251
@@ -151,7 +156,16 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
         await_state(lambda s: s.bufferBytes > 10000)
         assert not list((tmp_path/'routes').iterdir()), 'idle capture wrote a route to disk'
         assert params.get('RouteCount') is None
+        trigger_time = time.monotonic_ns()
         await_state(lambda s: s.recording, trigger=True)
+        if stop_reason == 'disabled':
+          # Keep visual motion active through the tail without confirming new
+          # motion. It must not create extra markers, even after the quiet gap.
+          deadline = time.monotonic()+5.5
+          while time.monotonic() < deadline:
+            control()
+            status.update(50)
+          await_state(lambda s: s.recording and status.updated['sentryRecorderState'], trigger=True)
         if stop_reason == 'manager':
           # The manager can observe the master switch before the controller does.
           # Its normal stop signal must finalize an event that is still recording.
@@ -182,6 +196,12 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
         all_events = [e for directory in dirs for e in messages(directory/'qlog.zst')]
         assert any(e.which() == 'sentryState' and e.sentryState.locationSource == 'slcParked' for e in all_events)
         assert any(e.which() == 'gpsLocation' and e.gpsLocation.source == 'fusion' for e in all_events)
+        for filename in ('qlog.zst', 'rlog.zst'):
+          bookmarks = [e for directory in dirs for e in messages(directory/filename) if e.which() == 'userBookmark']
+          assert len(bookmarks) == (2 if stop_reason == 'disabled' else 1)
+          assert trigger_time <= bookmarks[0].logMonoTime <= time.monotonic_ns()
+          if len(bookmarks) == 2:
+            assert bookmarks[1].logMonoTime-bookmarks[0].logMonoTime >= 5_000_000_000
       finally:
         if process.poll() is None:
           process.send_signal(signal.SIGINT)

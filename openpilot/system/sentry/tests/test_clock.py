@@ -49,6 +49,59 @@ def test_timezone_failure_is_utc_and_cannot_stop_capture(tmp_path, monkeypatch):
   assert current._worker is worker  # Back off failed lookups, never busy-loop.
 
 
+@pytest.mark.parametrize('offset', [-21600, 18900, 0])
+def test_cellular_offset_without_gps_or_timezone_data(tmp_path, monkeypatch, offset):
+  params = Params(str(tmp_path/'params'))
+  current = clock.SentryClock(params)
+  modem = {'network_timezone': offset, 'network_timezone_mono': 100.}
+  monkeypatch.setattr(clock, 'HARDWARE', SimpleNamespace(get_modem_state=lambda: modem))
+  current.update(None, 101.)
+  assert current.snapshot(1791705600.) == ('cellular', offset)
+  assert current._worker is None
+  assert params.get('SentryTimeZone') is None  # Do not persist a numeric DST offset as a timezone.
+  status = clock.time_status(params, SimpleNamespace(timeZone='cellular', utcOffsetSeconds=offset))
+  assert status.endswith(' (cellular)') and 'UTC' in status
+  current.update(None, 100.+clock.CELL_TIME_MAX_AGE)
+  assert current.snapshot(1791705600.) == ('', 0)
+
+
+@pytest.mark.parametrize('modem', [
+  {}, [], None, {'network_timezone': -21600},
+  {'network_timezone': -21600, 'network_timezone_mono': 101.},
+  {'network_timezone': True, 'network_timezone_mono': 100.},
+  {'network_timezone': -21601, 'network_timezone_mono': 100.},
+  {'network_timezone': 15*3600, 'network_timezone_mono': 100.},
+  {'network_timezone': -21600, 'network_timezone_mono': float('nan')},
+])
+def test_invalid_cellular_offset_cannot_change_time(modem):
+  assert clock.cellular_offset(modem, 100.) is None
+
+
+def test_cached_geographic_timezone_survives_modem_read_error(tmp_path, monkeypatch):
+  params = Params(str(tmp_path/'params'))
+  params.put('SentryTimeZone', 'America/Edmonton', block=True)
+  current = clock.SentryClock(params)
+
+  def fail():
+    raise OSError('modem state unavailable')
+
+  monkeypatch.setattr(clock, 'HARDWARE', SimpleNamespace(get_modem_state=fail))
+  current.update(None, 100.)
+  assert current.snapshot(1791705600.) == ('America/Edmonton', -21600)
+
+
+def test_old_parked_position_can_resolve_timezone_without_becoming_a_fix(tmp_path):
+  params = Params(str(tmp_path/'params'))
+  checkpoint = {'latitude': 53.5, 'longitude': -113.5, 'savedAt': 1.}
+  params.put('MapParkedPosition', checkpoint, block=True)
+  current = clock.SentryClock(params)
+  current._finder = SimpleNamespace(timezone_at=lambda **kwargs: 'America/Edmonton')
+  current.update(None, 100.)
+  current._worker.join(timeout=2)
+  assert current.snapshot(1791705600.) == ('America/Edmonton', -21600)
+  assert params.get('MapParkedPosition') == checkpoint
+
+
 def test_native_watermark_timestamp_and_utc_fallback(tmp_path):
   compiler = shlex.split(os.environ.get('CXX', 'c++'))
   if not compiler or not shutil.which(compiler[0]):

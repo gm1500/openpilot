@@ -39,11 +39,12 @@ def test_startup_fade_is_learned_during_warmup():
     assert not d.update(image, 1.+i*.2, 75, armed=False).active
   for i in range(15):
     assert not d.update(scene, 31.+i*.2, 75).active
-  moving = scene.copy()
-  moving[20:40, 85:110] += 80
-  for i in range(3):
+  for i in range(17):
+    moving = scene.copy()
+    moving[20:40, 70+i:95+i] += 80
     result = d.update(moving, 34.+i*.2, 75)
-  assert result.active
+    assert result.active
+    assert result.triggered == (i >= 15)
   assert .7 < result.x < .85
 
 
@@ -51,29 +52,87 @@ def test_local_motion_tracks_position_and_needs_persistence():
   d = MotionDetector()
   base = np.full((80, 128), 70, dtype=np.float32)
   warm(d, base)
-  image = base.copy()
-  image[20:40, 85:110] += 100
-  assert not d.update(image, 3.).active
-  assert not d.update(image, 3.2).active
-  result = d.update(image, 3.4)
-  assert result.active
+  for i in range(17):
+    image = base.copy()
+    image[20:40, 75+i:100+i] += 100
+    result = d.update(image, 3.+i*.2, 75)
+    assert result.active  # Eye reacts on the first sample, well before saving.
+    assert result.triggered == (i >= 15)
   assert .7 < result.x < .85 and .3 < result.y < .5
   # Loss of camera continuity re-arms instead of comparing stale pictures.
-  assert not d.update(image, 5.).active
+  assert not d.update(image, 8.).triggered
 
 
 def test_sensitivity_detects_smaller_changes():
   base = np.full((80, 128), 70, dtype=np.float32)
-  image = base.copy()
-  image[20:30, 85:97] += 20
   result = []
   for sensitivity in (1, 100):
     d = MotionDetector()
     warm(d, base)
-    for i in range(3):
+    for i in range(17):
+      image = base.copy()
+      image[20:40, 70+i:86+i] += 20
       m = d.update(image, 3.+i*.2, sensitivity)
-    result.append(m.active)
+    result.append(m.triggered)
   assert result == [False, True]
+
+
+@pytest.mark.parametrize('after', ['gone', 'stationary'])
+def test_short_motion_and_background_afterimage_do_not_save(after):
+  base = np.full((80, 128), 70, dtype=np.float32)
+  d = MotionDetector()
+  warm(d, base)
+  for i in range(10):
+    image = base.copy()
+    image[20:40, 60+i:85+i] += 100
+    result = d.update(image, 3.+i*.2, 75)
+    assert result.active and not result.triggered
+  resting = base if after == 'gone' else image
+  for i in range(40):
+    result = d.update(resting, 5.+i*.2, 75)
+    assert not result.triggered
+    if i:
+      assert not result.active
+
+
+def test_small_motion_moves_eye_without_saving():
+  base = np.full((80, 128), 70, dtype=np.float32)
+  d = MotionDetector()
+  warm(d, base)
+  for i in range(40):
+    image = base.copy()
+    x = 5+(4*i) % 110
+    image[30:35, x:x+5] += 80
+    result = d.update(image, 3.+i*.2, 100)
+    assert result.active
+    assert not result.triggered
+
+
+def test_scattered_snow_cannot_combine_area_into_a_trigger():
+  base = np.full((80, 128), 70, dtype=np.float32)
+  d = MotionDetector()
+  warm(d, base)
+  for i in range(60):
+    image = base.copy()
+    for y in range(8, 70, 14):
+      for x in range(8, 110, 16):
+        shift = i % 3
+        image[y+shift:y+shift+5, x+shift:x+shift+5] += 100
+    assert np.count_nonzero(image-base) > .06*image.size
+    result = d.update(image, 3.+i*.2, 100)
+    assert result.active  # The visual cue is deliberately more sensitive.
+    assert not result.triggered
+
+
+def test_unrelated_regions_cannot_share_the_confirmation_timer():
+  base = np.full((80, 128), 70, dtype=np.float32)
+  d = MotionDetector()
+  warm(d, base)
+  for i in range(20):
+    image = base.copy()
+    x = 8+i if i < 10 else 80+i-10
+    image[20:40, x:x+25] += 100
+    assert not d.update(image, 3.+i*.2, 75).triggered
 
 
 def test_parked_location_identity_age_accuracy_and_provenance():

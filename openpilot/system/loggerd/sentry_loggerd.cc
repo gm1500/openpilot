@@ -156,6 +156,8 @@ public:
   kj::Array<capnp::word> init = logger_build_init_data(true);
   int first_segment = 0, closed_segment = -1;
   uint64_t event_start = 0, retry_after = 0, storage_check = 0;
+  uint64_t last_motion = 0;
+  uint64_t last_record_until = 0;
 
   ~Recorder() { finish(); }
   bool disk_ok() {
@@ -181,6 +183,8 @@ public:
     buffered = 0;
     source_segments.fill(-1);
     source_times.fill(0);
+    last_motion = 0;
+    last_record_until = 0;
   }
   void save(int segment, const Packet &packet) {
     if (segment < first_segment || segment <= closed_segment) return;
@@ -221,7 +225,15 @@ public:
       else old.start = old.packets.front().time;
     }
   }
-  void tick(uint64_t record_until, uint64_t now) {
+  void tick(uint64_t record_until, uint64_t now, uint64_t control_time) {
+    // Only confirmed motion or a manual Save advances the recording deadline.
+    // The immediate eye signal must never create bookmarks or extend a route.
+    uint64_t motion_time = record_until > now && record_until > last_record_until ? control_time : 0;
+    last_record_until = record_until;
+    // One standard route bookmark per motion burst, after five quiet seconds.
+    // Write it directly to this route: the UI owns the live userBookmark topic.
+    bool bookmark = motion_time && (!last_motion || motion_time >= last_motion+5*SECOND);
+    if (motion_time) last_motion = motion_time;
     if (!route.empty()) {
       if (now >= record_until || now-event_start >= 15*60*SECOND) finish();
       else if (now-storage_check > 5*SECOND) {
@@ -252,6 +264,14 @@ public:
       first_segment = begin->first;
       closed_segment = first_segment-1;
       for (auto it = begin; it != ring.end(); ++it) for (const auto &packet : it->second.packets) save(it->first, packet);
+      bookmark = true;  // Also mark manual saves and the start of a split event.
+    }
+    if (bookmark && !route.empty()) {
+      MessageBuilder message;
+      auto event = message.initEvent(true);
+      event.setLogMonoTime(motion_time ? motion_time : now);
+      event.initUserBookmark();
+      append(-1, event.asReader(), now);
     }
   }
 };
@@ -327,7 +347,7 @@ int main() {
         recorder.append(-1, event.asReader(), now);
         location_logged = now;
       }
-      recorder.tick(state.getRecordUntilMonoTime(), now);
+      recorder.tick(state.getRecordUntilMonoTime(), now, sm["sentryState"].getLogMonoTime());
     }
     if (now-flushed >= SECOND) {
       for (auto &[number, segment] : recorder.saved) segment->flush();

@@ -5,7 +5,7 @@ import pytest
 from opendbc.car.structs import car
 from openpilot.cereal import log
 from openpilot.system.sentry import sentryd
-from openpilot.system.sentry.config import DEFAULTS
+from openpilot.system.sentry.config import DEFAULTS, CAMERA_WARMUP_SECONDS
 from openpilot.system.sentry.location import vehicle_identity
 from openpilot.system.sentry.motion import Motion
 
@@ -111,7 +111,8 @@ def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp
 
 
 @pytest.mark.parametrize('arm_delay', [15, 30, 60])
-def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_path, arm_delay):
+@pytest.mark.parametrize('eye_only', [False, True])
+def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_path, arm_delay, eye_only):
   class Params(dict):
     get_bool = dict.get
     def remove(self, key):
@@ -120,9 +121,11 @@ def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_
   params = Params(DEFAULTS | {'IsOffroad': True, 'SentryArmDelay': arm_delay, 'SentryPostSeconds': 10})
   clock = [100.]
   ready_at = 145.
-  drop_at = ready_at+arm_delay+5.
+  arm_at = ready_at+CAMERA_WARMUP_SECONDS
+  drop_at = arm_at+arm_delay+5.
   restart_at = drop_at+3.
-  stop_at = restart_at+arm_delay+5.
+  rearm_at = restart_at+CAMERA_WARMUP_SECONDS
+  stop_at = rearm_at+arm_delay+5.
   sent = {}
   samples = []
 
@@ -161,7 +164,9 @@ def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_
       self.last_received = now
       # Deliberately return motion even while unarmed: the controller must gate
       # both automatic requests and the eye independently of the detector.
-      return Motion(True, .2, .8, .4)
+      ready = arm_at if now < drop_at else rearm_at
+      confirmed = not eye_only and (not armed or now >= ready+arm_delay+3.)
+      return Motion(True, .2, .8, .4, triggered=confirmed)
 
   class Finished(Exception):
     pass
@@ -188,17 +193,22 @@ def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_
   with pytest.raises(Finished):
     sentryd.main()
 
-  assert sent[ready_at]['phase'] == f'Arming: {arm_delay} s'
-  assert all(not s['motion'] for now, s in sent.items() if now < ready_at+arm_delay)
+  assert sent[ready_at]['phase'] == f'Camera warmup: {CAMERA_WARMUP_SECONDS:g} s'
+  # Manual saves bypass both delays without letting exposure changes extend them.
+  # The manual tail finishes at arm_at+2; the arming clock must still be running.
+  assert sent[arm_at+3.]['phase'] == f'Arming: {arm_delay-3} s'
+  assert all(not s['motion'] for now, s in sent.items() if now < arm_at+arm_delay)
   assert all(s['recordUntilMonoTime'] == 0 for now, s in sent.items() if now < ready_at+2.)
   manual_until = int((ready_at+12.)*1e9)
-  assert all(s['recordUntilMonoTime'] == manual_until for now, s in sent.items() if ready_at+2. <= now < ready_at+arm_delay)
-  assert min(now for now, armed in samples if armed) == ready_at+arm_delay
-  assert sent[ready_at+arm_delay+1.]['motion']
-  assert sent[ready_at+arm_delay+1.]['recordUntilMonoTime'] > manual_until
-  assert all(not s['motion'] for now, s in sent.items() if drop_at+1. <= now < restart_at+arm_delay)
-  assert sent[restart_at+arm_delay-1.]['phase'] == 'Arming: 1 s'
-  assert sent[restart_at+arm_delay+1.]['motion']
+  assert all(s['recordUntilMonoTime'] == manual_until for now, s in sent.items() if ready_at+2. <= now < arm_at+arm_delay)
+  assert min(now for now, armed in samples if armed) == arm_at+arm_delay
+  assert sent[arm_at+arm_delay+1.]['motion']
+  assert sent[arm_at+arm_delay+1.]['recordUntilMonoTime'] == manual_until
+  assert (sent[arm_at+arm_delay+3.2]['recordUntilMonoTime'] > manual_until) == (not eye_only)
+  assert all(not s['motion'] for now, s in sent.items() if drop_at+1. <= now < rearm_at+arm_delay)
+  assert sent[rearm_at]['phase'] == f'Arming: {arm_delay} s'
+  assert sent[rearm_at+arm_delay-1.]['phase'] == 'Arming: 1 s'
+  assert sent[rearm_at+arm_delay+1.]['motion']
   assert not sent[stop_at]['capture'] and not sent[stop_at]['motion']
   assert sent[stop_at]['recordUntilMonoTime'] == 0
 

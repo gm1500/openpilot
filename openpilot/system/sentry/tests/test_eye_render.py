@@ -20,6 +20,7 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
   # drawing destination with callbacks, so API mismatches still raise normally.
   calls = []
   glows = []
+  reflections = []
   functions = {
     'draw_rectangle_rec': 'DrawRectangleRec',
     'draw_circle_gradient': 'DrawCircleGradient',
@@ -38,6 +39,8 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
           glows.append((args[0], args[1], args[2]))
         else:
           glows.append((args[0].x, args[0].y, args[1]))
+      if name == 'draw_ellipse':
+        reflections.append((args[0], args[1], args[2], args[3]))
     callback = rl.ffi.callback(signature, capture)
     monkeypatch.setattr(rl, python_name, rl._wrap_function(callback))
 
@@ -50,15 +53,30 @@ def test_eye_first_visible_frame_and_hidden_frame(monkeypatch, gradient_api):
   device.sentry_eye_visible = True
   eye._render(rect)
   assert calls.count('draw_circle_gradient') == 3
-  assert calls.count('draw_ellipse') == 1
+  assert calls.count('draw_ellipse') == 12  # Six highlights, each with a soft halo.
   assert glows[0][2] == 380  # Original 95 px glow, now four times the diameter.
+  # At the center, the three lights on either side have identical mirrored shapes.
+  left, right = reflections[1:6:2], reflections[7:12:2]
+  for l, r in zip(left, right, strict=True):
+    assert l[0]+r[0] == rect.width
+    assert l[1:] == r[1:]
   for x, y in ((0., 0.), (0., 1.), (1., 0.), (1., 1.)):
     eye.x, eye.y = x, y
     glows.clear()
+    reflections.clear()
     eye._render(rect)
     for cx, cy, radius in glows:
       assert radius <= cx <= rect.width-radius
       assert radius <= cy <= rect.height-radius
+    # Reflections follow the display position toward its center, staying inside
+    # the lens even at the corners. The red light itself stays at the eye center.
+    cx, cy, _ = glows[0]
+    reflected_x = sum(r[0] for r in reflections)/len(reflections)
+    reflected_y = sum(r[1] for r in reflections)/len(reflections)
+    assert (reflected_x-cx)*(rect.width/2-cx) > 0
+    assert (reflected_y-cy)*(rect.height/2-cy) > 0
+    for rx, ry, width, height in reflections:
+      assert ((abs(rx-cx)+width)**2+(abs(ry-cy)+height)**2)**.5 < 44*4
 
   calls.clear()
   device.sentry_eye_visible = False

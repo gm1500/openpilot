@@ -5,7 +5,7 @@ Branch: `sentry-mode-poc`, based on `boat-anchor` at `2ee8df154017362e3a791c90d7
 Manage the feature under **Settings → Sentry** while parked. On first use it defaults on;
 previously saved enable/disable choices are retained, including an explicit STOP.
 The status row reports ignition/offroad/health blockers, missing camera frames, missing encoded
-video or an unavailable controller. An arming countdown appears once video is arriving; the
+video or an unavailable controller. Camera warmup and arming have separate countdowns once video is arriving; the
 buffer counter confirms capture. The voltage row shows the current vehicle supply reading.
 **Save an event now** also works during arming once capture has started.
 This implementation is ready for parked hardware evaluation; comma 3X encoding,
@@ -16,16 +16,23 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
 - Requires a comma 3X, a recent valid panda/device state, ignition off and `IsOffroad`.
   Driving controls, modeld and locationd are never started for sentry. Ignition/onroad
   stops capture; driving and sentry encoders cannot run simultaneously.
-- Starts filling the RAM buffer after the offroad transition. The selected 15/30/60-second
-  arming delay (default 30) starts only once all selected cameras deliver frames and the
-  recorder has buffered video. The detector learns the changing exposure during this delay;
-  automatic events and the eye wait until it finishes. Manual saves still work during warmup.
-  Missing frames/recording readiness or a capture restart resets the delay. Camera
+- Starts filling the RAM buffer after the offroad transition. Once all selected cameras
+  deliver frames and the recorder has buffered video, a separate 10-second camera warmup
+  runs before the selected 15/30/60-second arming delay (default 30). With the default, motion
+  arms 40 seconds after video is ready. The detector learns the changing exposure throughout
+  both stages; automatic events and the eye wait until both finish. Manual saves work during
+  either stage. Missing frames/recording readiness or a capture restart resets both delays. Camera
   preview/livestream pauses capture.
-- Samples all selected cameras at 5 Hz for luminance changes. Exposure compensation,
-  neighboring-pixel support and three consecutive detections reduce noise. The sensitivity
-  slider changes both minimum area and pixel-change thresholds. This is motion detection;
-  shadows, rain, reflections and passing traffic can still trigger it. There are no object,
+- Samples all selected cameras at 5 Hz for luminance changes. The eye reacts immediately
+  to smaller local movements. Saving instead requires about three seconds of sustained
+  movement in the same connected region, allowing gaps no longer than half a second.
+  Each region must individually occupy 1.5–6% of the sampled image (2.625% at the default
+  sensitivity of 75); scattered snowflakes cannot pool their area to meet the threshold.
+  Exposure compensation, neighboring-pixel support and frame-to-frame change checks reject
+  noise and stationary background afterimages. The sensitivity slider changes pixel-change
+  thresholds and minimum saving area. This is motion detection, not object identification;
+  large nearby droplets, heavy snow, shadows, reflections and passing traffic can still
+  trigger it. Small/distant objects or brief movement may not save an event. There are no
   person, vehicle or license-plate rules in this version.
 - All three cameras default on. Device targets are 526×330, 20 fps, HEVC at 256 kbit/s
   per camera, plus a separate 256 kbit/s H264 front preview. The nominal five-minute
@@ -35,10 +42,12 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
 - No route directories or video files are written while merely watching. Runtime control
   uses tmpfs. Existing system logs and battery-accounting Params still write normally;
   this is not a promise of zero device-wide NAND writes.
-- Motion saves available preceding native minute segments, then continues through activity
+- Confirmed motion saves available preceding native minute segments, then continues through activity
   and the default 60-second tail. To preserve normal segment boundaries, pre-roll is rounded
   down to complete available source-segment starts: normally 4–5 minutes with a full buffer,
-  less during startup or RAM pressure. Events split after 15 minutes of continuous activity.
+  less during startup or RAM pressure. The confirmation period is included in this pre-roll.
+  Only confirmed motion or manual Save extends the tail; eye-only movement does not.
+  Events split after 15 minutes of continuous activity.
 - On ignition, shutdown, stale controller/health, thermal pause or disable, recording ends
   and the RAM buffer is discarded. This version does not retain the unsaved ring across reboots.
 
@@ -62,9 +71,18 @@ time comes from the existing device clock (AGNOS network time / openpilot `timed
 Sentry resolves the timezone offline from the parking position or GPS that is already
 available while driving, and remembers its IANA name in `SentryTimeZone`. The resolver runs
 in a background thread so loading the timezone dataset cannot stall ignition handling.
-The cached timezone handles daylight-saving changes without a new GPS fix. If neither a
-timezone nor a usable position is available, time is explicitly labeled UTC; recording
-continues. There is no extra GPS request just to keep the clock running.
+The cached timezone handles daylight-saving changes without a new GPS fix. An old SLC
+checkpoint can also identify the timezone without qualifying as the route's current position.
+If no geographic timezone is available, the existing modem daemon queries the EG25 modem's
+network-supplied local time once per minute with read-only `AT+QLTS=2`. Sentry reads its UTC
+offset from the daemon's RAM state, without opening a second AT connection or changing modem
+settings. This offset already includes any network DST adjustment and is not stored as an
+IANA timezone. The settings label identifies the cellular source, and watermarks use the
+numeric offset. It requires the cellular network to supply time, not an active data session;
+unsupported/unsynchronized modems or readings older than five minutes are ignored.
+If neither source is available, time remains explicitly labeled UTC and recording continues.
+The device's system clock and native log timestamps are unchanged. There is no extra GPS
+request just to keep the clock running.
 
 ## Saved events and upload
 
@@ -74,6 +92,14 @@ Each event gets its own native route identifier and rebased segment/encode index
 - native `rlog.zst` / `qlog.zst`, init data, saved car parameters, camera states,
   sentry metadata, timestamps, position estimate and segment/route sentinels;
 - an internal `.sentry` marker for uploader identification and lock recovery.
+
+The recorder writes standard `userBookmark` events into both logs at the confirmed trigger,
+and again when a new confirmed burst follows at least five seconds without confirmation.
+Manual saves and new split routes also get a marker. Continuous movement does not create
+a bookmark on every sample, and immediate eye-only movement does not create bookmarks.
+These are written directly to the saved route; the UI retains ownership of the live bookmark
+publisher. Log contents are tested locally; bookmark appearance in Connect still needs
+verification against an uploaded device event.
 
 Logs and preview enter the ordinary uploader. Once those are queued, it automatically
 uploads Sentry's `rlog.zst` and every available selected-camera file (`fcamera.hevc`,
@@ -130,7 +156,11 @@ and maximum parked time remain the shutdown limits. Upload behavior is automatic
 settings row.
 
 The eye follows the approximate image position of motion from the front wide or cabin lens;
-the cabin direction is mirrored. Its diameter is four times the original, including the glow,
+the cabin direction is mirrored. It reacts without the recording confirmation delay or larger
+area threshold, while still respecting camera warmup, arming and touch suppression.
+Three glass reflections on each side form a symmetric pattern
+at the display center and shift subtly toward the display center as the eye moves.
+Its diameter is four times the original, including the glow,
 and its full extent stays within the display. It appears on black at 100% brightness only after the normal
 screen timeout, and fades off when motion stops. **Any touch clears the eye and suppresses it
 throughout the interactive screen period, even if motion continues. It becomes eligible again
