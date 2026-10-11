@@ -330,11 +330,11 @@ void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control, 
       }
     }
 
-    // Exposure control remains automatic. Sentry owns its offroad IR preference.
+    // Sentry uses automatic exposure-based IR whenever its cabin camera is selected.
     auto sentry = sm["sentryState"].getSentryState();
     bool sentry_active = !is_onroad && sentry.getCapture() &&
                          nanos_since_boot() - sm["sentryState"].getLogMonoTime() < 2e9;
-    bool ir_disabled = sentry_active ? (!params.getBool("SentryIR") || !(sentry.getCameraMask() & 2)) :
+    bool ir_disabled = sentry_active ? !(sentry.getCameraMask() & 2) :
                                       (!is_onroad && params.getBool("DisableDriverCameraIR"));
     if (nanos_since_boot() - last_cabin_camera_t > 1e9 || ir_disabled) ir_pwr = 0;
 

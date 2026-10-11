@@ -90,7 +90,11 @@ def test_expired_lease_never_keeps_cameras_or_gps_alive(tmp_path, monkeypatch):
 def test_settings_clamp_and_default():
   assert not config.setting(FakeParams(), 'SentryEnabled')
   assert config.setting(FakeParams(SentrySensitivity=400), 'SentrySensitivity') == 100
-  assert config.setting(FakeParams(SentryCutoffVoltage=float('nan')), 'SentryCutoffVoltage') == 12.3
+  assert config.setting(FakeParams(SentryCutoffVoltage=float('nan')), 'SentryCutoffVoltage') == 11.8
+  assert config.setting(FakeParams(SentryCutoffVoltage=12.3), 'SentryCutoffVoltage') == 11.8
+  assert config.setting(FakeParams(SentryCutoffVoltage=10.), 'SentryCutoffVoltage') == 11.0
+  from openpilot.system.hardware.power_monitoring import VBATT_PAUSE_CHARGING
+  assert config.DEFAULTS['SentryCutoffVoltage'] == VBATT_PAUSE_CHARGING
 
 
 def test_battery_override_and_ignition(monkeypatch, tmp_path):
@@ -101,14 +105,19 @@ def test_battery_override_and_ignition(monkeypatch, tmp_path):
   params.put_bool('DisablePowerDown', True, block=True)
   p = power.PowerMonitoring()
   p.params = params
-  p.car_voltage_mV = 12200
+  p.car_voltage_mV = 11700
   monkeypatch.setattr(power.time, 'monotonic', lambda: 1000.)
   monkeypatch.setattr(power, 'read_runtime', lambda now: {'session': True})
   assert p.should_shutdown(False, True, 0., True)
   assert not p.should_shutdown(True, True, 0., True)
-  p.car_voltage_mV = 12500
+  p.car_voltage_mV = 11900
   assert not p.should_shutdown(False, True, 0., True)
   p.power_used_uWh = 61e6
+  assert not p.should_shutdown(False, True, 0., True)  # no hidden energy budget
+  params.put('SentryCutoffVoltage', 11., block=True)
+  p.car_voltage_mV = 11100
+  assert not p.should_shutdown(False, True, 0., True)
+  p.car_voltage_mV = 10900
   assert p.should_shutdown(False, True, 0., True)
   monkeypatch.setattr(power, 'read_runtime', lambda now: {})
   assert not p.should_shutdown(False, True, 0., True)  # stock DisablePowerDown restored
@@ -144,6 +153,41 @@ def test_eye_touch_suppression_lasts_until_next_timeout(monkeypatch):
   clock[0] = 131.2
   device._update_wakefulness()
   assert not device.sentry_eye_visible
+
+
+def test_camera_buttons_toggle_independently_and_keep_personality_exclusive(monkeypatch):
+  monkeypatch.setenv('SCALE', '1')
+  import pyray as rl
+  from openpilot.selfdrive.ui.layouts.settings import sentry as ui
+  from openpilot.system.ui.widgets.list_view import MultipleButtonAction
+
+  monkeypatch.setattr(ui.gui_app, 'font', lambda *args: None)
+  state = SimpleNamespace(ignition=False)
+  monkeypatch.setattr(ui, 'ui_state', state)
+
+  class Params(dict):
+    def put_bool(self, key, value):
+      self[key] = value
+
+  params = Params()
+  buttons = ui.SentryCameraButtons(params)
+  buttons.set_rect(rl.Rectangle(0, 0, 670, 170))
+  assert all(buttons.is_button_selected(i) for i in range(3))
+  buttons._handle_mouse_release(rl.Vector2(335, 85))
+  assert [buttons.is_button_selected(i) for i in range(3)] == [True, False, True]
+  buttons._handle_mouse_release(rl.Vector2(335, 85))
+  assert all(buttons.is_button_selected(i) for i in range(3))
+  for x in (105, 335, 565):
+    buttons._handle_mouse_release(rl.Vector2(x, 85))
+  assert not any(buttons.is_button_selected(i) for i in range(3))
+  state.ignition = True
+  buttons._handle_mouse_release(rl.Vector2(105, 85))
+  assert not any(buttons.is_button_selected(i) for i in range(3))
+  selected = []
+  personality = MultipleButtonAction(['A', 'B', 'C'], 210, callback=selected.append)
+  personality.select_button(2)
+  assert selected == [2]
+  assert [personality.is_button_selected(i) for i in range(3)] == [False, False, True]
 
 
 def test_process_gates_do_not_start_driving_controls(monkeypatch):

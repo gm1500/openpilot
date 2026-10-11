@@ -11,15 +11,14 @@ DEFAULTS = {
   'SentryEnabled': False, 'SentrySensitivity': 50, 'SentryArmDelay': 60,
   'SentryPreMinutes': 5, 'SentryPostSeconds': 60,
   'SentryNarrowCamera': True, 'SentryWideCamera': True, 'SentryCabinCamera': True,
-  'SentryCutoffVoltage': 12.3, 'SentryMaxHours': 4, 'SentryMaxEnergyWh': 60,
+  'SentryCutoffVoltage': 11.8, 'SentryMaxHours': 4,
   'SentryMaxTemp': 70, 'SentryStorageGB': 2, 'SentryEye': True,
-  'SentryIR': True, 'SentryWatermarkTime': True, 'SentryWatermarkGPS': False,
-  'SentryWatermarkCamera': True,
+  'SentryWatermark': True,
 }
 RANGES = {
   'SentrySensitivity': (1, 100), 'SentryArmDelay': (10, 300), 'SentryPreMinutes': (1, 5),
-  'SentryPostSeconds': (10, 180), 'SentryCutoffVoltage': (11.8, 12.6),
-  'SentryMaxHours': (1, 12), 'SentryMaxEnergyWh': (10, 150), 'SentryMaxTemp': (55, 75),
+  'SentryPostSeconds': (10, 180), 'SentryCutoffVoltage': (11.0, 11.8),
+  'SentryMaxHours': (1, 12), 'SentryMaxTemp': (55, 75),
   'SentryStorageGB': (1, 10),
 }
 

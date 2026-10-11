@@ -15,11 +15,35 @@ from openpilot.system.sentry.location import vehicle_identity, parked_location, 
 from openpilot.system.sentry.motion import MotionDetector, Motion
 
 
+def recent(sm, service, now, timeout=2.):
+  return sm.valid[service] and 0 <= now-sm.recv_time[service] < timeout
+
+
+def inactive_reason(params, sm, now, device_type):
+  if not setting(params, 'SentryEnabled'):
+    return 'Off'
+  if device_type != 'tizi':
+    return 'Requires comma 3X'
+  if any(params.get_bool(k) for k in ('DoShutdown', 'DoReboot', 'DoUninstall')):
+    return 'Shutting down'
+  if not recent(sm, 'pandaStates', now) or not sm['pandaStates'] or any(
+      p.pandaType == log.PandaState.PandaType.unknown for p in sm['pandaStates']):
+    return 'Waiting for panda'
+  if any(p.ignitionLine or p.ignitionCan for p in sm['pandaStates']):
+    return 'Waiting for ignition off'
+  if not recent(sm, 'deviceState', now):
+    return 'Waiting for device state'
+  if sm['deviceState'].started or not params.get_bool('IsOffroad'):
+    return 'Waiting for offroad'
+  return ''
+
+
 class CameraMotion:
   def __init__(self, stream):
     self.client = VisionIpcClient('camerad', stream, True)
     self.detector = MotionDetector()
     self.last_frame = -1
+    self.last_received = 0.
 
   def sample(self, now, sensitivity):
     if not self.client.is_connected() and not self.client.connect(False):
@@ -28,6 +52,7 @@ class CameraMotion:
     if buf is None or self.client.frame_id == self.last_frame or not 0 <= now-self.client.timestamp_eof/1e9 <= .5:
       return Motion()
     self.last_frame = self.client.frame_id
+    self.last_received = now
     image = np.frombuffer(buf.data, dtype=np.uint8, count=self.client.stride*self.client.height)
     image = image.reshape(self.client.height, self.client.stride)[:, :self.client.width]
     rows = np.linspace(0, image.shape[0]-1, 80, dtype=int)
@@ -55,14 +80,9 @@ def main():
     while True:
       sm.update(0)
       now, wall = time.monotonic(), time.time()  # noqa: TID251
-      health_ok = (sm.valid['pandaStates'] and bool(sm['pandaStates']) and
-                   all(p.pandaType != log.PandaState.PandaType.unknown for p in sm['pandaStates']) and
-                   now-sm.recv_time['pandaStates'] < 2. and sm.valid['deviceState'] and now-sm.recv_time['deviceState'] < 2.)
-      ignition = any(p.ignitionLine or p.ignitionCan for p in sm['pandaStates'])
-      session = (setting(params, 'SentryEnabled') and HARDWARE.get_device_type() == 'tizi' and
-                 health_ok and not ignition and not sm['deviceState'].started and params.get_bool('IsOffroad') and
-                 not any(params.get_bool(k) for k in ('DoShutdown', 'DoReboot', 'DoUninstall')))
-      phase, capture, gps_request = 'Off', False, False
+      phase = inactive_reason(params, sm, now, HARDWARE.get_device_type())
+      session = not phase
+      capture, gps_request = False, False
       best, motion_camera = Motion(), 2
       camera_mask = sum(1 << i for i, key in enumerate(('SentryNarrowCamera', 'SentryCabinCamera', 'SentryWideCamera')) if setting(params, key))
       if not session:
@@ -79,8 +99,7 @@ def main():
                 location = parked_location(params.get('MapParkedPosition'), vehicle_identity(CP), wall)
           except Exception:
             cloudlog.exception('sentry parking checkpoint')
-        signature = (camera_mask, *(setting(params, key) for key in
-                     ('SentryWatermarkTime', 'SentryWatermarkGPS', 'SentryWatermarkCamera')))
+        signature = (camera_mask, setting(params, 'SentryWatermark'))
         if config_signature is not None and signature != config_signature:
           restart_until = now+3.  # manager must observe an off period before reconfiguring encoders
         config_signature = signature
@@ -96,8 +115,7 @@ def main():
           low_since = None
         low_battery = low_since is not None and now-low_since >= 10
         expired = elapsed >= setting(params, 'SentryMaxHours')*3600
-        used_up = sm['deviceState'].offroadPowerUsageUwh >= setting(params, 'SentryMaxEnergyWh')*1e6
-        if not cutoff_reason and (low_battery or expired or used_up):
+        if not cutoff_reason and (low_battery or expired):
           cutoff_reason = 'Battery cutoff' if low_battery else 'Parking budget reached'
         if cutoff_reason:
           phase = cutoff_reason
@@ -137,12 +155,22 @@ def main():
           manual = params.get_bool('SentryManualTrigger')
           if manual:
             params.remove('SentryManualTrigger')
-          if phase == 'Watching' and (best.active or manual):
+          if manual or (phase == 'Watching' and best.active):
             record_until = now+setting(params, 'SentryPostSeconds')
           if sm['sentryRecorderState'].recording and now-sm.recv_time['sentryRecorderState'] < 2.:
             phase = 'Recording'
             if best.active or manual:
               record_until = now+setting(params, 'SentryPostSeconds')
+          if phase != 'Recording':
+            ready = sum(0 <= now-camera.last_received < 1. for camera in cameras.values())
+            if ready != len(cameras):
+              phase = f'Waiting for cameras ({ready}/{len(cameras)})'
+            elif not recent(sm, 'sentryRecorderState', now):
+              phase = 'Starting recorder'
+            elif not sm['sentryRecorderState'].bufferBytes:
+              phase = 'Waiting for encoded video'
+            elif phase == 'Arming':
+              phase = f'Arming: {math.ceil(setting(params, "SentryArmDelay")-elapsed)} s'
         else:
           cameras.clear()
           record_until = 0.

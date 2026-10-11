@@ -119,8 +119,7 @@ class PowerMonitoring:
       return bool(self.params.get_bool('ForcePowerDown') or
                   sentry_runtime.get('phase') in ('Battery cutoff', 'Parking budget reached') or
                   (offroad_time > 60 and self.car_voltage_mV < setting(self.params, 'SentryCutoffVoltage')*1000) or
-                  offroad_time >= setting(self.params, 'SentryMaxHours')*3600 or
-                  self.power_used_uWh >= setting(self.params, 'SentryMaxEnergyWh')*1e6)
+                  offroad_time >= setting(self.params, 'SentryMaxHours')*3600)
     low_voltage_shutdown = (self.car_voltage_mV < (VBATT_PAUSE_CHARGING * 1e3) and
                             offroad_time > VOLTAGE_SHUTDOWN_MIN_OFFROAD_TIME_S)
     should_shutdown |= offroad_time > MAX_TIME_OFFROAD_S

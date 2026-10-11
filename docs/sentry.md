@@ -3,6 +3,10 @@
 Branch: `sentry-mode-poc`, based on `boat-anchor` at `2ee8df154017362e3a791c90d788172508f428df`.
 
 Enable **Settings → Sentry → Enable Sentry** while parked. The feature defaults off.
+The status row reports ignition/offroad/health blockers, missing camera frames, missing encoded
+video or an unavailable controller. An arming countdown appears once video is arriving; the
+buffer counter confirms capture. The voltage row shows the current vehicle supply reading.
+**Save an event now** also works during arming once capture has started.
 This implementation is ready for parked hardware evaluation; comma 3X encoding,
 thermal behavior, battery draw, and Connect indexing/playback still require device validation.
 
@@ -85,20 +89,22 @@ through instantaneous power loss.
 | Arming delay | 60 s |
 | Pre-event history | Up to 5 min |
 | Tail after motion | 60 s |
-| Battery cutoff | 12.3 V |
+| Battery cutoff | 11.8 V (stock threshold); adjustable 11.0–11.8 V |
 | Maximum parked time | 4 h |
-| Parked energy budget | 60 Wh |
 | Thermal pause | 70 °C, resume 8 °C cooler |
 | Event storage budget | 2 GiB |
-| Narrow / front wide / cabin | All on |
-| Cabin IR | On, exposure controlled |
+| Cameras: Narrow / Wide / Cabin | All on; three independent buttons in one row |
+| Cabin IR | Automatic with cabin camera; no separate setting |
 | Red eye | On |
-| Timestamp / camera watermark | On |
-| GPS coordinate watermark | Off |
+| Video watermark | On: UTC timestamp, camera name and parking coordinates |
 
 Camera/watermark changes pause capture briefly to restart the encoders. Watermarks are burned
 into private low-resolution frames, never into shared camera buffers. Timestamp is UTC.
-The coordinate watermark uses the fixed parking position.
+The coordinate watermark uses the fixed parking position and says unavailable if no position is known.
+The single watermark switch turns all three fields on/off together. Existing voltage settings
+above 11.8 V are clamped to the new maximum. There is no sentry energy-budget limit; voltage
+and maximum parked time remain the shutdown limits. Upload behavior is automatic and has no
+settings row.
 
 The eye follows the approximate image position of motion from the front wide or cabin lens;
 the cabin direction is mirrored. It appears on black at low brightness only after the normal
@@ -106,7 +112,7 @@ screen timeout, and fades off when motion stops. **Any touch clears the eye and 
 throughout the interactive screen period, even if motion continues. It becomes eligible again
 only at the next inactivity timeout.** Settings remain accessible through the normal interface.
 
-Sentry's cutoff/time/energy limits replace the stock offroad software limits only while the
+Sentry's cutoff/time limits replace the stock offroad software limits only while the
 controller has a fresh parked-session lease. `DisablePowerDown` does not bypass sentry's cutoff.
 A lost lease restores stock behavior. Stock thermal shutdown and hardware protections remain.
 The fan can exceed the usual offroad limit during capture/cooldown. Camera processing keeps
@@ -149,7 +155,7 @@ Before considering it ready for unattended use, verify on a parked comma 3X:
    bounded GPS acquisition; no-fix recording still works.
 4. Ignition promptly stops sentry and restores normal camera encoding without interfering
    with driving process startup. Repeat onroad/offroad and camera-setting transitions.
-5. Battery cutoff, thermal pause/resume, energy/time limits, actual input power and RAM
+5. Battery cutoff, thermal pause/resume, time limits, actual input power and RAM
    consumption under sustained motion and upload. Test controlled shutdown and interrupted
    event recovery.
 6. Connect discovers the stationary event route, shows the intended location and plays

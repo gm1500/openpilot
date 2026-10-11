@@ -1,11 +1,12 @@
 import pyray as rl
+import time
 
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.sentry.config import setting, RANGES
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.widgets import Widget
-from openpilot.system.ui.widgets.list_view import toggle_item, text_item, button_item
+from openpilot.system.ui.widgets.list_view import ListItem, MultipleButtonAction, toggle_item, text_item, button_item
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 
 
@@ -55,16 +56,33 @@ class SentrySlider(Widget):
     super().hide_event()
 
 
+class SentryCameraButtons(MultipleButtonAction):
+  KEYS = ('SentryNarrowCamera', 'SentryWideCamera', 'SentryCabinCamera')
+
+  def __init__(self, params):
+    super().__init__(['Narrow', 'Wide', 'Cabin'], button_width=210)
+    self.params = params
+    self.set_enabled(lambda: not ui_state.ignition)
+
+  def is_button_selected(self, index):
+    return setting(self.params, self.KEYS[index])
+
+  def select_button(self, index):
+    if self.enabled:
+      self.params.put_bool(self.KEYS[index], not self.is_button_selected(index))
+
+
 class SentryLayout(Widget):
   def __init__(self):
     super().__init__()
     self.params = Params()
     items = [
-      text_item('Sentry', lambda: ui_state.sm['sentryState'].phase or 'Off',
+      text_item('Sentry', self.phase_status,
                 'Parked motion recording for comma 3X. Up to five minutes of compressed video stay in RAM until an event.'),
       self.toggle('SentryEnabled', 'Enable Sentry', 'Arms after ignition turns off. Stops when the vehicle starts.'),
       SentrySlider(self.params, 'SentrySensitivity', 'Motion sensitivity'),
       text_item('Buffered footage', self.buffer_status),
+      text_item('Battery voltage', self.voltage_status),
       button_item('Save an event now', 'SAVE', callback=lambda: self.params.put_bool('SentryManualTrigger', True),
                   enabled=lambda: ui_state.sentry_active),
     ]
@@ -74,7 +92,6 @@ class SentryLayout(Widget):
       ('SentryPostSeconds', 'Record after motion stops', ' s', 10),
       ('SentryCutoffVoltage', 'Battery cutoff', ' V', .1),
       ('SentryMaxHours', 'Maximum parked time', ' h', 1),
-      ('SentryMaxEnergyWh', 'Parked energy budget', ' Wh', 5),
       ('SentryMaxTemp', 'Pause capture above', ' °C', 1),
       ('SentryStorageGB', 'Event storage limit', ' GiB', 1),
     ):
@@ -82,25 +99,35 @@ class SentryLayout(Widget):
     items.extend([
       text_item('Event storage', 'Preserved', 'Saved events remain on the device until deleted. When the limit is reached, new event saving pauses.'),
       text_item('Battery protection', 'Sentry cutoff',
-                'While Sentry is active, these voltage, time and energy limits replace the stock offroad software limits. Hardware protections remain active.'),
-      self.toggle('SentryNarrowCamera', 'Front narrow camera'),
-      self.toggle('SentryWideCamera', 'Front wide camera'),
-      self.toggle('SentryCabinCamera', 'Cabin wide camera'),
-      self.toggle('SentryIR', 'Cabin infrared illumination', 'Uses the existing exposure-based IR control when the cabin camera is active.'),
+                'While Sentry is active, its voltage and time limits replace the stock offroad software limits. ' +
+                'Default cutoff is 11.8 V; adjustable down to 11.0 V. Hardware protections remain active.'),
+      ListItem('Cameras', description='Each camera switches independently. Green means on. Cabin infrared adjusts automatically.',
+               action_item=SentryCameraButtons(self.params)),
       self.toggle('SentryEye', 'Red eye', 'Appears with motion after the screen times out. Tap to dismiss until the next screen timeout.'),
-      self.toggle('SentryWatermarkTime', 'Timestamp watermark', 'UTC time burned into saved video.'),
-      self.toggle('SentryWatermarkGPS', 'Location watermark', 'Saved parking coordinates; not a continuously refreshed GPS fix.'),
-      self.toggle('SentryWatermarkCamera', 'Camera watermark'),
+      self.toggle('SentryWatermark', 'Video watermark',
+                  'UTC timestamp, camera name and saved parking coordinates. Shows unavailable when no parking location is known.'),
       text_item('Parking location', self.location_status,
                 'Uses the SLC parking checkpoint first. Otherwise requests a GPS fix for up to 90 seconds, then switches GPS off.'),
-      text_item('Upload', 'Normal uploader',
-                'Route logs and the front preview follow normal upload policy. Full camera footage can be requested later. Forced upload is not enabled.'),
     ])
     self.scroller = self._child(Scroller(items, spacing=0, line_separator=True))
 
   def toggle(self, key, title, description=None):
     return toggle_item(title, description, initial_state=setting(self.params, key),
                        callback=lambda value: self.params.put_bool(key, value), enabled=lambda: not ui_state.ignition)
+
+  def phase_status(self):
+    if not setting(self.params, 'SentryEnabled'):
+      return 'Off'
+    sm = ui_state.sm
+    if not sm.valid['sentryState'] or not 0 <= time.monotonic()-sm.recv_time['sentryState'] < 2.:
+      return 'Controller unavailable'
+    return sm['sentryState'].phase or 'Starting'
+
+  def voltage_status(self):
+    sm = ui_state.sm
+    if not sm.valid['peripheralState'] or not 0 <= time.monotonic()-sm.recv_time['peripheralState'] < 3.:
+      return 'Unavailable'
+    return f"{sm['peripheralState'].voltage/1000.:.1f} V"
 
   def buffer_status(self):
     state = ui_state.sm['sentryRecorderState']
