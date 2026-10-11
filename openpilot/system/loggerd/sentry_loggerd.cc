@@ -61,13 +61,10 @@ public:
     std::ofstream{path + "/.sentry"} << "1\n";
     rlog = std::make_unique<ZstdFileWriter>(path + "/rlog.zst", 3);
     qlog = std::make_unique<ZstdFileWriter>(path + "/qlog.zst", 3);
-    capnp::FlatArrayMessageReader init_reader(init);
-    MessageBuilder init_message;
-    init_message.setRoot(init_reader.getRoot<cereal::Event>());
-    auto init_event = init_message.getRoot<cereal::Event>();
-    init_event.setLogMonoTime(start);
-    init_event.getInitData().setWallTimeNanos(nanos_since_epoch()-(nanos_since_boot()-start));
-    write(init_message.toBytes());
+    // Like loggerd, every segment repeats the SAME route-level initData.
+    // Advancing its timestamps per segment moves Connect's route origin and
+    // can hide the earlier minutes from playback and upload requests.
+    write(init.asBytes());
     std::string cp_bytes = Params().get("CarParamsPersistent");
     if (!cp_bytes.empty()) {
       AlignedBuffer aligned;
@@ -154,6 +151,7 @@ public:
   size_t buffered = 0;
   std::string route, error;
   kj::Array<capnp::word> init = logger_build_init_data(true);
+  kj::Array<capnp::word> route_init;
   int first_segment = 0, closed_segment = -1;
   uint64_t event_start = 0, retry_after = 0, storage_check = 0;
   uint64_t last_motion = 0;
@@ -189,7 +187,7 @@ public:
   void save(int segment, const Packet &packet) {
     if (segment < first_segment || segment <= closed_segment) return;
     auto &out = saved[segment];
-    if (!out) out = std::make_unique<SavedSegment>(route, segment-first_segment, init.asPtr(), packet.time);
+    if (!out) out = std::make_unique<SavedSegment>(route, segment-first_segment, route_init.asPtr(), packet.time);
     out->append(packet);
   }
   void append(int camera, cereal::Event::Reader event, uint64_t now) {
@@ -263,6 +261,16 @@ public:
       while (std::next(begin) != ring.end() && begin->second.start < cutoff) ++begin;
       first_segment = begin->first;
       closed_segment = first_segment-1;
+      // Anchor the route to its retained pre-roll, not the trigger, daemon
+      // startup or latest segment. Freeze the UTC/monotonic pair once per
+      // event so later segments and wall-clock adjustments cannot move it.
+      capnp::FlatArrayMessageReader init_reader(init.asPtr());
+      MessageBuilder init_message;
+      init_message.setRoot(init_reader.getRoot<cereal::Event>());
+      auto init_event = init_message.getRoot<cereal::Event>();
+      init_event.setLogMonoTime(begin->second.start);
+      init_event.getInitData().setWallTimeNanos(nanos_since_epoch()-(nanos_since_boot()-begin->second.start));
+      route_init = capnp::messageToFlatArray(init_message);
       for (auto it = begin; it != ring.end(); ++it) for (const auto &packet : it->second.packets) save(it->first, packet);
       bookmark = true;  // Also mark manual saves and the start of a split event.
     }

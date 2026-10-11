@@ -92,6 +92,7 @@ class Uploader:
 
     self.immediate_folders = ["crash/", "boot/"]
     self.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
+    self.sentry_failed: dict[str, float] = {}
 
   def list_upload_files(self, metered: bool) -> Iterator[tuple[str, str, str]]:
     r = self.params.get("AthenadRecentlyViewedRoutes")
@@ -137,6 +138,11 @@ class Uploader:
 
   def next_file_to_upload(self, metered: bool) -> tuple[str, str, str] | None:
     upload_files = list(self.list_upload_files(metered))
+    # A denied or repeatedly failing Sentry file must not monopolize its
+    # priority tier. Try untouched files first, then retry failures oldest
+    # first. The main loop still applies the normal network backoff.
+    self.sentry_failed = {fn: failed_at for fn, failed_at in self.sentry_failed.items() if os.path.isfile(fn)}
+    upload_files.sort(key=lambda candidate: self.sentry_failed.get(candidate[2], 0.))
 
     for name, key, fn in upload_files:
       if any(f in fn for f in self.immediate_folders):
@@ -155,7 +161,7 @@ class Uploader:
 
   def do_upload(self, key: str, fn: str):
     url_resp = self.api.get("v1.4/" + self.dongle_id + "/upload_url/", timeout=10, path=key, access_token=self.api.get_token())
-    if url_resp.status_code == 412:
+    if url_resp.status_code == 412 or (is_sentry_file(fn) and url_resp.status_code != 200):
       return url_resp
 
     url_resp_json = json.loads(url_resp.text)
@@ -217,7 +223,8 @@ class Uploader:
         success = True
       else:
         success = False
-        cloudlog.event("upload_failed", stat=stat, exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
+        cloudlog.event("upload_failed", stat=stat, status_code=stat.status_code if stat is not None else None,
+                       exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
 
     if success:
       # tag file as uploaded
@@ -240,7 +247,12 @@ class Uploader:
     if key.endswith(('qlog', 'rlog')) or (key.startswith('boot/') and not key.endswith('.zst')):
       key += ".zst"
 
-    return self.upload(name, key, fn, network_type, metered)
+    success = self.upload(name, key, fn, network_type, metered)
+    if success:
+      self.sentry_failed.pop(fn, None)
+    elif is_sentry_file(fn):
+      self.sentry_failed[fn] = time.monotonic()
+    return success
 
 
 def main(exit_event: threading.Event | None = None) -> None:

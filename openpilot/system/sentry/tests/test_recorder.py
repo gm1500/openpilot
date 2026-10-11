@@ -135,9 +135,11 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
           pytest.fail(f'recorder timeout: {status["sentryRecorderState"]}\n{(tmp_path/"recorder.log").read_text()}')
 
         await_state(lambda _: status.updated['sentryRecorderState'])
-        base = time.monotonic_ns()-180_000_000_000
-        # Fast replay of three historical source segments; no route should exist yet.
-        for segment in range(3):
+        base = time.monotonic_ns()-200_000_000_000
+        wall_base = time.time_ns()-(time.monotonic_ns()-base)
+        # Four minutes of source segments from an already-running encoder. The
+        # saved route must start at zero, with one clock origin for every log.
+        for segment in range(4):
           control()
           for frame in range(20):
             for c in range(4):
@@ -149,7 +151,7 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
               idx = data.idx
               idx.type = log.EncodeIndex.Type.qcameraH264 if c == 3 else log.EncodeIndex.Type.fullHEVC
               idx.frameId = segment*1200+frame
-              idx.segmentId, idx.segmentNum, idx.flags = frame, segment, 8
+              idx.segmentId, idx.segmentNum, idx.flags = frame, segment+7, 8
               idx.timestampSof = idx.timestampEof = msg.logMonoTime
               pm.send(STREAMS[c], msg)
             time.sleep(.003)
@@ -176,7 +178,10 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
           await_state(lambda s: not s.recording and s.bufferBytes == 0, trigger=True,
                       ignition=stop_reason == 'ignition', capture=stop_reason != 'disabled')
         dirs = sorted((tmp_path/'routes').iterdir())
-        assert len(dirs) == 3
+        assert len(dirs) == 4
+        route_init = messages(dirs[0]/'qlog.zst')[0]
+        assert route_init.logMonoTime == base
+        assert abs(route_init.initData.wallTimeNanos-wall_base) < 100_000_000
         for number, directory in enumerate(dirs):
           assert directory.name.endswith(f'--{number}')
           assert (directory/'.sentry').exists()
@@ -188,11 +193,17 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
             assert len(frames) == 20
             assert (frames[0].width, frames[0].height) == (526, 330)
           events = messages(directory/'qlog.zst')
-          assert events[0].which() == 'initData'
+          for filename in ('qlog.zst', 'rlog.zst'):
+            log_events = messages(directory/filename)
+            assert log_events[0].which() == 'initData'
+            assert log_events[0].as_builder().to_bytes() == route_init.as_builder().to_bytes()
+            start = next(e for e in log_events if e.which() == 'sentinel')
+            assert start.logMonoTime == base+number*60_000_000_000
+            assert start.sentinel.type == ('startOfRoute' if number == 0 else 'startOfSegment')
           indexes = [getattr(e, e.which()) for e in events if e.which().endswith('EncodeIdx')]
           assert len(indexes) == 80
           assert all(i.segmentNum == number for i in indexes)
-          assert events[-1].sentinel.type == ('endOfRoute' if number == 2 else 'endOfSegment')
+          assert events[-1].sentinel.type == ('endOfRoute' if number == 3 else 'endOfSegment')
         all_events = [e for directory in dirs for e in messages(directory/'qlog.zst')]
         assert any(e.which() == 'sentryState' and e.sentryState.locationSource == 'slcParked' for e in all_events)
         assert any(e.which() == 'gpsLocation' and e.gpsLocation.source == 'fusion' for e in all_events)

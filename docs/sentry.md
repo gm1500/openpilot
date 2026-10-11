@@ -101,6 +101,13 @@ Each event gets its own native route identifier and rebased segment/encode index
   sentry metadata, timestamps, position estimate and segment/route sentinels;
 - an internal `.sentry` marker for uploader identification and lock recovery.
 
+All segments repeat one route-level `initData`, with its UTC wall time and monotonic
+timestamp anchored to the first retained pre-event segment. Segment sentinels and frame
+timestamps still identify each minute separately. Previously, Sentry advanced `initData`
+for every minute, which could move the route start forward and shorten Connect's timeline.
+Timezone offsets apply only to the local display/watermark, never the native route clock.
+The corrected metadata applies to new events; already uploaded routes are not rewritten.
+
 The recorder writes standard `userBookmark` events into both logs at the confirmed trigger,
 and again when a new confirmed burst follows at least five seconds without confirmation.
 Manual saves and new split routes also get a marker. Continuous movement does not create
@@ -116,7 +123,10 @@ toggle is required. Metered links retain the stock preview/log policy; full Sent
 wait for an unmetered link. Disabling the narrow camera also disables the normal front preview.
 Uploads resume from on-disk files and per-file upload attributes after a restart. Failed or
 refused Sentry uploads, including HTTP 401/403/412, remain pending and use the uploader's
-normal retry/backoff; they are not marked as successful. This does not override Connect's
+normal retry/backoff; they are not marked as successful. Within each priority tier, remaining
+files get a turn before a failed file is retried, so one rejected log or camera cannot block
+the other files in that tier. Failures include an explicit HTTP status in the uploader log.
+This does not override Connect's
 account or server policies. Native files, indexes and queue behavior are tested locally;
 server-side route recognition, map display and all-camera playback still need device validation.
 

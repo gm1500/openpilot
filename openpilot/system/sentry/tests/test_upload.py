@@ -17,9 +17,9 @@ def uploader(tmp_path, monkeypatch):
   return upload.Uploader('test-device', str(root))
 
 
-def event_files(uploader):
+def event_files(uploader, segment=0):
   from pathlib import Path
-  directory = Path(uploader.root)/'00000001--0123456789--0'
+  directory = Path(uploader.root)/f'00000001--0123456789--{segment}'
   directory.mkdir()
   (directory/'.sentry').write_text('1')
   for name in ('qlog.zst', 'rlog.zst', 'qcamera.ts', 'fcamera.hevc', 'ecamera.hevc', 'dcamera.hevc'):
@@ -56,6 +56,59 @@ def test_full_video_waits_for_unmetered_and_does_not_upload_ordinary_routes(uplo
   setxattr(str(directory/'qcamera.ts'), upload.UPLOAD_ATTR_NAME, upload.UPLOAD_ATTR_VALUE)
   assert uploader.next_file_to_upload(False)[0] == 'rlog.zst'
   (directory/'.sentry').unlink()
+  assert uploader.next_file_to_upload(False) is None
+
+
+@pytest.mark.parametrize('status', [401, 403, 412, 429, 500])
+def test_sentry_upload_url_refusal_retains_http_status(uploader, monkeypatch, status):
+  directory = event_files(uploader)
+  response = SimpleNamespace(status_code=status, text='{"error":"upload refused"}')
+  uploader.api = SimpleNamespace(get=lambda *args, **kwargs: response, get_token=lambda: 'test-token')
+
+  def unexpected_put(*args, **kwargs):
+    pytest.fail('A refused upload URL must not issue a file PUT')
+
+  monkeypatch.setattr(upload.requests, 'put', unexpected_put)
+  assert uploader.do_upload('route/ecamera.hevc', str(directory/'ecamera.hevc')) is response
+
+
+@pytest.mark.parametrize('status', [401, 403, 412, 500, None])
+def test_rejected_file_does_not_block_remaining_event_segments(uploader, monkeypatch, status):
+  directories = [event_files(uploader, segment) for segment in range(4)]
+  for directory in directories:
+    for name in ('qlog.zst', 'qcamera.ts'):
+      setxattr(str(directory/name), upload.UPLOAD_ATTR_NAME, upload.UPLOAD_ATTR_VALUE)
+  # Match the reported route: segment zero is already on Connect, while the
+  # other three segments still need all their full logs and camera files.
+  for name in upload.SENTRY_UPLOAD_PRIORITY:
+    if (directories[0]/name).exists():
+      setxattr(str(directories[0]/name), upload.UPLOAD_ATTR_NAME, upload.UPLOAD_ATTR_VALUE)
+  failed = str(directories[1]/'rlog.zst')
+  attempts = []
+
+  def response(key, filename):
+    attempts.append(filename)
+    if filename == failed:
+      if status is None:
+        raise TimeoutError('network unavailable')
+      return SimpleNamespace(status_code=status)
+    return SimpleNamespace(status_code=200, request=SimpleNamespace(headers={'Content-Length': '7'}))
+
+  monkeypatch.setattr(uploader, 'do_upload', response)
+  assert uploader.step(upload.NetworkType.wifi, False) is False
+  for _ in range(11):
+    assert uploader.step(upload.NetworkType.wifi, False) is True
+  expected = {str(directory/name) for directory in directories[1:]
+              for name in ('rlog.zst', 'fcamera.hevc', 'ecamera.hevc', 'dcamera.hevc')}
+  assert set(attempts) == expected
+  assert len(attempts) == len(expected)
+  assert getxattr(failed, upload.UPLOAD_ATTR_NAME) is None
+  assert uploader.next_file_to_upload(False)[2] == failed
+  # A later accepted retry completes the route, without falsely marking a
+  # server refusal as uploaded or needing the recorder to save another event.
+  monkeypatch.setattr(uploader, 'do_upload', lambda *args: (
+    SimpleNamespace(status_code=201, request=SimpleNamespace(headers={'Content-Length': '7'}))))
+  assert uploader.step(upload.NetworkType.wifi, False) is True
   assert uploader.next_file_to_upload(False) is None
 
 
