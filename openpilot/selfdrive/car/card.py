@@ -19,6 +19,7 @@ from opendbc.car.fw_versions import ObdCallback
 from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
+from openpilot.selfdrive.car.map_cruise import read_map_speed
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 
 REPLAY = "REPLAY" in os.environ
@@ -65,8 +66,8 @@ class Car:
 
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
-    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'])
-    self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'radarTracks'])
+    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents', 'mapSpeedLimit'])
+    self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'radarTracks', 'mapCruiseState'])
 
     self.can_rcv_cum_timeout_counter = 0
 
@@ -151,6 +152,7 @@ class Car:
 
     self.v_cruise_helper = VCruiseHelper(self.CP)
 
+    self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
     self.is_metric = self.params.get_bool("IsMetric")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
 
@@ -180,7 +182,12 @@ class Car:
     if can_rcv_valid and REPLAY:
       self.can_log_mono_time = messaging.log_from_bytes(can_strs[0]).logMonoTime
 
-    self.v_cruise_helper.update_v_cruise(CS, self.sm['carControl'].enabled, self.is_metric)
+    now = self.can_log_mono_time * 1e-9 if REPLAY else time.monotonic()
+    map_speed, gps_time = read_map_speed(self.sm, now, replay=REPLAY)
+    # Old logs predate map cruise and must retain their manual button behavior.
+    map_enabled = self.map_cruise_enabled and (not REPLAY or self.sm.seen['mapSpeedLimit'])
+    self.v_cruise_helper.update_v_cruise(CS, self.sm['carControl'].enabled, self.is_metric,
+                                      map_enabled=map_enabled, map_speed=map_speed, map_gps_time=gps_time, now=now)
     if self.sm['carControl'].enabled and not self.CC_prev.enabled:
       # Use CarState w/ buttons from the step selfdrived enables on
       self.v_cruise_helper.initialize_v_cruise(self.CS_prev, self.experimental_mode)
@@ -214,6 +221,14 @@ class Car:
     cs_send.carState.canErrorCounter = self.can_rcv_cum_timeout_counter
     cs_send.carState.cumLagMs = -self.rk.remaining * 1000.
     self.pm.send('carState', cs_send)
+
+    if self.sm.frame % 20 == 0:
+      map_msg = messaging.new_message('mapCruiseState', valid=CS.canValid)
+      selector = self.v_cruise_helper.map_cruise
+      map_msg.mapCruiseState.state = selector.state(self.sm['carControl'].enabled and CS.cruiseState.available)
+      map_msg.mapCruiseState.targetSpeed = (selector.target_kph or 0.) / 3.6
+      map_msg.mapCruiseState.adjustingSpeed = (self.v_cruise_helper.map_pulse.target_kph or 0.) / 3.6
+      self.pm.send('mapCruiseState', map_msg)
 
     if RD is not None:
       tracks_msg = messaging.new_message('radarTracks')
@@ -254,6 +269,7 @@ class Car:
 
   def params_thread(self, evt):
     while not evt.is_set():
+      self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
       self.is_metric = self.params.get_bool("IsMetric")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
       time.sleep(0.1)
