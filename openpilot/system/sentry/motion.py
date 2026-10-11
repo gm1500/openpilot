@@ -2,8 +2,29 @@
 from dataclasses import dataclass
 import numpy as np
 
-MOTION_HOLD_SECONDS = 3.
+MOTION_HOLD_SECONDS = 1.
 MOTION_GAP_SECONDS = .5
+MIN_REGION_FRACTION = .005
+
+
+def camera_area_scale(stream, width, height):
+  """Approximate projected area from the configured lens, before the speck floor."""
+  from openpilot.common.transformations.camera import DEVICE_CAMERAS
+  name = ('narrow_road', 'cabin', 'wide_road')[stream]
+  cameras = DEVICE_CAMERAS[('tizi', 'ox03c10')]
+  # The supported comma 3X sensor families have distinct output dimensions.
+  # AR/OX share optics; use those as the fallback until dimensions are known.
+  for sensor in ('ox03c10', 'os04c10'):
+    candidate = DEVICE_CAMERAS[('tizi', sensor)]
+    if getattr(candidate, name).size == (width, height):
+      cameras = candidate
+      break
+  camera, narrow = getattr(cameras, name), cameras.narrow_road
+  projected_area = camera.focal_length**2/(camera.width*camera.height)
+  reference_area = narrow.focal_length**2/(narrow.width*narrow.height)
+  # Raise narrow's minimum area; compensate both wide lenses for smaller
+  # projected objects. Fisheye scaling is approximate, especially at the edges.
+  return 2.*projected_area/reference_area
 
 
 @dataclass
@@ -76,7 +97,8 @@ def regions(mask, changed):
 
 
 class MotionDetector:
-  def __init__(self):
+  def __init__(self, area_scale=1.):
+    self.area_scale = area_scale
     self.background = None
     self.previous = None
     self.last_time = None
@@ -138,9 +160,9 @@ class MotionDetector:
     # A stationary new object or its background afterimage is not ongoing motion.
     moving = [r for r in regions(mask, changed) if r.area >= 9 and r.moving >= max(3, r.area*.01)]
     eye = max(moving, key=lambda r: r.area, default=None)
-    # A single region must occupy 1.5–6% of the image (2.625% at sensitivity 75).
-    # Scattered rain/snow regions cannot pool their area to qualify.
-    required = (.06-.045*sensitivity)*current.size
+    # Scale recording area by the lens, but never below the speck floor.
+    # Scattered rain/snow cannot pool area. The immediate eye is independent.
+    required = max(MIN_REGION_FRACTION, (.06-.045*sensitivity)*self.area_scale)*current.size
     large = [r for r in moving if r.area >= required]
     candidate = max(large, key=lambda r: (self.candidate_region is not None and r.near(self.candidate_region), r.area), default=None)
     triggered = False

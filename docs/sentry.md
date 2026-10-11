@@ -24,10 +24,15 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   either stage. Missing frames/recording readiness or a capture restart resets both delays. Camera
   preview/livestream pauses capture.
 - Samples all selected cameras at 5 Hz for luminance changes. The eye reacts immediately
-  to smaller local movements. Saving instead requires about three seconds of sustained
+  to smaller local movements. Saving instead requires about one second of sustained
   movement in the same connected region, allowing gaps no longer than half a second.
-  Each region must individually occupy 1.5–6% of the sampled image (2.625% at the default
-  sensitivity of 75); scattered snowflakes cannot pool their area to meet the threshold.
+  Saving area is scaled by each lens's configured focal length and image dimensions:
+  narrow requires a larger region, while front-wide and cabin require smaller ones.
+  At sensitivity 75, the OX03C10 cameras in this comma 3X require about 5.25% of the narrow
+  image or 0.5% of either wide image. OS04C10 uses its own configured optics (about 0.73%
+  for either wide image). A connected region must cover at least 0.5% regardless of lens;
+  scattered snowflakes cannot pool their area to meet that floor. Fisheye size compensation
+  is approximate, especially near the edges; this is not a physical object-size estimate.
   Exposure compensation, neighboring-pixel support and frame-to-frame change checks reject
   noise and stationary background afterimages. The sensitivity slider changes pixel-change
   thresholds and minimum saving area. This is motion detection, not object identification;
@@ -48,6 +53,9 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   less during startup or RAM pressure. The confirmation period is included in this pre-roll.
   Only confirmed motion or manual Save extends the tail; eye-only movement does not.
   Events split after 15 minutes of continuous activity.
+- Warmup and arming footage stays in the RAM history. A later event can therefore include
+  the initial exposure/IR fade in its pre-roll even though that fade did not trigger a save.
+  The motion bookmark identifies the confirmed trigger, rather than the start of pre-roll.
 - On ignition, shutdown, stale controller/health, thermal pause or disable, recording ends
   and the RAM buffer is discarded. This version does not retain the unsaved ring across reboots.
 

@@ -106,7 +106,8 @@ class SentryLayout(Widget):
       ListItem('Cameras', description='Each camera switches independently. Green means on. Cabin infrared adjusts automatically.',
                action_item=SentryCameraButtons(self.params)),
       self.toggle('SentryEye', 'Red eye', 'Reacts immediately to smaller movements after the screen times out. ' +
-                  'Saving requires a larger region moving for 3 seconds. Tap to dismiss until the next timeout.'),
+                  'Saving requires 1 second of movement, with larger regions required for the narrow lens and smaller ones for both wide lenses. ' +
+                  'Tap to dismiss until the next timeout.'),
       self.toggle('SentryWatermark', 'Video watermark',
                   'Local timestamp with UTC offset, camera name and parking coordinates when available. Uses UTC until the timezone is known.'),
       ListItem('Arming delay', description=f'Starts after {CAMERA_WARMUP_SECONDS:g} seconds of camera warmup. ' +

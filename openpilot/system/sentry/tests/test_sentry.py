@@ -6,7 +6,7 @@ import pytest
 
 from openpilot.system.sentry import config
 from openpilot.system.sentry.location import parked_location, gps_location
-from openpilot.system.sentry.motion import MotionDetector
+from openpilot.system.sentry.motion import MotionDetector, camera_area_scale
 
 
 class FakeParams(dict):
@@ -44,7 +44,7 @@ def test_startup_fade_is_learned_during_warmup():
     moving[20:40, 70+i:95+i] += 80
     result = d.update(moving, 34.+i*.2, 75)
     assert result.active
-    assert result.triggered == (i >= 15)
+    assert result.triggered == (i >= 5)
   assert .7 < result.x < .85
 
 
@@ -57,7 +57,7 @@ def test_local_motion_tracks_position_and_needs_persistence():
     image[20:40, 75+i:100+i] += 100
     result = d.update(image, 3.+i*.2, 75)
     assert result.active  # Eye reacts on the first sample, well before saving.
-    assert result.triggered == (i >= 15)
+    assert result.triggered == (i >= 5)
   assert .7 < result.x < .85 and .3 < result.y < .5
   # Loss of camera continuity re-arms instead of comparing stale pictures.
   assert not d.update(image, 8.).triggered
@@ -82,22 +82,23 @@ def test_short_motion_and_background_afterimage_do_not_save(after):
   base = np.full((80, 128), 70, dtype=np.float32)
   d = MotionDetector()
   warm(d, base)
-  for i in range(10):
+  for i in range(4):
     image = base.copy()
     image[20:40, 60+i:85+i] += 100
     result = d.update(image, 3.+i*.2, 75)
     assert result.active and not result.triggered
   resting = base if after == 'gone' else image
   for i in range(40):
-    result = d.update(resting, 5.+i*.2, 75)
+    result = d.update(resting, 3.8+i*.2, 75)
     assert not result.triggered
     if i:
       assert not result.active
 
 
-def test_small_motion_moves_eye_without_saving():
+@pytest.mark.parametrize('stream', [0, 1, 2])
+def test_small_motion_moves_eye_without_saving(stream):
   base = np.full((80, 128), 70, dtype=np.float32)
-  d = MotionDetector()
+  d = MotionDetector(area_scale=camera_area_scale(stream, 1928, 1208))
   warm(d, base)
   for i in range(40):
     image = base.copy()
@@ -108,9 +109,10 @@ def test_small_motion_moves_eye_without_saving():
     assert not result.triggered
 
 
-def test_scattered_snow_cannot_combine_area_into_a_trigger():
+@pytest.mark.parametrize('stream', [0, 1, 2])
+def test_scattered_snow_cannot_combine_area_into_a_trigger(stream):
   base = np.full((80, 128), 70, dtype=np.float32)
-  d = MotionDetector()
+  d = MotionDetector(area_scale=camera_area_scale(stream, 1928, 1208))
   warm(d, base)
   for i in range(60):
     image = base.copy()
@@ -128,11 +130,38 @@ def test_unrelated_regions_cannot_share_the_confirmation_timer():
   base = np.full((80, 128), 70, dtype=np.float32)
   d = MotionDetector()
   warm(d, base)
-  for i in range(20):
+  for i in range(8):
     image = base.copy()
-    x = 8+i if i < 10 else 80+i-10
+    x = 8+i if i < 4 else 80+i-4
     image[20:40, x:x+25] += 100
     assert not d.update(image, 3.+i*.2, 75).triggered
+
+
+@pytest.mark.parametrize('size', [(1928, 1208), (1344, 760)])
+def test_wide_lenses_save_smaller_moving_regions_than_narrow(size):
+  base = np.full((80, 128), 70, dtype=np.float32)
+  outcomes = []
+  for stream in (0, 1, 2):
+    d = MotionDetector(area_scale=camera_area_scale(stream, *size))
+    warm(d, base)
+    for i in range(9):
+      image = base.copy()
+      image[25:35, 65+i:77+i] += 100
+      result = d.update(image, 3.+i*.2, 75)
+      assert result.active  # Lens area compensation changes saving, not the eye.
+      if i < 5:
+        assert not result.triggered
+    outcomes.append(result.triggered)
+  assert outcomes == [False, True, True]
+
+  # The narrow lens still saves an appropriately larger subject after one second.
+  d = MotionDetector(area_scale=camera_area_scale(0, *size))
+  warm(d, base)
+  for i in range(9):
+    image = base.copy()
+    image[25:49, 55+i:91+i] += 100
+    result = d.update(image, 3.+i*.2, 75)
+    assert result.triggered == (i >= 5)
 
 
 def test_parked_location_identity_age_accuracy_and_provenance():

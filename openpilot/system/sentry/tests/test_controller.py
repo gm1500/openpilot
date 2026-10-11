@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from opendbc.car.structs import car
@@ -8,6 +9,27 @@ from openpilot.system.sentry import sentryd
 from openpilot.system.sentry.config import DEFAULTS, CAMERA_WARMUP_SECONDS
 from openpilot.system.sentry.location import vehicle_identity
 from openpilot.system.sentry.motion import Motion
+
+
+@pytest.mark.parametrize('stream', [0, 1, 2])
+@pytest.mark.parametrize('size', [(1928, 1208), (1344, 760)])
+def test_live_camera_sampling_applies_lens_area_and_one_second_confirmation(monkeypatch, stream, size):
+  width, height = size
+  image = np.full((height, width), 70, dtype=np.uint8)
+  client = SimpleNamespace(width=width, height=height, stride=width, frame_id=0, timestamp_eof=0,
+                           is_connected=lambda: True, recv=lambda timeout: SimpleNamespace(data=image.tobytes()))
+  monkeypatch.setattr(sentryd, 'VisionIpcClient', lambda *args: client)
+  camera = sentryd.CameraMotion(stream)
+  for i in range(24):
+    now = 100.+i*.2
+    client.frame_id, client.timestamp_eof = i, int(now*1e9)
+    image.fill(70)
+    if i >= 15:
+      x = 65+i-15
+      image[25*height//80:35*height//80, x*width//128:(x+12)*width//128] = 170
+    result = camera.sample(now, 75, armed=i >= 15)
+    assert result.active == (i >= 15)
+    assert result.triggered == (stream in (1, 2) and i >= 20)
 
 
 @pytest.mark.parametrize('cached,fix_after,video_ready', [(True, None, True), (False, 20, True), (False, None, True), (True, None, False)])
@@ -165,7 +187,7 @@ def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_
       # Deliberately return motion even while unarmed: the controller must gate
       # both automatic requests and the eye independently of the detector.
       ready = arm_at if now < drop_at else rearm_at
-      confirmed = not eye_only and (not armed or now >= ready+arm_delay+3.)
+      confirmed = not eye_only and (not armed or now >= ready+arm_delay+1.)
       return Motion(True, .2, .8, .4, triggered=confirmed)
 
   class Finished(Exception):
@@ -202,9 +224,9 @@ def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_
   manual_until = int((ready_at+12.)*1e9)
   assert all(s['recordUntilMonoTime'] == manual_until for now, s in sent.items() if ready_at+2. <= now < arm_at+arm_delay)
   assert min(now for now, armed in samples if armed) == arm_at+arm_delay
-  assert sent[arm_at+arm_delay+1.]['motion']
-  assert sent[arm_at+arm_delay+1.]['recordUntilMonoTime'] == manual_until
-  assert (sent[arm_at+arm_delay+3.2]['recordUntilMonoTime'] > manual_until) == (not eye_only)
+  assert sent[arm_at+arm_delay+.4]['motion']
+  assert sent[arm_at+arm_delay+.4]['recordUntilMonoTime'] == manual_until
+  assert (sent[arm_at+arm_delay+1.2]['recordUntilMonoTime'] > manual_until) == (not eye_only)
   assert all(not s['motion'] for now, s in sent.items() if drop_at+1. <= now < rearm_at+arm_delay)
   assert sent[rearm_at]['phase'] == f'Arming: {arm_delay} s'
   assert sent[rearm_at+arm_delay-1.]['phase'] == 'Arming: 1 s'
