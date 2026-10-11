@@ -16,6 +16,7 @@ import zstandard
 av = pytest.importorskip("av", reason="native video integration tests require PyAV")
 
 from openpilot.cereal import messaging, log
+from openpilot.cereal.services import SERVICE_LIST
 from openpilot.common.params import Params
 from openpilot.common.prefix import OpenpilotPrefix
 
@@ -26,7 +27,7 @@ FIELDS = ('narrowRoadEncodeData', 'wideRoadEncodeData', 'cabinEncodeData', 'qNar
 FILES = ('fcamera.hevc', 'ecamera.hevc', 'dcamera.hevc', 'qcamera.ts')
 
 
-def sample_packet(codec_name):
+def sample_packet(codec_name, noisy=False):
   codec = av.CodecContext.create(codec_name, 'w')
   codec.width, codec.height = 526, 330
   codec.pix_fmt = 'yuv420p'
@@ -36,6 +37,8 @@ def sample_packet(codec_name):
     codec.options['x265-params'] = 'pools=1:frame-threads=1:log-level=error'
   image = np.full((330, 526, 3), 75, dtype=np.uint8)
   image[90:190, 200:320] = (200, 20, 20)
+  if noisy:
+    image = np.random.default_rng(0).integers(0, 256, image.shape, dtype=np.uint8)
   packets = codec.encode(av.VideoFrame.from_ndarray(image, format='rgb24'))+codec.encode(None)
   assert len(packets) == 1 and packets[0].is_keyframe
   return bytes(packets[0])
@@ -179,6 +182,89 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason):
         all_events = [e for directory in dirs for e in messages(directory/'qlog.zst')]
         assert any(e.which() == 'sentryState' and e.sentryState.locationSource == 'slcParked' for e in all_events)
         assert any(e.which() == 'gpsLocation' and e.gpsLocation.source == 'fusion' for e in all_events)
+      finally:
+        if process.poll() is None:
+          process.send_signal(signal.SIGINT)
+          process.wait(timeout=8)
+        assert process.returncode == 0, (tmp_path/'recorder.log').read_text()
+
+
+@pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
+@pytest.mark.parametrize('publisher_first', [True, False])
+def test_video_queue_wrap_and_repeated_events(tmp_path, monkeypatch, publisher_first):
+  monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
+  # Larger real keyframes cross both the old 1 MiB mapping and the registered
+  # 10 MiB queue multiple times without a many-minute real-time camera test.
+  hevc, h264 = sample_packet('libx265', noisy=True), sample_packet('libx264', noisy=True)
+  frame_count = 2*max(SERVICE_LIST[s].queue_size for s in STREAMS)//min(len(hevc), len(h264))+1
+  with OpenpilotPrefix() as prefix:
+    messaging.reset_context()
+    pm = messaging.PubMaster(['sentryState', 'pandaStates', 'deviceState'])
+    video_pm = messaging.PubMaster(STREAMS) if publisher_first else None
+    status = messaging.SubMaster(['sentryRecorderState'])
+    with (tmp_path/'recorder.log').open('w') as logfile:
+      process = subprocess.Popen([str(BINARY)], cwd=BINARY.parent, stdout=logfile, stderr=subprocess.STDOUT)
+      try:
+        def await_state(predicate, trigger=False, capture=True):
+          deadline = time.monotonic()+8
+          while time.monotonic() < deadline:
+            assert process.poll() is None, (tmp_path/'recorder.log').read_text()
+            msg = messaging.new_message('sentryState', valid=True)
+            msg.sentryState.capture = capture
+            msg.sentryState.recordUntilMonoTime = time.monotonic_ns()+10_000_000_000 if trigger else 0
+            pm.send('sentryState', msg)
+            msg = messaging.new_message('pandaStates', 1, valid=True)
+            msg.pandaStates[0].pandaType = log.PandaState.PandaType.tres
+            pm.send('pandaStates', msg)
+            pm.send('deviceState', messaging.new_message('deviceState', valid=True))
+            status.update(50)
+            if status.updated['sentryRecorderState'] and predicate(status['sentryRecorderState']):
+              return
+          pytest.fail(f'recorder timeout: {status["sentryRecorderState"]}\n{(tmp_path/"recorder.log").read_text()}')
+
+        await_state(lambda _: True)
+        for service in STREAMS:
+          # Fail safely before publishing: a smaller file would SIGBUS the
+          # Python publisher as it writes beyond the recorder's truncated map.
+          assert (Path(prefix.msgq_path)/service).stat().st_size >= SERVICE_LIST[service].queue_size
+        if video_pm is None:
+          video_pm = messaging.PubMaster(STREAMS)
+        for service in STREAMS:
+          assert video_pm.wait_for_readers_to_update(service, 2)
+
+        base = time.monotonic_ns()-180_000_000_000
+        sent_bytes = 0
+        for first, last in ((0, frame_count//2), (frame_count//2, frame_count)):
+          for frame in range(first, last):
+            for camera, service in enumerate(STREAMS):
+              msg = messaging.new_message(FIELDS[camera], valid=True)
+              msg.logMonoTime = base+frame*50_000_000
+              data = getattr(msg, FIELDS[camera])
+              data.width, data.height = 526, 330
+              data.data = h264 if camera == 3 else hevc
+              idx = data.idx
+              idx.type = log.EncodeIndex.Type.qcameraH264 if camera == 3 else log.EncodeIndex.Type.fullHEVC
+              idx.frameId, idx.segmentId, idx.segmentNum, idx.flags = frame, frame, 0, 8
+              idx.timestampSof = idx.timestampEof = msg.logMonoTime
+              video_pm.send(service, msg)
+              sent_bytes += len(data.data)
+            if frame % 20 == 0:
+              await_state(lambda _: True)
+            time.sleep(.003)
+          await_state(lambda s, expected=sent_bytes: s.bufferBytes >= expected)
+          # Both requests exercise the same recordUntil path as Save event and
+          # motion. The second must work after continued capture/queue wraps.
+          await_state(lambda s: s.recording, trigger=True)
+          await_state(lambda s: not s.recording)
+
+        await_state(lambda s: s.bufferBytes == 0, capture=False)
+        directories = sorted((tmp_path/'routes').iterdir())
+        assert len(directories) == 2
+        for directory, expected in zip(directories, (frame_count//2, frame_count), strict=True):
+          assert not list(directory.glob('*.lock'))
+          for filename in FILES:
+            with av.open(str(directory/filename)) as video:
+              assert sum(1 for _ in video.decode(video=0)) == expected
       finally:
         if process.poll() is None:
           process.send_signal(signal.SIGINT)

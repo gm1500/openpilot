@@ -28,6 +28,25 @@ def test_exposure_and_noise_do_not_trigger():
     assert not d.update(image, 3.+i*.2, 100).active
 
 
+def test_startup_fade_is_learned_during_warmup():
+  d = MotionDetector()
+  rows, cols = np.indices((80, 128))
+  scene = 30+(cols//16 % 2)*90+rows*.8
+  for i in range(150):
+    # Spatially varying exposure gain defeats additive brightness compensation.
+    # Even a fade lasting almost the entire warmup must not leave stale hits.
+    image = scene*min(1., .04+i*.2/29.)
+    assert not d.update(image, 1.+i*.2, 75, armed=False).active
+  for i in range(15):
+    assert not d.update(scene, 31.+i*.2, 75).active
+  moving = scene.copy()
+  moving[20:40, 85:110] += 80
+  for i in range(3):
+    result = d.update(moving, 34.+i*.2, 75)
+  assert result.active
+  assert .7 < result.x < .85
+
+
 def test_local_motion_tracks_position_and_needs_persistence():
   d = MotionDetector()
   base = np.full((80, 128), 70, dtype=np.float32)

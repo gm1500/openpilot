@@ -16,8 +16,12 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
 - Requires a comma 3X, a recent valid panda/device state, ignition off and `IsOffroad`.
   Driving controls, modeld and locationd are never started for sentry. Ignition/onroad
   stops capture; driving and sentry encoders cannot run simultaneously.
-- Starts filling the RAM buffer after the offroad transition, with a default 30-second
-  arming delay before motion can save an event. Camera preview/livestream pauses capture.
+- Starts filling the RAM buffer after the offroad transition. The selected 15/30/60-second
+  arming delay (default 30) starts only once all selected cameras deliver frames and the
+  recorder has buffered video. The detector learns the changing exposure during this delay;
+  automatic events and the eye wait until it finishes. Manual saves still work during warmup.
+  Missing frames/recording readiness or a capture restart resets the delay. Camera
+  preview/livestream pauses capture.
 - Samples all selected cameras at 5 Hz for luminance changes. Exposure compensation,
   neighboring-pixel support and three consecutive detections reduce noise. The sensitivity
   slider changes both minimum area and pixel-change thresholds. This is motion detection;
@@ -167,6 +171,11 @@ dependencies. It covers subscriptions before their first message, invalid/wrong-
 and expired leases. The recorder and watermark rendering share this guarded reader so
 neither can crash merely because the sentry publisher starts later. The recorder is also tested
 with no publishers initially and staggered controller/panda/device messages.
+Encoded-video sockets use the service registry's queue sizes, matching the encoder's
+publishers. Native tests start them in both orders, send real HEVC/H264 past multiple
+10 MiB queue wraps, save two successive events, and decode every saved frame from all
+four video files. This catches the smaller socket mapping that previously stopped capture
+after a short burst even while motion detection kept running.
 The native service-registry checks link the built messaging library and start panda,
 recorder and encoder subscriptions/publications without hardware. This catches stale
 native service tables that Python-only tests cannot detect. Unknown-service errors now

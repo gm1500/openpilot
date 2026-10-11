@@ -76,7 +76,7 @@ def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp
   monkeypatch.setattr(sentryd, 'Ratekeeper', Ratekeeper)
   class Camera:
     last_received = 0.
-    def sample(self, now, sensitivity):
+    def sample(self, now, sensitivity, armed):
       self.last_received = now
       return Motion()
 
@@ -108,6 +108,99 @@ def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp
     assert all(state['gps'] for state in runtime[:90])
     assert not any(state['gps'] for state in runtime[90:])
     assert runtime[-1]['location'] is None
+
+
+@pytest.mark.parametrize('arm_delay', [15, 30, 60])
+def test_warmup_waits_for_video_and_restarts_after_camera_loss(monkeypatch, tmp_path, arm_delay):
+  class Params(dict):
+    get_bool = dict.get
+    def remove(self, key):
+      self.pop(key, None)
+
+  params = Params(DEFAULTS | {'IsOffroad': True, 'SentryArmDelay': arm_delay, 'SentryPostSeconds': 10})
+  clock = [100.]
+  ready_at = 145.
+  drop_at = ready_at+arm_delay+5.
+  restart_at = drop_at+3.
+  stop_at = restart_at+arm_delay+5.
+  sent = {}
+  samples = []
+
+  class SubMaster(dict):
+    def __init__(self, services):
+      super().__init__({
+        'deviceState': SimpleNamespace(started=False, maxTempC=50.),
+        'pandaStates': [SimpleNamespace(pandaType=log.PandaState.PandaType.tres, ignitionLine=False, ignitionCan=False)],
+        'peripheralState': SimpleNamespace(voltage=12000),
+        'sentryRecorderState': SimpleNamespace(recording=False, error='', bufferBytes=0),
+        'gpsLocation': SimpleNamespace(hasFix=False),
+        'gpsLocationExternal': SimpleNamespace(hasFix=False),
+      })
+      self.valid = {s: not s.startswith('gps') for s in services}
+      self.recv_time, self.logMonoTime = {}, {}
+
+    def update(self, timeout):
+      now = clock[0]
+      self.recv_time = dict.fromkeys(self, now)
+      self.logMonoTime = dict.fromkeys(self, int(now*1e9))
+      self['sentryRecorderState'].bufferBytes = 1000 if now >= 130. else 0
+      previous = sent.get(round(now-.2, 1))
+      self['sentryRecorderState'].recording = bool(previous and previous['recordUntilMonoTime'] > now*1e9)
+      if now == ready_at+2.:
+        params['SentryManualTrigger'] = True
+      if now >= stop_at:
+        params['SentryEnabled'] = False
+
+  class Camera:
+    def __init__(self, stream):
+      self.stream, self.last_received = stream, 0.
+    def sample(self, now, sensitivity, armed):
+      samples.append((now, armed))
+      if now < {0: 135., 1: ready_at, 2: 140.}[self.stream] or (self.stream == 1 and drop_at <= now < restart_at):
+        return Motion()
+      self.last_received = now
+      # Deliberately return motion even while unarmed: the controller must gate
+      # both automatic requests and the eye independently of the detector.
+      return Motion(True, .2, .8, .4)
+
+  class Finished(Exception):
+    pass
+
+  class Ratekeeper:
+    def __init__(self, *args, **kwargs):
+      pass
+    def keep_time(self):
+      clock[0] = round(clock[0]+.2, 1)
+      if clock[0] > stop_at:
+        raise Finished
+
+  monkeypatch.setattr(sentryd.time, 'monotonic', lambda: clock[0])
+  monkeypatch.setattr(sentryd, 'Params', lambda: params)
+  monkeypatch.setattr(sentryd, 'SentryClock', lambda params: SimpleNamespace(update=lambda *args: None, snapshot=lambda wall: ('', 0)))
+  monkeypatch.setattr(sentryd, 'HARDWARE', SimpleNamespace(get_device_type=lambda: 'tizi'))
+  monkeypatch.setattr(sentryd.messaging, 'SubMaster', SubMaster)
+  monkeypatch.setattr(sentryd.messaging, 'PubMaster',
+                      lambda services: SimpleNamespace(send=lambda service, msg: sent.update({clock[0]: msg.to_dict()['sentryState']})))
+  monkeypatch.setattr(sentryd, 'Ratekeeper', Ratekeeper)
+  monkeypatch.setattr(sentryd, 'CameraMotion', Camera)
+  monkeypatch.setattr(sentryd, 'write_runtime', lambda state: None)
+  monkeypatch.setattr(sentryd, 'RUNTIME_PATH', tmp_path/'runtime.json')
+  with pytest.raises(Finished):
+    sentryd.main()
+
+  assert sent[ready_at]['phase'] == f'Arming: {arm_delay} s'
+  assert all(not s['motion'] for now, s in sent.items() if now < ready_at+arm_delay)
+  assert all(s['recordUntilMonoTime'] == 0 for now, s in sent.items() if now < ready_at+2.)
+  manual_until = int((ready_at+12.)*1e9)
+  assert all(s['recordUntilMonoTime'] == manual_until for now, s in sent.items() if ready_at+2. <= now < ready_at+arm_delay)
+  assert min(now for now, armed in samples if armed) == ready_at+arm_delay
+  assert sent[ready_at+arm_delay+1.]['motion']
+  assert sent[ready_at+arm_delay+1.]['recordUntilMonoTime'] > manual_until
+  assert all(not s['motion'] for now, s in sent.items() if drop_at+1. <= now < restart_at+arm_delay)
+  assert sent[restart_at+arm_delay-1.]['phase'] == 'Arming: 1 s'
+  assert sent[restart_at+arm_delay+1.]['motion']
+  assert not sent[stop_at]['capture'] and not sent[stop_at]['motion']
+  assert sent[stop_at]['recordUntilMonoTime'] == 0
 
 
 @pytest.mark.parametrize('blocker,expected', [

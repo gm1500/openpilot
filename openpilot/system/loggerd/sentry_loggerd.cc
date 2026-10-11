@@ -262,7 +262,13 @@ int main() {
   SubMaster sm({"sentryState", "pandaStates", "deviceState", "clocks", "narrowRoadCameraState", "wideRoadCameraState", "cabinCameraState"});
   std::unique_ptr<Context> context(Context::create());
   std::array<std::unique_ptr<SubSocket>, 4> sockets;
-  for (int c = 0; c < 4; ++c) sockets[c].reset(SubSocket::create(context.get(), sentry_encoders[c].publish_name));
+  for (int c = 0; c < 4; ++c) {
+    const auto &service = services.at(sentry_encoders[c].publish_name);
+    // Raw sockets must use the same queue size as the encoder's PubMaster.
+    // The default 1 MiB mapping truncates these 10 MiB queues and breaks both
+    // processes as soon as video advances past the smaller mapping.
+    sockets[c].reset(SubSocket::create(context.get(), service.name, "127.0.0.1", false, true, service.queue_size));
+  }
   Recorder recorder;
   AlignedBuffer aligned;
   // A previous power interruption may leave locks. Only recover sentry-owned routes.

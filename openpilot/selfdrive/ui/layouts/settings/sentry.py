@@ -108,7 +108,7 @@ class SentryLayout(Widget):
       self.toggle('SentryEye', 'Red eye', 'A large, bright eye follows motion after the screen times out. Tap to dismiss until the next timeout.'),
       self.toggle('SentryWatermark', 'Video watermark',
                   'Local timestamp with UTC offset, camera name and parking coordinates when available. Uses UTC until the timezone is known.'),
-      ListItem('Arming delay', description='Time after parking before motion can save an event. Video starts buffering sooner.',
+      ListItem('Arming delay', description='Camera exposure warmup after live video is ready. Footage buffers during the delay; motion and the eye wait.',
                action_item=SentryArmButtons(self.params)),
       SentrySlider(self.params, 'SentrySensitivity', 'Motion sensitivity'),
       button_item('Save an event now', 'SAVE', callback=lambda: self.params.put_bool('SentryManualTrigger', True),

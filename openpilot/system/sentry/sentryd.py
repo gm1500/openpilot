@@ -46,7 +46,7 @@ class CameraMotion:
     self.last_frame = -1
     self.last_received = 0.
 
-  def sample(self, now, sensitivity):
+  def sample(self, now, sensitivity, armed):
     if not self.client.is_connected() and not self.client.connect(False):
       return Motion()
     buf = self.client.recv(5)
@@ -58,7 +58,7 @@ class CameraMotion:
     image = image.reshape(self.client.height, self.client.stride)[:, :self.client.width]
     rows = np.linspace(0, image.shape[0]-1, 80, dtype=int)
     cols = np.linspace(0, image.shape[1]-1, 128, dtype=int)
-    return self.detector.update(image[np.ix_(rows, cols)], now, sensitivity)
+    return self.detector.update(image[np.ix_(rows, cols)], now, sensitivity, armed=armed)
 
 
 def main():
@@ -68,6 +68,7 @@ def main():
   pm = messaging.PubMaster(['sentryState'])
   rk = Ratekeeper(5, print_delay_threshold=None)
   off_since = None
+  arm_since = None
   location = None
   cameras = {}
   cooldown = False
@@ -89,6 +90,7 @@ def main():
       camera_mask = sum(1 << i for i, key in enumerate(('SentryNarrowCamera', 'SentryCabinCamera', 'SentryWideCamera')) if setting(params, key))
       if not session:
         off_since, location, cameras = None, None, {}
+        arm_since = None
         record_until, cooldown, gps_finished, low_since = 0., False, False, None
         cutoff_reason = ''
       else:
@@ -133,7 +135,7 @@ def main():
           phase = 'Camera preview in use'
         else:
           capture = elapsed >= 2.  # allow driving encoders to finish offroad transition
-          phase = 'Arming' if elapsed < setting(params, 'SentryArmDelay') else 'Watching'
+          phase = 'Starting cameras'
           if location is None and not gps_finished:
             for service in ('gpsLocationExternal', 'gpsLocation'):
               if sm.valid[service]:
@@ -145,36 +147,50 @@ def main():
         if capture:
           if camera_mask != last_camera_mask:
             cameras.clear()
+            arm_since = None
           last_camera_mask = camera_mask
+          arm_delay = setting(params, 'SentryArmDelay')
+          armed = arm_since is not None and now-arm_since >= arm_delay
           for stream in (2, 1, 0):
             if camera_mask & (1 << stream):
               if stream not in cameras:
                 cameras[stream] = CameraMotion(stream)
-              result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'))
+              result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'), armed)
               # Wide cameras drive the eye. Narrow camera can still trigger recording.
               if result.active and (not best.active or (stream in (1, 2) and result.score > best.score)):
                 best, motion_camera = result, stream
+          ready = sum(0 <= now-camera.last_received < 1. for camera in cameras.values())
+          if ready != len(cameras):
+            phase = f'Waiting for cameras ({ready}/{len(cameras)})'
+            arm_since = None
+          elif not recent(sm, 'sentryRecorderState', now):
+            phase = 'Starting recorder'
+            arm_since = None
+          elif not sm['sentryRecorderState'].bufferBytes:
+            phase = 'Waiting for encoded video'
+            arm_since = None
+          else:
+            # The selected delay starts with working video, not the offroad
+            # transition. Delayed camera startup must get the entire warmup.
+            if arm_since is None:
+              arm_since = now
+            remaining = max(0., arm_delay-(now-arm_since))
+            phase = f'Arming: {math.ceil(remaining)} s' if remaining else 'Watching'
+          armed = arm_since is not None and now-arm_since >= arm_delay
+          if not armed:
+            best = Motion()  # Exposure ramp cannot trigger an event or the eye.
           manual = params.get_bool('SentryManualTrigger')
           if manual:
             params.remove('SentryManualTrigger')
-          if manual or (phase == 'Watching' and best.active):
+          if manual or (armed and best.active):
             record_until = now+setting(params, 'SentryPostSeconds')
           if sm['sentryRecorderState'].recording and now-sm.recv_time['sentryRecorderState'] < 2.:
             phase = 'Recording'
             if best.active or manual:
               record_until = now+setting(params, 'SentryPostSeconds')
-          if phase != 'Recording':
-            ready = sum(0 <= now-camera.last_received < 1. for camera in cameras.values())
-            if ready != len(cameras):
-              phase = f'Waiting for cameras ({ready}/{len(cameras)})'
-            elif not recent(sm, 'sentryRecorderState', now):
-              phase = 'Starting recorder'
-            elif not sm['sentryRecorderState'].bufferBytes:
-              phase = 'Waiting for encoded video'
-            elif phase == 'Arming':
-              phase = f'Arming: {math.ceil(setting(params, "SentryArmDelay")-elapsed)} s'
         else:
           cameras.clear()
+          arm_since = None
           record_until = 0.
         error = sm['sentryRecorderState'].error if now-sm.recv_time['sentryRecorderState'] < 2. else ''
         if capture and error:

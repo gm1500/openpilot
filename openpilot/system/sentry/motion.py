@@ -18,7 +18,7 @@ class MotionDetector:
     self.warm_until = 0.
     self.hits = 0
 
-  def update(self, image, now, sensitivity=50):
+  def update(self, image, now, sensitivity=50, armed=True):
     """image is a small 2-D luma view, sampled about five times per second."""
     current = np.asarray(image, dtype=np.float32)
     if current.ndim != 2 or min(current.shape) < 8 or not np.isfinite(current).all():
@@ -31,6 +31,13 @@ class MotionDetector:
       return Motion()
     dt = now-self.last_time
     self.last_time = now
+    if not armed:
+      # Follow the live exposure throughout camera warmup. Do not carry the
+      # dark startup image or accumulated hits into the armed detector.
+      self.background = current.copy()
+      self.warm_until = now
+      self.hits = 0
+      return Motion()
     sensitivity = min(100, max(1, sensitivity)) / 100.
     difference = current-self.background
     # Reject uniform brightness changes (auto exposure, headlights), not local objects.
