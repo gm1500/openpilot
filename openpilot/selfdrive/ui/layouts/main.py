@@ -5,6 +5,7 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets import Widget
 from openpilot.selfdrive.ui.layouts.sidebar import Sidebar, SIDEBAR_WIDTH
 from openpilot.selfdrive.ui.layouts.home import HomeLayout
+from openpilot.selfdrive.ui.layouts.sentry_eye import SentryEye
 from openpilot.selfdrive.ui.layouts.settings.settings import SettingsLayout, PanelType
 from openpilot.selfdrive.ui.onroad.augmented_road_view import AugmentedRoadView
 from openpilot.selfdrive.ui.ui_state import device, ui_state
@@ -29,6 +30,7 @@ class MainLayout(Widget):
     self._prev_onroad = False
 
     # Initialize layouts
+    self._sentry_eye = SentryEye()
     self._home_layout = HomeLayout()
     self._home_body_layout = BodyLayout()
     self._layouts: dict[MainState, Widget] = {
@@ -123,6 +125,9 @@ class MainLayout(Widget):
     self._set_mode_for_state()
 
   def _render_main_content(self):
+    if self._current_mode == MainState.HOME and device.sentry_screen:
+      self._sentry_eye.render(self._rect)
+      return
     # Render sidebar
     if self._sidebar.is_visible:
       self._sidebar.render(self._sidebar_rect)
