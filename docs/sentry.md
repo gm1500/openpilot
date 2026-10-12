@@ -30,7 +30,7 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   still extend an already-open event. A capture restart, including camera preview/livestream
   or thermal pause, starts a new warmup and arming cycle.
 - Samples only the front-wide and cabin-wide cameras at 5 Hz for luminance changes. The eye reacts immediately
-  to smaller local movements. Saving instead requires about one second of sustained
+  to smaller local movements. Saving instead requires about 0.6 seconds of sustained
   movement in the same connected region, allowing gaps no longer than half a second.
   Saving area is scaled by each lens's configured focal length and image dimensions.
   At sensitivity 75, the OX03C10 cameras in this comma 3X require about 0.5% of either wide
@@ -145,19 +145,24 @@ These are written directly to the saved route; the UI retains ownership of the l
 publisher. Log contents are tested locally; bookmark appearance in Connect still needs
 verification against an uploaded device event.
 
-The Connect preview (`qcamera.ts`) starts with the lens that first confirms motion,
-including its available pre-event footage. If movement then reaches another camera,
-the preview can switch within the same minute. The first lens keeps priority while
-its confirmed motion continues; after it clears, the earliest other lens with confirmed
-motion takes over. A stronger score or eye-only movement cannot steal the current view.
-This follows motion through the camera views, without identifying or tracking a person.
+The Connect preview (`qcamera.ts`) starts with a confirmed lens, including its available
+pre-event footage. During an open recording, the wide lens with the largest currently
+moving region takes over at the next 5 Hz sample, even if the original lens still sees
+movement. The score is the fraction of the sampled image occupied by changing pixels
+in that region, not a physical object-size estimate. Equal scores or no motion retain
+the current view. Handoffs do not wait for recording confirmation; eye-only movement
+can change an open preview but cannot start/extend a route or add a bookmark. New
+events still choose a confirmed source, preserving the initiating event in the pre-roll.
+This follows motion through the views without identifying or tracking a person.
 
-Handoffs wait for the next H264 keyframe, normally within one second. Playback holds
-the previous view until that frame; timestamps remain increasing and each minute still
-has one `qcamera.ts`. Earlier preview choices are retained when saved event histories
-overlap. Manual saves use a confirming camera, otherwise the strongest currently active
-wide camera, then a front-wide/cabin fallback. Only the two wide cameras drive the preview;
-the narrow recording remains available separately.
+Each handoff requests a fresh H264 keyframe from the newly selected preview encoder.
+Playback switches when that independently decodable frame arrives, with the ordinary
+one-second GOP as fallback. Only selection changes request a keyframe; all HEVC streams
+retain their normal GOP. Actual device latency still depends on camera/encoder queues.
+Timestamps remain increasing and each minute still has one `qcamera.ts`. Earlier preview
+choices are retained when saved event histories overlap. Diagnostic manual saves use the
+strongest active wide lens, then a front-wide/cabin fallback. Only the two wide cameras
+drive the preview; the narrow recording remains available separately.
 
 Only the preview changes lenses. Full recordings always retain their original mapping:
 `fcamera.hevc` is narrow, `ecamera.hevc` is wide, and `dcamera.hevc` is cabin. Their
@@ -297,7 +302,7 @@ the decoded Y plane at 5 Hz and excludes the timestamp/GPS watermark from detect
 detection uses the original unwatermarked camera buffers. HEVC/downsampling makes this an
 approximation of live detection, and this one scene does not validate every lighting/weather
 condition. Synthetic regressions also cover small scattered regions, noise/exposure changes,
-the one-second confirmation, fresh-motion targeting and complete eye visibility at the edges.
+the motion confirmation, fresh-motion targeting and complete eye visibility at the edges.
 
 Build the native encoder and recorder, params and messaging extensions using the project's
 normal SCons environment. Run:
@@ -346,13 +351,19 @@ gates, tap suppression/full brightness, ordinary event cleanup, manual camera up
 preview retry handling, timezone/DST and native video/log creation. The recorder test replays
 real HEVC/H264 packets, checks no idle route writes,
 decodes every saved camera stream, validates indexes and tests ignition finalization.
-Preview tests cover all three trigger lenses, first-confirmed priority during overlapping
-motion, real H264 keyframe handoffs within a minute, increasing timestamps, retained preview
+Preview tests cover all three recorder inputs, strongest-wide-motion selection during overlapping
+motion, requested and periodic H264 keyframe handoffs within a minute, increasing timestamps, retained preview
 choices in overlapping events, and byte-for-byte unchanged full-camera files. The encoder test
 uses three synthetic VisionIPC camera streams and checks each preview's watermark output
 without modifying the shared camera buffer. It also checks that all six encoded streams
-remain present even when obsolete camera-disable preferences are on disk.
+remain present even when obsolete camera-disable preferences are on disk, and that a handoff
+requests one independently decodable frame promptly without forcing every following frame.
 PC main-camera encoding uses the existing lossless codec; production hardware uses HEVC.
+
+The faster-handoff/0.6-second-confirmation update passed 104 controller/detector checks and
+two native mixed-camera decoding cases. PC encoder and recorder targets compiled. Two
+VisionIPC encoder cases were skipped because this environment blocks Unix socket creation;
+the requested-keyframe latency still needs measurement on a comma 3X.
 
 Duration tests save real encoded footage with each 15/30/60-second history setting, check
 the cutoff in every saved stream, decode partial minute files, and verify that trimming

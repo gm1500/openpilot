@@ -12,38 +12,45 @@ from openpilot.system.sentry.motion import Motion
 
 
 @pytest.mark.parametrize('first,second', [(1, 2), (2, 1)])
-def test_preview_follows_wide_motion_in_first_detection_order(first, second):
-  since = {}
+def test_preview_follows_strongest_current_wide_motion(first, second):
   results = {stream: Motion() for stream in range(3)}
   results[first] = Motion(active=True, score=.1, triggered=True)
-  camera = sentryd.trigger_source(results, 2, since, 100.)
+  camera = sentryd.trigger_source(results, 2)
   assert camera == first
-  # Stronger motion in an overlapping camera must not steal the preview.
-  results[second] = Motion(active=True, score=.8, triggered=True)
-  assert sentryd.trigger_source(results, camera, since, 101.) == first
-  results[0] = Motion(active=True, score=1., triggered=True)  # Narrow cannot take preview priority.
-  assert sentryd.trigger_source(results, camera, since, 102.) == first
-  # As a person leaves one view, the next already-confirmed lens takes over.
-  results[first] = Motion(active=True, score=.9, triggered=False)
-  camera = sentryd.trigger_source(results, camera, since, 103.)
+  # Once recording, stronger motion takes over on its very first sample,
+  # even while the original lens still has confirmed motion.
+  results[second] = Motion(active=True, score=.8, triggered=False)
+  camera = sentryd.trigger_source(results, camera, recording=True)
   assert camera == second
-  results[second] = Motion()
-  assert sentryd.trigger_source(results, camera, since, 104.) == second
-  assert not since  # Narrow alone is not a confirmed detection source.
+  results[0] = Motion(active=True, score=1., triggered=True)  # Narrow cannot take preview priority.
+  assert sentryd.trigger_source(results, camera, recording=True) == second
+  # Equal scores retain the current view; a larger score switches back.
+  results[first] = Motion(active=True, score=.8, triggered=True)
+  assert sentryd.trigger_source(results, camera, recording=True) == second
+  results[first] = Motion(active=True, score=.9, triggered=False)
+  assert sentryd.trigger_source(results, camera, recording=True) == first
+  results[first] = results[second] = Motion()
+  assert sentryd.trigger_source(results, camera, recording=True) == second
+
+
+def test_new_event_preview_uses_confirmed_source_even_with_larger_eye_only_motion():
+  results = {1: Motion(active=True, score=.8), 2: Motion(active=True, score=.1, triggered=True)}
+  assert sentryd.trigger_source(results, 1) == 2
+  assert sentryd.trigger_source(results, 2, recording=True) == 1
 
 
 @pytest.mark.parametrize('enabled,expected', [((1, 2), 2), ((1,), 1), ((2,), 2)])
-def test_manual_preview_uses_an_enabled_camera_and_eye_only_motion_does_not_switch(enabled, expected):
+def test_manual_preview_uses_a_wide_camera_and_eye_only_motion_waits_for_recording(enabled, expected):
   results = {stream: Motion() for stream in enabled}
-  assert sentryd.trigger_source(results, 2, {}, 100., manual=True) == expected
+  assert sentryd.trigger_source(results, 2, manual=True) == expected
   results[enabled[0]] = Motion(active=True, score=.5)
-  assert sentryd.trigger_source(results, expected, {}, 101.) == expected
-  assert sentryd.trigger_source(results, expected, {}, 101., manual=True) == enabled[0]
+  assert sentryd.trigger_source(results, expected) == expected
+  assert sentryd.trigger_source(results, expected, manual=True) == enabled[0]
 
 
 @pytest.mark.parametrize('stream', [0, 1, 2])
 @pytest.mark.parametrize('size', [(1928, 1208), (1344, 760)])
-def test_live_camera_sampling_applies_lens_area_and_one_second_confirmation(monkeypatch, stream, size):
+def test_live_camera_sampling_applies_lens_area_and_short_confirmation(monkeypatch, stream, size):
   width, height = size
   image = np.full((height, width), 70, dtype=np.uint8)
   client = SimpleNamespace(width=width, height=height, stride=width, frame_id=0, timestamp_eof=0,
@@ -59,7 +66,7 @@ def test_live_camera_sampling_applies_lens_area_and_one_second_confirmation(monk
       image[25*height//80:35*height//80, x*width//128:(x+12)*width//128] = 170
     result = camera.sample(now, 75, armed=i >= 65)
     assert result.active == (i >= 65)
-    assert result.triggered == (stream in (1, 2) and i >= 70)
+    assert result.triggered == (stream in (1, 2) and i >= 68)
 
 
 @pytest.mark.parametrize('restart', ['reconnect', 'frame_counter', 'size', 'frame_gap'])
@@ -151,8 +158,8 @@ def test_quiet_eye_and_later_lens_extend_event_without_rearming(monkeypatch, tmp
       samples.append((now, armed))
       burst = any(t <= now <= t+1 for t in ((first, third) if self.stream == 2 else (second,)))
       # Also show a brief eye-only hit: it must not extend the route.
-      eye = burst or first+5 <= now <= first+5.4
-      return Motion(eye, .2, .8, .4, triggered=burst)
+      eye_only = self.stream == 1 and first+5 <= now <= first+5.4
+      return Motion(burst or eye_only, .3 if eye_only else .2, .8, .4, triggered=burst)
 
   class Finished(Exception):
     pass
@@ -185,6 +192,7 @@ def test_quiet_eye_and_later_lens_extend_event_without_rearming(monkeypatch, tmp
     assert not sent[round(now, 1)]['motion']
     assert sent[round(now, 1)]['recordUntilMonoTime'] == int((first+1.+post_seconds)*1e9)
   assert sent[first+5.]['motion']
+  assert sent[first+5.]['triggerCamera'] == 1  # The first unconfirmed sample hands off an open route.
   assert sent[first]['triggerCamera'] == 2 and sent[second]['triggerCamera'] == 1
   assert sent[second+1.]['recordUntilMonoTime'] == int(end*1e9)
   assert sent[end-.2]['phase'] == 'Recording'

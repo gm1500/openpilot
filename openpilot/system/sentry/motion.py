@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import numpy as np
 
-MOTION_HOLD_SECONDS = 1.
+MOTION_HOLD_SECONDS = .6
 MOTION_GAP_SECONDS = .5
 MIN_REGION_FRACTION = .005
 
@@ -182,7 +182,7 @@ class MotionDetector:
           not candidate.near(self.candidate_region)):
         self.candidate_since = now
       self.candidate_last, self.candidate_region = now, candidate
-      triggered = now-self.candidate_since >= MOTION_HOLD_SECONDS
+      triggered = now-self.candidate_since >= MOTION_HOLD_SECONDS-1e-6
     elif now-self.candidate_last > MOTION_GAP_SECONDS:
       self.clear_candidate()
     if eye is None:

@@ -46,7 +46,7 @@ def test_startup_fade_is_learned_during_warmup():
     moving[20:40, 70+i:95+i] += 80
     result = d.update(moving, 34.+i*.2, 75)
     assert result.active
-    assert result.triggered == (i >= 5)
+    assert result.triggered == (i >= 3)
   assert .7 < result.x < .85
 
 
@@ -59,7 +59,7 @@ def test_local_motion_tracks_position_and_needs_persistence():
     image[20:40, 75+i:100+i] += 100
     result = d.update(image, 3.+i*.2, 75)
     assert result.active  # Eye reacts on the first sample, well before saving.
-    assert result.triggered == (i >= 5)
+    assert result.triggered == (i >= 3)
   assert .7 < result.x < .85 and .3 < result.y < .5
   # Loss of camera continuity re-arms instead of comparing stale pictures.
   assert not d.update(image, 8.).triggered
@@ -91,8 +91,8 @@ def test_fifty_percent_detects_camera_scaled_motion(stream, contrast, shape):
     image[25:25+shape[0], x:x+shape[1]] += contrast
     results.append(detector.update(image, 3.+i*.2, 50))
   assert all(r.active for r in results)
-  assert not any(r.triggered for r in results[:5])
-  assert any(r.triggered for r in results[5:])
+  assert not any(r.triggered for r in results[:3])
+  assert all(r.triggered for r in results[3:])
 
 
 @pytest.mark.parametrize('sensitivity', [1, 100])
@@ -136,14 +136,14 @@ def test_short_motion_and_background_afterimage_do_not_save(after):
   base = np.full((80, 128), 70, dtype=np.float32)
   d = MotionDetector()
   warm(d, base)
-  for i in range(4):
+  for i in range(2):
     image = base.copy()
     image[20:40, 60+i:85+i] += 100
     result = d.update(image, 3.+i*.2, 75)
     assert result.active and not result.triggered
   resting = base if after == 'gone' else image
   for i in range(40):
-    result = d.update(resting, 3.8+i*.2, 75)
+    result = d.update(resting, 3.4+i*.2, 75)
     assert not result.triggered
     if i:
       assert not result.active
@@ -185,9 +185,9 @@ def test_unrelated_regions_cannot_share_the_confirmation_timer():
   base = np.full((80, 128), 70, dtype=np.float32)
   d = MotionDetector()
   warm(d, base)
-  for i in range(8):
+  for i in range(4):
     image = base.copy()
-    x = 8+i if i < 4 else 80+i-4
+    x = 8+i if i < 2 else 80+i-2
     image[20:40, x:x+25] += 100
     assert not d.update(image, 3.+i*.2, 75).triggered
 
@@ -204,19 +204,19 @@ def test_wide_lenses_save_smaller_moving_regions_than_narrow(size):
       image[25:35, 65+i:77+i] += 100
       result = d.update(image, 3.+i*.2, 75)
       assert result.active  # Lens area compensation changes saving, not the eye.
-      if i < 5:
+      if i < 3:
         assert not result.triggered
     outcomes.append(result.triggered)
   assert outcomes == [False, True, True]
 
-  # The narrow lens still saves an appropriately larger subject after one second.
+  # The detector's narrow-lens calibration still requires a larger subject.
   d = MotionDetector(area_scale=camera_area_scale(0, *size))
   warm(d, base)
   for i in range(9):
     image = base.copy()
     image[25:49, 55+i:91+i] += 100
     result = d.update(image, 3.+i*.2, 75)
-    assert result.triggered == (i >= 5)
+    assert result.triggered == (i >= 3)
 
 
 def test_parked_location_identity_age_accuracy_and_provenance():

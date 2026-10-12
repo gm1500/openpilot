@@ -360,7 +360,8 @@ def test_video_queue_wrap_and_repeated_events(tmp_path, monkeypatch, publisher_f
 
 
 @pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
-def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlapping_history(tmp_path, monkeypatch):
+@pytest.mark.parametrize('requested_keyframes', [False, True])
+def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlapping_history(tmp_path, monkeypatch, requested_keyframes):
   monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
   count = 120
   hevc = [sample_packet('libx265', color=color) for color in COLORS]
@@ -369,11 +370,14 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
     codec = av.CodecContext.create('libx264', 'w')
     codec.width, codec.height, codec.pix_fmt = 526, 330, 'yuv420p'
     codec.time_base, codec.framerate = Fraction(1, 20), Fraction(20, 1)
-    codec.options = {'preset': 'ultrafast', 'tune': 'zerolatency', 'x264-params': 'keyint=20:min-keyint=20:scenecut=0'}
+    codec.options = {'preset': 'ultrafast', 'tune': 'zerolatency', 'forced-idr': '1',
+                     'x264-params': 'keyint=20:min-keyint=20:scenecut=0'}
     packets = []
     for frame in range(count):
       image = av.VideoFrame.from_ndarray(np.full((330, 526, 3), color, dtype=np.uint8), format='rgb24')
       image.pts = frame
+      if requested_keyframes and frame in (24, 64, 91):
+        image.pict_type = av.video.frame.PictureType.I
       packets.extend(codec.encode(image))
     packets.extend(codec.encode(None))
     assert len(packets) == count
@@ -388,7 +392,11 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
         kind = nal.lstrip(b'\x00')[1] & 31
         (header if kind in (7, 8) else payload).extend(nal)
       source.append((bytes(header), bytes(payload), packet.is_keyframe))
-    assert [i for i, (_, _, key) in enumerate(source) if key] == list(range(0, count, 20))
+    keys = [i for i, (_, _, key) in enumerate(source) if key]
+    if requested_keyframes:
+      assert all(frame in keys for frame in (24, 64, 91))
+    else:
+      assert keys == list(range(0, count, 20))
     previews.append(source)
 
   with OpenpilotPrefix():
@@ -451,10 +459,10 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
         send_frames(20, 23)
         camera, control_frame = 1, 23
         await_state(lambda s: s.previewCamera == 1)
-        send_frames(23, 63)  # Cabin P-frames before frame 40 must not be spliced in.
+        send_frames(23, 63)  # Wait for a requested keyframe, or the regular GOP as fallback.
         camera, control_frame = 0, 63
         await_state(lambda s: s.previewCamera == 0)
-        send_frames(63, 90)  # Narrow starts cleanly at frame 80, in this SAME segment.
+        send_frames(63, 90)  # The recorder can splice any source cleanly within this SAME segment.
         recording = False
         await_state(lambda s: not s.recording)
         recording, camera, control_frame = True, 1, 90
@@ -464,10 +472,12 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
         await_state(lambda s: not s.recording)
         directories = sorted((tmp_path/'routes').iterdir())
         assert len(directories) == 2
-        expected = [(1, f) for f in range(23)]+[(2, f) for f in range(40, 63)]+[(0, f) for f in range(80, 90)]
+        def next_key(start):
+          return next(f for f in range(start, count) if previews[0][f][2])
+        expected = [(1, f) for f in range(23)]+[(2, f) for f in range(next_key(23), 63)]+[(0, f) for f in range(next_key(63), 90)]
         for directory, full_count in zip(directories, (90, 120), strict=True):
           if full_count == 120:
-            expected += [(2, f) for f in range(100, 120)]
+            expected += [(2, f) for f in range(next_key(90), 120)]
           assert directory.name.endswith('--0') and not list(directory.glob('*.lock'))
           with av.open(str(directory/'qcamera.ts')) as video:
             assert video.streams.video[0].codec_context.name == 'h264'
@@ -521,8 +531,10 @@ def test_encoder_private_watermark_buffers(monkeypatch, tmp_path, legacy_cameras
       time.sleep(.01)
     assert observer.is_connected()
     sockets = [messaging.sub_sock(service, timeout=100) for service in STREAMS]
+    control = messaging.PubMaster(['sentryState'])
     image = np.full(width*height*3//2, 128, dtype=np.uint8)
     packets = [[] for _ in sockets]
+    indexes = [[] for _ in sockets]
     with (tmp_path/'encoder.log').open('w') as logfile:
       process = subprocess.Popen([str(ROOT/'system/loggerd/encoderd'), '--sentry'],
                                  cwd=ROOT/'system/loggerd', stdout=logfile, stderr=subprocess.STDOUT)
@@ -530,13 +542,21 @@ def test_encoder_private_watermark_buffers(monkeypatch, tmp_path, legacy_cameras
         for frame in range(65):
           assert process.poll() is None, (tmp_path/'encoder.log').read_text()
           now = time.monotonic_ns()
+          if frame >= 20:
+            msg = messaging.new_message('sentryState', valid=True)
+            msg.sentryState.capture = True
+            msg.sentryState.recordUntilMonoTime = now+60_000_000_000
+            msg.sentryState.triggerCamera = 1 if 35 <= frame < 50 else 2
+            control.send('sentryState', msg)
           for camera in (0, 1, 2):
             server.send(camera, image, frame, now, now)
           time.sleep(.05)
           for i, (socket, frames) in enumerate(zip(sockets, packets, strict=True)):
             msg = messaging.recv_one_or_none(socket)
             if msg:
-              frames.append(bytes(getattr(msg, FIELDS[i]).data))
+              data = getattr(msg, FIELDS[i])
+              frames.append(bytes(data.data))
+              indexes[i].append((data.idx.frameId, bool(data.idx.flags & 8)))
         source = observer.recv(100)
         assert source is not None and np.all(source.data == 128), 'watermark modified a shared camera buffer'
       finally:
@@ -556,3 +576,13 @@ def test_encoder_private_watermark_buffers(monkeypatch, tmp_path, legacy_cameras
       assert image.shape == (330, 526)
       assert image[290:308].max() > 200 and image[290:308].min() < 30
       assert image[:250].std() < 2
+    for source, switch_frame in ((4, 20), (5, 35), (4, 50)):
+      # Repeated 20 Hz control messages must request one frame at the handoff,
+      # not continuously force I-frames or wait for the next one-second GOP.
+      keys = [frame for frame, key in indexes[source] if key]
+      handoff = next(frame for frame in keys if frame >= switch_frame)
+      assert handoff <= switch_frame+2, (switch_frame, keys)
+      assert sum(switch_frame <= frame < switch_frame+10 for frame in keys) == 1
+      offset = next(i for i, (frame, _) in enumerate(indexes[source]) if frame == handoff)
+      with av.open(io.BytesIO(b''.join(packets[source][offset:])), format='h264') as video:
+        assert len(list(video.decode(video=0))) == len(packets[source])-offset

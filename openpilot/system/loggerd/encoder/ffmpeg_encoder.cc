@@ -65,6 +65,7 @@ void FfmpegEncoder::encoder_open() {
     if (codec_id == AV_CODEC_ID_H264) {
       av_dict_set(&options, "preset", "ultrafast", 0);
       av_dict_set(&options, "tune", "zerolatency", 0);
+      av_dict_set(&options, "forced-idr", "1", 0);
     }
   }
   int err = avcodec_open2(this->codec_ctx, codec, &options);
@@ -88,7 +89,11 @@ void FfmpegEncoder::set_bitrate(int bitrate) {
 }
 
 void FfmpegEncoder::request_keyframe() {
-  LOGE("keyframe request is not supported for ffmpeg encoder %s", encoder_info.publish_name);
+  if (encoder_info.is_sentry) {
+    frame->pict_type = AV_PICTURE_TYPE_I;
+  } else {
+    LOGE("keyframe request is not supported for ffmpeg encoder %s", encoder_info.publish_name);
+  }
 }
 
 int FfmpegEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
@@ -130,6 +135,7 @@ int FfmpegEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
   int ret = counter;
 
   int err = avcodec_send_frame(this->codec_ctx, frame);
+  frame->pict_type = AV_PICTURE_TYPE_NONE;
   if (err < 0) {
     LOGE("avcodec_send_frame error %d", err);
     ret = -1;

@@ -73,6 +73,9 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
   // Declare pools first so hardware is drained before their buffers are freed.
   std::vector<std::unique_ptr<SentryOverlay>> overlays;
   std::vector<std::unique_ptr<Encoder>> encoders;
+  auto sentry_sm = s->sentry ? std::make_unique<SubMaster>(std::vector<const char *>{"sentryState"}) : nullptr;
+  int preview_camera = -1;
+  bool preview_keyframe = false;
 
   VisionIpcClient vipc_client = VisionIpcClient("camerad", cam_info.stream_type, false);
 
@@ -145,6 +148,18 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
         ++cur_seg;
       }
 
+      if (sentry_sm) {
+        sentry_sm->update(0);
+        const auto now = nanos_since_boot();
+        auto state = sentry_state((*sentry_sm)["sentryState"], sentry_sm->rcv_time("sentryState"), now);
+        const int selected = state && state->getCapture() && state->getRecordUntilMonoTime() > now
+                               ? state->getTriggerCamera() : -1;
+        if (selected != preview_camera) {
+          preview_keyframe = selected == cam_info.stream_type;
+          preview_camera = selected;
+        }
+      }
+
       // encode a frame
       for (int i = 0; i < encoders.size(); ++i) {
         if (cam_info.encoder_infos[i].is_live) {
@@ -154,6 +169,12 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
 
         VisionBuf *input = s->sentry ? overlays[i]->prepare(buf, extra) : buf;
         if (!input) continue;
+        if (preview_keyframe && cam_info.encoder_infos[i].get_settings(input->width).encode_type == cereal::EncodeIndex::Type::QCAMERA_H264) {
+          // A new preview lens needs its own independently decodable frame.
+          // Request once per handoff; keep the normal GOP and all HEVC streams.
+          encoders[i]->request_keyframe();
+          preview_keyframe = false;
+        }
         int out_id = encoders[i]->encode_frame(input, &extra);
 #ifndef __COMMA_HARDWARE__
         if (s->sentry) overlays[i]->release(input);

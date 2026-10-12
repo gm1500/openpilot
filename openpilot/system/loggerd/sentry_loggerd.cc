@@ -159,7 +159,8 @@ public:
       }
       // Only qcamera.ts changes lenses. Never splice a dependent frame from a
       // different encoder or move its timestamps backwards. The player holds
-      // the last frame until the new source's next keyframe (one-second GOP).
+      // the last frame until the new source's requested keyframe arrives;
+      // the regular one-second GOP remains a fallback.
       if (packet.camera != sentry_preview_encoder(desired) || (video[c] && packet.frame_time <= preview_time)) return;
       switching = video[c] && preview_encoder != packet.camera;
       if (switching && !keyframe) return;

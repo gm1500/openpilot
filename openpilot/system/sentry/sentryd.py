@@ -39,21 +39,15 @@ def inactive_reason(params, sm, now, device_type):
   return ''
 
 
-def trigger_source(results, previous, confirmed_since, now, manual=False):
-  confirmed = {stream: motion for stream, motion in results.items() if stream in MOTION_CAMERAS and motion.triggered}
-  for stream in tuple(confirmed_since):
-    if stream not in confirmed:
-      del confirmed_since[stream]
-  # First confirmation keeps priority while motion overlaps. Scores only break
-  # ties between cameras confirming in the same sample, never steal a live view.
-  for stream in sorted(confirmed, key=lambda s: confirmed[s].score, reverse=True):
-    confirmed_since.setdefault(stream, now)
-  if confirmed_since:
-    return min(confirmed_since, key=confirmed_since.get)
+def trigger_source(results, previous, recording=False, manual=False):
+  # Start on a confirmed lens so pre-roll shows what triggered the event. Once
+  # saving, follow the largest fresh moving region without another confirmation
+  # delay. Scores are fractions of the same sampled image area for both lenses.
+  candidates = {stream: motion for stream, motion in results.items() if stream in MOTION_CAMERAS and
+                (motion.triggered or (recording or manual) and motion.active)}
+  if candidates:
+    return max(candidates, key=lambda stream: (candidates[stream].score, stream == previous))
   if manual:
-    active = {stream: motion for stream, motion in results.items() if stream in MOTION_CAMERAS and motion.active}
-    if active:
-      return max(active, key=lambda stream: active[stream].score)
     return next((stream for stream in MOTION_CAMERAS if stream in results), previous)
   return previous
 
@@ -104,7 +98,7 @@ def main():
   cameras = {}
   cooldown = False
   record_until = 0.
-  trigger_camera, confirmed_since = 2, {}
+  trigger_camera = 2
   gps_finished = False
   low_since = None
   cutoff_reason = ''
@@ -130,7 +124,6 @@ def main():
         ready_since = None
         arm_complete = False
         record_until, gps_finished, low_since = 0., False, None
-        confirmed_since.clear()
         cutoff_reason = ''
       else:
         # Cooling, health gaps and enable-switch changes cannot renew an expired
@@ -245,9 +238,7 @@ def main():
           if manual:
             params.remove('SentryManualTrigger')
           if manual or can_trigger:
-            trigger_camera = trigger_source(results, trigger_camera, confirmed_since, now, manual)
-          else:
-            confirmed_since.clear()
+            trigger_camera = trigger_source(results, trigger_camera, recording=record_until > now, manual=manual)
           if manual or triggered:
             record_until = now+setting(params, 'SentryPostSeconds')
           if recorder_fresh and sm['sentryRecorderState'].recording:
@@ -257,7 +248,6 @@ def main():
           ready_since = None
           arm_complete = False
           record_until = 0.
-          confirmed_since.clear()
         error = sm['sentryRecorderState'].error if now-sm.recv_time['sentryRecorderState'] < 2. else ''
         if capture and error:
           phase = error

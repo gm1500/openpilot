@@ -123,7 +123,7 @@ class SentryLayout(Widget):
       SentrySlider(self.params, 'SentryMaxTemp', 'Pause capture above', ' °C', shutdown_key='SentryShutdownOnOverheat',
                    hint='Shutdown off: pause until 8°C cooler. The parked-time limit still applies.'),
       self.toggle('SentryEye', 'Red eye', 'Reacts immediately to smaller movements from the front wide and cabin cameras. ' +
-                  'Saving requires 1 second of movement. All three cameras are recorded. Tap to dismiss until the next timeout.'),
+                  'Saving requires 0.6 seconds of movement. All three cameras are recorded. Tap to dismiss until the next timeout.'),
       self.toggle('SentryWatermark', 'Video watermark',
                   'Local timestamp with UTC offset, camera name and parking coordinates when available. Uses UTC until the timezone is known.'),
       text_item('Buffered footage', self.buffer_status),
