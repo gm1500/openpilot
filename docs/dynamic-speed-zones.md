@@ -53,6 +53,10 @@ The City of Edmonton Speed Zones feed now supplements OSM. It supplies each
 playground segment's geometry, numeric speed, travel direction and published
 hours. The provider is selected geographically; its rules are applied only to
 matching road names, geometry and alignment inside the segment endpoints.
+For geometry segments shorter than 12 metres, alignment uses the nearby line's
+direction over a 12-metre baseline. This prevents a short median flare from
+dropping an otherwise continuous zone. The calculation is cached at download;
+the actual segment endpoints and lateral-distance checks stay unchanged.
 The provider's documented IANA timezone supplies civil time for those segments,
 including DST, without requiring timezonefinder. Other cities continue to use
 OSM; additional municipal feeds require verified adapters. No city timetable is

@@ -1,4 +1,5 @@
 import json
+import math
 import unittest
 from dataclasses import replace
 from datetime import datetime
@@ -12,6 +13,8 @@ from openpilot.selfdrive.mapd.osm_speed_limit import GpsFix, OSMSpeedLimit, Road
 # Public City of Edmonton and OSM geometry, not a driver's recorded GPS trace.
 # https://data.edmonton.ca/resource/6vjs-shqe.json?$where=objectid='430'
 # https://www.openstreetmap.org/way/469407361
+# https://data.edmonton.ca/resource/6vjs-shqe.json?$where=objectid='1517'
+# https://www.openstreetmap.org/way/1375525942
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures/edmonton_zones.json').read_text())
 
 
@@ -32,6 +35,44 @@ class TestMunicipalZones(unittest.TestCase):
     self.assertAlmostEqual(result.speed, 30 / 3.6)
     self.assertEqual(result.kind, 'school')
     self.assertTrue(result.source.startswith('edmonton:'))
+
+  def test_published_divided_road_join_keeps_school_limit(self):
+    data = FIXTURE['osm_join']
+    road = Road(tuple(map(tuple, data['geometry'])), data['tags'], int(data['id']))
+    # The public OSM endpoint falls between the municipal approach and its
+    # short median flare. Test positions along the road, not a recorded drive.
+    end, previous = road.geometry[:2]
+    for bearing in (0., 180.):
+      for fraction in (.5, .1, .01, 0.):
+        with self.subTest(bearing=bearing, fraction=fraction):
+          lat, lon = (a + fraction * (b - a) for a, b in zip(end, previous, strict=True))
+          fix = replace(self.fix, latitude=lat, longitude=lon, bearing=bearing)
+          match = road_candidates((road,), fix)[0]
+          result = municipal.zone_limit(self.zones, match, fix.utc_timestamp)
+          self.assertIsNotNone(result)
+          self.assertAlmostEqual(result.speed, 30 / 3.6)
+          self.assertEqual(result.kind, 'school')
+
+  def test_short_flare_uses_local_direction_without_extending_geometry(self):
+    def point(x, y):
+      return 53. + math.degrees(y / 6371000.), -113. + math.degrees(x / (6371000. * math.cos(math.radians(53.))))
+
+    zone = replace(self.zones[0], geometry=(point(0., 0.), point(-5., 6.), point(-7., 25.)))
+    match = replace(self.match, position=point(-2.5, 3.), bearing=0.)
+    for geometry in (zone.geometry, tuple(reversed(zone.geometry))):
+      self.assertIsNotNone(municipal.zone_limit((replace(zone, geometry=geometry),), match, self.fix.utc_timestamp))
+    # No neighboring shape to support the short diagonal, or genuinely wrong
+    # road direction: keep the original alignment rejection.
+    self.assertIsNone(municipal.zone_limit((replace(zone, geometry=zone.geometry[:2]),), match, self.fix.utc_timestamp))
+    self.assertIsNone(municipal.zone_limit((zone,), replace(match, bearing=90.), self.fix.utc_timestamp))
+
+    for geometry in ((point(0., 0.), point(6., 0.), point(6., 30.)),
+                     (point(0., 0.), point(6., 0.), point(0., 0.))):
+      with self.subTest(geometry=geometry):
+        # A right-angle corner or a folded-back line must not borrow the
+        # direction of an arbitrarily long next segment or a zero-length chord.
+        self.assertIsNone(municipal.zone_limit((replace(zone, geometry=geometry),),
+                                             replace(match, position=point(3., -1.)), self.fix.utc_timestamp))
 
   def test_local_schedule_boundaries_weekends_and_dst(self):
     for day in ('2026-10-10', '2026-11-01', '2027-03-14'):
