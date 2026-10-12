@@ -59,10 +59,11 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   this is not a promise of zero device-wide NAND writes.
 - Confirmed motion saves up to the selected 15/30/60 seconds of preceding footage (default 60),
   then continues through activity and the selected 15/30/60-second tail (default 60).
-  The first minute is trimmed at the frame level, and each camera starts on its next decodable
-  keyframe, normally shortening history by less than one second. Startup or RAM pressure can
-  leave less history available. Original native minute time anchors are retained even when
-  the first minute is partial, so subsequent segments and bookmarks keep their real timestamps.
+  The route starts at the first decodable preview frame retained within that window. Startup
+  or RAM pressure can leave less history available; missing footage never pads the route's
+  beginning. Saved segments are new 60-second intervals measured from that frame, independent
+  of the encoders' source-minute boundaries. Each saved camera file starts on its next decodable
+  keyframe, normally losing less than one second. Video and bookmark timestamps retain their real times.
   The confirmation period is included in this pre-roll.
   Only confirmed motion or a diagnostic manual trigger extends the tail; eye-only movement
   does not. Each confirmation renews the selected post-motion interval from that trigger.
@@ -76,8 +77,8 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   The motion bookmark identifies the confirmed trigger, rather than the start of pre-roll.
 - Saved Sentry segments carry a log-only `selfdriveState` annotation labeled **Sentry recording**,
   with `alertStatus=userPrompt`, at their start and end. The first annotation uses the route's
-  `initData` time origin, which can precede the first retained video frame in a trimmed minute,
-  so the leading timeline interval is orange too. Video and bookmark timestamps stay unchanged.
+  `initData` time origin, aligned with the first playable preview frame, so the timeline is
+  orange from its actual beginning. Video and bookmark timestamps stay unchanged.
   Connect's existing timeline draws that
   alert interval orange; motion bookmarks remain yellow above it in both the route list and
   playback timeline. The annotation includes saved pre-roll and the post-motion tail, with
@@ -131,11 +132,21 @@ Each event gets its own native route identifier and rebased segment/encode index
 - an internal `.sentry` marker for uploader identification and lock recovery.
 
 All segments repeat one route-level `initData`, with its UTC wall time and monotonic
-timestamp anchored to the first retained pre-event segment. Segment sentinels and frame
-timestamps still identify each minute separately. Previously, Sentry advanced `initData`
-for every minute, which could move the route start forward and shorten Connect's timeline.
+timestamp anchored to the first retained, independently decodable preview frame. Segment
+numbers and sentinels use successive 60-second intervals from that same origin, even when
+an output minute combines video from two source minutes. Earlier code kept the source-minute
+origin after trimming, leaving an empty leading timeline interval; simply coloring that
+interval orange did not make footage exist there. The recorder now trims the origin and
+rebuilds the minute boundaries together. Individual frame and bookmark timestamps do not shift.
 Timezone offsets apply only to the local display/watermark, never the native route clock.
 The corrected metadata applies to new events; already uploaded routes are not rewritten.
+
+The empty-lead-in regression was reproduced against the old recorder. The correction passed
+12 native recorder cases, including 15/30/60-second trimming, only five seconds of playable
+preview history, three output minutes crossing different source-minute boundaries, and
+unchanged-deadline camera handoffs. Tests decode the saved streams and check the route/video
+origin, real frame times, shared initData, segment numbers, bookmarks and orange annotations.
+Connect's deployed backend still needs a fresh device event to verify its rendered timeline.
 
 The recorder writes standard `userBookmark` events into both logs at the confirmed trigger,
 and again when a new confirmed burst follows at least five seconds without confirmation.
@@ -366,8 +377,8 @@ VisionIPC encoder cases were skipped because this environment blocks Unix socket
 the requested-keyframe latency still needs measurement on a comma 3X.
 
 Duration tests save real encoded footage with each 15/30/60-second history setting, check
-the cutoff in every saved stream, decode partial minute files, and verify that trimming
-does not move the shared route clock or later segment times. Settings checks cover preset
+the cutoff in every saved stream, decode partial minute files, and verify that the route
+starts at its first playable frame with correctly aligned later minutes. Settings checks cover preset
 selection, old values, and agreement between native and Python first-use defaults.
 The duration update passed 105 controller, settings and native-recorder checks. Two encoder
 cases were skipped because the encoder binary was not built for this focused check.

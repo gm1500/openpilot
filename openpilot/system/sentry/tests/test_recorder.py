@@ -93,7 +93,8 @@ def test_recorder_waits_for_publishers_at_startup(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
 @pytest.mark.parametrize('stop_reason,trigger_camera,pre_seconds', [('ignition', 0, 15), ('disabled', 1, 30), ('manager', 2, 60)])
-def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_camera, pre_seconds):
+@pytest.mark.parametrize('available_seconds', [8, 75])
+def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_camera, pre_seconds, available_seconds):
   monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
   hevc = [sample_packet('libx265', color=color) for color in COLORS]
   h264 = [sample_packet('libx264', color=color) for color in COLORS]
@@ -143,14 +144,17 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
           pytest.fail(f'recorder timeout: {status["sentryRecorderState"]}\n{(tmp_path/"recorder.log").read_text()}')
 
         await_state(lambda _: status.updated['sentryRecorderState'])
-        base = time.monotonic_ns()-75_000_000_000
+        base = time.monotonic_ns()-available_seconds*1_000_000_000
         wall_base = time.time_ns()-(time.monotonic_ns()-base)
-        # 75 seconds across two native minutes. At each duration, trim the first
-        # minute to actual seconds without shifting the next minute's clock.
-        for segment, count in ((0, 60), (1, 15)):
+        # Exercise both trimming within a native minute and less history than
+        # requested, including preview frames arriving later than the main video.
+        preview_delay = 3 if available_seconds == 8 else 0
+        for segment in range((available_seconds+59)//60):
           control()
-          for frame in range(count):
+          for frame in range(min(60, available_seconds-segment*60)):
             for c in range(len(STREAMS)):
+              if c >= 3 and segment*60+frame < preview_delay:
+                continue
               msg = messaging.new_message(FIELDS[c], valid=True)
               msg.logMonoTime = base+(segment*60+frame)*1_000_000_000
               data = getattr(msg, FIELDS[c])
@@ -198,12 +202,10 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
                       ignition=stop_reason == 'ignition', capture=stop_reason != 'disabled')
         dirs = sorted((tmp_path/'routes').iterdir())
         assert messaging.recv_one_or_none(live_selfdrive) is None, 'timeline annotation leaked to live alerts'
-        assert len(dirs) == (1 if pre_seconds == 15 else 2)
+        assert len(dirs) == 1
         assert {directory.name.rsplit('--', 1)[0] for directory in dirs} == {event_route}
         route_init = messages(dirs[0]/'qlog.zst')[0]
-        first_source = 1 if pre_seconds == 15 else 0
-        assert route_init.logMonoTime == base+first_source*60_000_000_000
-        assert abs(route_init.initData.wallTimeNanos-(wall_base+first_source*60_000_000_000)) < 100_000_000
+        assert abs(route_init.initData.wallTimeNanos-(wall_base+route_init.logMonoTime-base)) < 100_000_000
         for number, directory in enumerate(dirs):
           assert directory.name.endswith(f'--{number}')
           assert (directory/'.sentry').exists()
@@ -214,11 +216,12 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
           timestamps = [i.timestampEof for i in preview_indexes]
           assert timestamps and all(t >= trigger_time-pre_seconds*1_000_000_000 for t in timestamps)
           if number == 0:
-            assert timestamps[0] <= trigger_time-(pre_seconds-2)*1_000_000_000
-          source_segment = first_source+number
-          first_frame = (timestamps[0]-base)//1_000_000_000-source_segment*60
-          expected_frames = list(range(first_frame, 60 if source_segment == 0 else 15))
-          assert timestamps == [base+(source_segment*60+f)*1_000_000_000 for f in expected_frames]
+            assert timestamps[0] == route_init.logMonoTime, 'Connect must not show an empty interval before playable video'
+            retained = min(pre_seconds, available_seconds-preview_delay)
+            assert timestamps[0] <= trigger_time-(retained-2)*1_000_000_000
+          first_frame = (timestamps[0]-base)//1_000_000_000
+          expected_frames = list(range(first_frame, available_seconds))
+          assert timestamps == [base+f*1_000_000_000 for f in expected_frames]
           for c, filename in enumerate(FILES):
             with av.open(str(directory/filename)) as video:
               frames = list(video.decode(video=0))
@@ -239,11 +242,8 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
             # logs, without ever claiming driving engagement or requesting sound.
             timeline = [e for e in log_events if e.which() == 'selfdriveState']
             assert len(timeline) == 2
-            # Connect's offset zero is initData, which can precede the first
-            # retained frame in a trimmed minute. Cover that leading interval.
-            assert timeline[0].logMonoTime == (route_init.logMonoTime if number == 0 else start.logMonoTime)
-            if number == 0:
-              assert timeline[0].logMonoTime < timestamps[0], 'fixture must exercise a partial first minute'
+            # Route, video, start sentinel and orange annotation share one origin.
+            assert timeline[0].logMonoTime == route_init.logMonoTime == timestamps[0]
             assert timeline[-1].logMonoTime == log_events[-1].logMonoTime
             for event in timeline:
               state = event.selfdriveState
@@ -256,7 +256,7 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
           indexes = [getattr(e, e.which()) for e in events if e.which().endswith('EncodeIdx')]
           assert len(indexes) == 4*len(expected_frames)
           assert all(i.segmentNum == number for i in indexes)
-          assert [i.frameId for i in preview_indexes] == [source_segment*1200+frame*20+10000*CAMERA_INDEX[trigger_camera]
+          assert [i.frameId for i in preview_indexes] == [frame*20+10000*CAMERA_INDEX[trigger_camera]
                                                        for frame in expected_frames]
           assert events[-1].sentinel.type == ('endOfRoute' if number == len(dirs)-1 else 'endOfSegment')
         all_events = [e for directory in dirs for e in messages(directory/'qlog.zst')]
@@ -360,6 +360,116 @@ def test_video_queue_wrap_and_repeated_events(tmp_path, monkeypatch, publisher_f
 
 
 @pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
+def test_output_minutes_start_at_retained_video_instead_of_source_minutes(tmp_path, monkeypatch):
+  monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
+  hevc = [sample_packet('libx265', color=color) for color in COLORS]
+  h264 = [sample_packet('libx264', color=color) for color in COLORS]
+  with OpenpilotPrefix():
+    messaging.reset_context()
+    Params().put('SentryPreSeconds', 30, block=True)
+    pm = messaging.PubMaster([*STREAMS, 'sentryState', 'pandaStates', 'deviceState'])
+    status = messaging.SubMaster(['sentryRecorderState'])
+    recording, capture = False, True
+    record_until = time.monotonic_ns()+60_000_000_000
+    with (tmp_path/'recorder.log').open('w') as logfile:
+      process = subprocess.Popen([str(BINARY)], cwd=BINARY.parent, stdout=logfile, stderr=subprocess.STDOUT)
+      try:
+        def control():
+          msg = messaging.new_message('sentryState', valid=True)
+          msg.sentryState.capture = capture
+          msg.sentryState.triggerCamera = 2
+          msg.sentryState.recordUntilMonoTime = record_until if recording else 0
+          pm.send('sentryState', msg)
+          msg = messaging.new_message('pandaStates', 1, valid=True)
+          msg.pandaStates[0].pandaType = log.PandaState.PandaType.tres
+          pm.send('pandaStates', msg)
+          pm.send('deviceState', messaging.new_message('deviceState', valid=True))
+
+        def await_state(predicate):
+          deadline = time.monotonic()+5
+          while time.monotonic() < deadline:
+            assert process.poll() is None, (tmp_path/'recorder.log').read_text()
+            control()
+            status.update(50)
+            if status.updated['sentryRecorderState'] and predicate(status['sentryRecorderState']):
+              return
+          pytest.fail('Recorder did not reach expected minute state')
+
+        def send_frames(first, last):
+          # Replay capture timestamps faster than real time to cross minute
+          # boundaries without a multi-minute test. Each supplied frame is an IDR.
+          for frame in range(first, last):
+            control()
+            for c, service in enumerate(STREAMS):
+              msg = messaging.new_message(FIELDS[c], valid=True)
+              msg.logMonoTime = base+frame*1_000_000_000
+              data = getattr(msg, FIELDS[c])
+              data.width, data.height = 526, 330
+              data.data = h264[c-3] if c >= 3 else hevc[c]
+              idx = data.idx
+              idx.type = log.EncodeIndex.Type.qcameraH264 if c >= 3 else log.EncodeIndex.Type.fullHEVC
+              idx.frameId = frame*20+10000*(c%3)
+              idx.segmentNum, idx.segmentId, idx.flags = 7+frame//60, (frame%60)*20, 8
+              idx.timestampSof = idx.timestampEof = msg.logMonoTime
+              pm.send(service, msg)
+            time.sleep(.003)
+          await_state(lambda _: True)
+
+        await_state(lambda _: True)
+        base = time.monotonic_ns()-75_000_000_000
+        send_frames(0, 75)
+        assert not list((tmp_path/'routes').iterdir())
+        recording = True
+        await_state(lambda s: s.recording)
+        route = status['sentryRecorderState'].route
+        send_frames(75, 205)
+        assert status['sentryRecorderState'].route == route
+        directories = sorted((tmp_path/'routes').iterdir())
+        assert len(directories) == 3
+        assert all(not (directory/'sentry.lock').exists() for directory in directories[:-1])
+        capture = False
+        await_state(lambda s: not s.recording)
+        origin = messages(directories[0]/'qlog.zst')[0].logMonoTime
+        first = (origin-base)//1_000_000_000
+        assert 45 < first < 49
+        assert origin == base+first*1_000_000_000
+        all_frames, bookmarks = [], []
+        for number, directory in enumerate(directories):
+          assert directory.name == f'{route}--{number}'
+          assert not list(directory.glob('*.lock'))
+          events = messages(directory/'qlog.zst')
+          assert events[0].logMonoTime == origin
+          indexes = [e.qNarrowRoadEncodeIdx for e in events if e.which() == 'qNarrowRoadEncodeIdx']
+          expected = list(range(first+number*60, min(first+(number+1)*60, 205)))
+          assert [i.timestampEof for i in indexes] == [base+f*1_000_000_000 for f in expected]
+          assert [i.segmentId for i in indexes] == list(range(len(expected)))
+          assert all(i.segmentNum == number for i in indexes)
+          assert [i.frameId for i in indexes] == [f*20+10000 for f in expected]
+          start = next(e for e in events if e.which() == 'sentinel')
+          assert start.logMonoTime == origin+number*60_000_000_000
+          assert events[1].selfdriveState.alertStatus == 'userPrompt'
+          assert events[1].logMonoTime == start.logMonoTime
+          for c, filename in enumerate(FILES):
+            with av.open(str(directory/filename)) as video:
+              frames = list(video.decode(video=0))
+            assert len(frames) == len(expected)
+            if c < 3:
+              assert (directory/filename).read_bytes() == hevc[c]*len(expected)
+            else:
+              times = [float(f.pts*f.time_base) for f in frames]
+              assert times == pytest.approx([times[0]+i for i in range(len(expected))], abs=.001)
+          all_frames.extend(expected)
+          bookmarks.extend(e for e in events if e.which() == 'userBookmark')
+        assert all_frames == list(range(first, 205)), 'no dropped or repeated frames at rebased minute boundaries'
+        assert len(bookmarks) == 1 and 28 < (bookmarks[0].logMonoTime-origin)/1e9 <= 30
+      finally:
+        if process.poll() is None:
+          process.send_signal(signal.SIGINT)
+          process.wait(timeout=8)
+        assert process.returncode == 0, (tmp_path/'recorder.log').read_text()
+
+
+@pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
 @pytest.mark.parametrize('requested_keyframes', [False, True])
 def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlapping_history(tmp_path, monkeypatch, requested_keyframes):
   monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
@@ -405,6 +515,7 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
     status = messaging.SubMaster(['sentryRecorderState'])
     base = time.monotonic_ns()-10_000_000_000
     recording, camera, control_frame = False, 2, 0
+    record_until = time.monotonic_ns()+60_000_000_000
     with (tmp_path/'recorder.log').open('w') as logfile:
       process = subprocess.Popen([str(BINARY)], cwd=BINARY.parent, stdout=logfile, stderr=subprocess.STDOUT)
       try:
@@ -413,7 +524,7 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
           msg.logMonoTime = base+control_frame*50_000_000
           msg.sentryState.capture = True
           msg.sentryState.triggerCamera = camera
-          msg.sentryState.recordUntilMonoTime = time.monotonic_ns()+60_000_000_000 if recording else 0
+          msg.sentryState.recordUntilMonoTime = record_until if recording else 0
           pm.send('sentryState', msg)
           msg = messaging.new_message('pandaStates', 1, valid=True)
           msg.pandaStates[0].pandaType = log.PandaState.PandaType.tres
@@ -487,6 +598,9 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
           for image, (source, _) in zip(frames, expected, strict=True):
             assert abs(float(image.to_ndarray(format='rgb24')[10, 10].mean())-COLORS[source]) < 10
           indexes = [e.qNarrowRoadEncodeIdx for e in messages(directory/'qlog.zst') if e.which() == 'qNarrowRoadEncodeIdx']
+          # Handoffs with an unchanged deadline add no bookmarks. The second
+          # route retains the earlier event's marker in its overlapping pre-roll.
+          assert sum(e.which() == 'userBookmark' for e in messages(directory/'qlog.zst')) == (1 if full_count == 90 else 2)
           assert [i.frameId for i in indexes] == [10000*source+frame for source, frame in expected]
           assert [i.segmentId for i in indexes] == list(range(len(expected)))
           for c, filename in enumerate(FILES[:3]):
