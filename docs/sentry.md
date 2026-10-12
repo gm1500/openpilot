@@ -39,11 +39,15 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   scattered snowflakes cannot pool their area to meet that floor. Fisheye size compensation
   is approximate, especially near the edges; this is not a physical object-size estimate.
   Exposure compensation, neighboring-pixel support and frame-to-frame change checks reject
-  noise and stationary background afterimages. At sensitivity 50, the minimum luma change is
+  noise and stationary background afterimages. In normal light at sensitivity 50, the minimum luma change is
   18 levels for the forward cameras and 10 for the cabin's lower-contrast IR/window footage.
   The cabin slider curve retains the same least/most-sensitive endpoints as the forward
   cameras; its middle is calibrated separately. The sensitivity slider changes pixel-change
-  thresholds and minimum saving area. This is motion detection, not object identification;
+  thresholds and minimum saving area. In low light, thresholds smoothly decrease with background
+  brightness, reaching 2.5 luma levels at sensitivity 50 in a very dark scene. Spatial averaging
+  and a measured frame-difference noise floor suppress sensor noise; connected area and the
+  0.6-second confirmation still apply. Normal-light thresholds are unchanged.
+  This is motion detection, not object identification;
   large nearby droplets, heavy snow, shadows, reflections and passing traffic can still
   trigger it. Small/distant objects or brief movement may not save an event. There are no
   person, vehicle or license-plate rules in this version.
@@ -157,11 +161,20 @@ publisher. Log contents are tested locally; bookmark appearance in Connect still
 verification against an uploaded device event.
 
 The Connect preview (`qcamera.ts`) starts with a confirmed lens, including its available
-pre-event footage. During an open recording, the wide lens with the largest currently
-moving region takes over at the next 5 Hz sample, even if the original lens still sees
+pre-event footage. During an open recording, substantially stronger motion in the other
+wide lens can take over at the next 5 Hz sample, even if the original lens still sees
 movement. The score is the fraction of the sampled image occupied by changing pixels
-in that region, not a physical object-size estimate. Equal scores or no motion retain
-the current view. Handoffs do not wait for recording confirmation; eye-only movement
+in that region, not a physical object-size estimate. Close scores or no motion retain
+the current view. A modest challenger must exceed the current score by 35% plus a small
+margin for two samples (about 0.2 seconds), with a one-second hold after a cut. Decisive
+motion can bypass that hold. Recent motion decays over 0.2 seconds to bridge brief pauses
+in a stride without keeping the previous lens dominant as the person leaves its view.
+Both wide lenses use the same selection rules with no position-based weighting or assumed
+window, floor or dashboard regions. The detector does not identify windows or distinguish
+people from shadows; a strong, persistent shadow can still win. Lens area compensation
+depends on the camera optics, and low-light thresholds adapt to scene brightness and noise,
+rather than a particular vehicle interior. The handoff delay does not affect event detection
+or the immediate red eye. Handoffs do not wait for recording confirmation; eye-only movement
 can change an open preview but cannot start/extend a route or add a bookmark. New
 events still choose a confirmed source, preserving the initiating event in the pre-roll.
 This follows motion through the views without identifying or tracking a person.
@@ -304,6 +317,25 @@ power telemetry alone can miss upstream losses. Choose the voltage threshold for
 battery and verify with a meter before unattended operation.
 
 ## Validation
+
+The dark-garage approach supplied on October 12 was replayed at the recorded 50% setting.
+The revised wide detector confirms motion at 11.40 seconds, compared with 15.00 seconds
+previously; the flashlight first appears at about 13.6 seconds. There are no triggers in
+the preceding quiet portion. Replay samples decoded Y planes at 5 Hz with watermark rows
+excluded, so compression and downsampling make it an approximation of live raw-camera detection.
+Daylight cabin replay retains its earlier trigger timing. The walk-around preview only
+contains the camera selected at each instant; it cannot reconstruct both simultaneous
+camera inputs. A regression using its observed winning scores, without spatial weighting,
+verifies a handoff at 38.178 seconds and no rapid return to the cabin during that crossing,
+including real 5 Hz scheduling jitter. Swapping the lens identities gives the same behavior.
+Full simultaneous-camera behavior still needs a new parked walk-around test. Synthetic
+checks cover dim moving subjects, dark sensor noise, brightness changes, scattered specks,
+near-ties, pauses, large new motion, and returning to the previous lens. Translated and
+rotated subjects receive equal priority, and dim-approach checks include +/-12 degree
+tilts at different image heights. Other vehicles and mounting angles still need real footage
+validation; those checks do not establish performance for every installation.
+The update passed 135 detector/controller/settings-data checks and lint. Fourteen UI-dependent
+cases were excluded because this environment lacks `pyray`; this change does not edit the UI.
 
 The 50% calibration was replayed against the supplied two consecutive one-minute segments
 from all three cameras: garage opening/closing in both forward views and cabin-window

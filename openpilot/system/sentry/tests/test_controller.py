@@ -8,44 +8,95 @@ from openpilot.cereal import log
 from openpilot.system.sentry import sentryd
 from openpilot.system.sentry.config import DEFAULTS, CAMERA_WARMUP_SECONDS
 from openpilot.system.sentry.location import vehicle_identity
-from openpilot.system.sentry.motion import Motion
+from openpilot.system.sentry.motion import Motion, PreviewSelector
 
 
 @pytest.mark.parametrize('first,second', [(1, 2), (2, 1)])
-def test_preview_follows_strongest_current_wide_motion(first, second):
+def test_preview_hands_off_decisive_wide_motion_and_holds_near_ties(first, second):
+  preview = PreviewSelector()
   results = {stream: Motion() for stream in range(3)}
   results[first] = Motion(active=True, score=.1, triggered=True)
-  camera = sentryd.trigger_source(results, 2)
-  assert camera == first
-  # Once recording, stronger motion takes over on its very first sample,
-  # even while the original lens still has confirmed motion.
-  results[second] = Motion(active=True, score=.8, triggered=False)
-  camera = sentryd.trigger_source(results, camera, recording=True)
-  assert camera == second
-  results[0] = Motion(active=True, score=1., triggered=True)  # Narrow cannot take preview priority.
-  assert sentryd.trigger_source(results, camera, recording=True) == second
-  # Equal scores retain the current view; a larger score switches back.
+  assert preview.update(results, 10.) == first
+  # A clearly stronger subject still takes over on its first sample.
+  results[second] = Motion(active=True, score=.8)
+  assert preview.update(results, 10.2, recording=True) == second
+  results[0] = Motion(active=True, score=1., triggered=True)  # Narrow never takes the preview.
   results[first] = Motion(active=True, score=.8, triggered=True)
-  assert sentryd.trigger_source(results, camera, recording=True) == second
-  results[first] = Motion(active=True, score=.9, triggered=False)
-  assert sentryd.trigger_source(results, camera, recording=True) == first
+  assert preview.update(results, 10.4, recording=True) == second
+  results[first].score = .9
+  assert preview.update(results, 10.6, recording=True) == second  # Small score reversals no longer cut back.
+  results[first] = Motion(active=True, score=1.4)
+  assert preview.update(results, 11.2, recording=True) == second
+  assert preview.update(results, 11.4, recording=True) == first
   results[first] = results[second] = Motion()
-  assert sentryd.trigger_source(results, camera, recording=True) == second
+  assert preview.update(results, 11.6, recording=True) == first
 
 
 def test_new_event_preview_uses_confirmed_source_even_with_larger_eye_only_motion():
+  preview = PreviewSelector()
   results = {1: Motion(active=True, score=.8), 2: Motion(active=True, score=.1, triggered=True)}
-  assert sentryd.trigger_source(results, 1) == 2
-  assert sentryd.trigger_source(results, 2, recording=True) == 1
+  assert preview.update(results, 10.) == 2
+  assert preview.update(results, 10.2, recording=True) == 1
 
 
 @pytest.mark.parametrize('enabled,expected', [((1, 2), 2), ((1,), 1), ((2,), 2)])
 def test_manual_preview_uses_a_wide_camera_and_eye_only_motion_waits_for_recording(enabled, expected):
+  preview = PreviewSelector()
   results = {stream: Motion() for stream in enabled}
-  assert sentryd.trigger_source(results, 2, manual=True) == expected
+  assert preview.update(results, 10., manual=True) == expected
   results[enabled[0]] = Motion(active=True, score=.5)
-  assert sentryd.trigger_source(results, expected) == expected
-  assert sentryd.trigger_source(results, expected, manual=True) == enabled[0]
+  assert preview.update(results, 11.) == expected
+  assert preview.update(results, 12., manual=True) == enabled[0]
+
+
+@pytest.mark.parametrize('first,second', [(1, 2), (2, 1)])
+def test_preview_handoff_holds_through_near_ties_and_single_sample_reversals(first, second):
+  preview = PreviewSelector()
+  assert preview.update({first: Motion(True, .003, triggered=True)}, 10.) == first
+  # Two modest hits can move the view in 0.2 s, in either direction and at
+  # any image position. No window/dashboard coordinates are assumed.
+  old = Motion(True, .001, x=.15, y=.15)
+  new = Motion(True, .003, x=.85, y=.85)
+  assert preview.update({first: old, second: new}, 12., recording=True) == first
+  assert preview.update({first: old, second: new}, 12.2, recording=True) == second
+  # Pauses in a stride, momentary missing frames and alternating scores must
+  # not recreate the cabin/front/cabin cuts in the supplied walk-around clip.
+  for i in range(8):
+    moving = new if i % 2 else Motion()
+    assert preview.update({first: old, second: moving}, 12.4+i*.2, recording=True) == second
+  # Strong motion in the previous camera can still win immediately.
+  assert preview.update({first: Motion(True, .02), second: new}, 14.2, recording=True) == first
+  preview.reset()
+  assert preview.update({2: Motion(True, .001, triggered=True)}, 20.) == 2
+
+
+def test_small_preview_challenger_requires_continuity_and_does_not_latch_across_frame_gap():
+  preview = PreviewSelector()
+  preview.update({1: Motion(True, .001, triggered=True)}, 10.)
+  front = {1: Motion(), 2: Motion(True, .003)}
+  assert preview.update(front, 12., recording=True) == 1
+  assert preview.update({}, 12.2, recording=True) == 1
+  assert preview.update(front, 12.4, recording=True) == 1
+  assert preview.update(front, 15., recording=True) == 1
+  assert preview.update(front, 15.2, recording=True) == 2
+
+
+@pytest.mark.parametrize('swap_cameras', [False, True])
+def test_handoff_accepts_real_sample_jitter_and_rejects_short_score_reversals(swap_cameras):
+  preview = PreviewSelector()
+  initial = 2 if swap_cameras else 1
+  preview.update({initial: Motion(True, .006, triggered=True)}, 35.)
+  # Winning-region observations around the daylight door-to-front walk. The
+  # unobserved lens is omitted; this tests selection timing, not a full video replay.
+  # Scores have no spatial weighting. Swapping lens identities must behave alike.
+  observations = [(37.378, 1, .0060), (37.580, 1, .0037), (37.780, 1, .0041),
+                  (37.979, 2, .0030), (38.178, 2, .0026), (38.377, 1, .0024),
+                  (38.577, 2, .0028), (38.776, 2, .0018), (38.975, 1, .0015),
+                  (39.171, 1, .0007), (39.370, 1, .0003)]
+  for now, stream, raw in observations:
+    camera = 3-stream if swap_cameras else stream
+    selected = preview.update({camera: Motion(True, raw)}, now, recording=True)
+    assert selected == (initial if now < 38.178 else 3-initial)
 
 
 @pytest.mark.parametrize('stream', [0, 1, 2])

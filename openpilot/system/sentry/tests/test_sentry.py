@@ -95,6 +95,93 @@ def test_fifty_percent_detects_camera_scaled_motion(stream, contrast, shape):
   assert all(r.triggered for r in results[3:])
 
 
+@pytest.mark.parametrize('stream', [1, 2])
+def test_dark_low_contrast_approach_triggers_at_fifty_without_a_flashlight(stream):
+  detector = MotionDetector.for_camera(stream, 1928, 1208)
+  base = np.full((80, 128), 21, dtype=np.float32)
+  warm(detector, base)
+  rng = np.random.default_rng(7)
+  results = []
+  for i in range(12):
+    image = base+rng.normal(0, .5, base.shape)
+    image[28:44, 20+i*2:34+i*2] -= 4
+    results.append(detector.update(image, 3.+i*.2, 50))
+  assert results[0].active and not results[0].triggered
+  assert any(m.triggered for m in results[3:6])
+  assert all(.15 < m.x < .5 and .3 < m.y < .6 for m in results if m.active)
+
+
+@pytest.mark.parametrize('stream', [1, 2])
+@pytest.mark.parametrize('sensitivity', [50, 100])
+@pytest.mark.parametrize('noise', [.5, 2., 5.])
+def test_dark_noise_and_uniform_exposure_changes_do_not_save(stream, sensitivity, noise):
+  detector = MotionDetector.for_camera(stream, 1928, 1208)
+  rows, cols = np.indices((80, 128))
+  base = 20.+rows/16+cols/32
+  rng = np.random.default_rng(5)
+  for i in range(180):
+    image = base+(3 if i >= 80 else 0)+rng.normal(0, noise, base.shape)
+    assert not detector.update(image, 1.+i*.2, sensitivity).triggered
+
+
+@pytest.mark.parametrize('stream', [1, 2])
+def test_dark_scattered_specks_cannot_pool_into_an_event(stream):
+  detector = MotionDetector.for_camera(stream, 1928, 1208)
+  base = np.full((80, 128), 21, dtype=np.float32)
+  warm(detector, base)
+  for i in range(30):
+    image = base.copy()
+    for y in range(8, 70, 14):
+      for x in range(8, 110, 16):
+        shift = i % 3
+        image[y+shift:y+shift+3, x+shift:x+shift+3] += 30
+    assert not detector.update(image, 3.+i*.2, 100).triggered
+
+
+@pytest.mark.parametrize('stream', [1, 2])
+@pytest.mark.parametrize('brightness,contrast', [(70, 70), (21, -4)])
+def test_motion_priority_is_independent_of_image_position_and_orientation(stream, brightness, contrast):
+  reference = None
+  for top, left, orientation in ((5, 8, 0), (30, 50, 0), (62, 96, 0), (30, 50, 1), (30, 50, 2)):
+    detector = MotionDetector.for_camera(stream, 1928, 1208)
+    base = np.full((80, 128), brightness, dtype=np.float32)
+    warm(detector, np.rot90(base, orientation))
+    results = []
+    for i in range(6):
+      image = base.copy()
+      image[top:top+12, left+i*2:left+15+i*2] += contrast
+      results.append(detector.update(np.rot90(image, orientation), 3.+i*.2, 50))
+    assert all(m.active for m in results) and results[-1].triggered
+    behavior = [(m.score, m.triggered) for m in results]
+    if reference is None:
+      reference = behavior
+    assert behavior == reference
+    if orientation == 0:
+      assert top/79 <= results[-1].y <= (top+12)/79
+      assert results[-1].x > results[0].x  # Eye follows the subject in every region.
+
+
+@pytest.mark.parametrize('stream', [1, 2])
+@pytest.mark.parametrize('angle', [-12, 0, 12])
+def test_dim_approach_tolerates_mount_tilt_and_scene_position(stream, angle):
+  rows, cols = np.indices((80, 128))
+  radians = np.deg2rad(angle)
+  for center_y in (16, 40, 62):
+    detector = MotionDetector.for_camera(stream, 1928, 1208)
+    base = np.full((80, 128), 21, dtype=np.float32)
+    warm(detector, base)
+    results = []
+    for i in range(8):
+      dx, dy = cols-(30+i*2), rows-center_y
+      x = dx*np.cos(radians)+dy*np.sin(radians)
+      y = -dx*np.sin(radians)+dy*np.cos(radians)
+      image = base.copy()
+      image[(np.abs(x) < 8) & (np.abs(y) < 7)] -= 4
+      results.append(detector.update(image, 3.+i*.2, 50))
+    assert results[0].active and not results[0].triggered
+    assert any(m.triggered for m in results[3:6])
+
+
 @pytest.mark.parametrize('sensitivity', [1, 100])
 def test_cabin_calibration_preserves_slider_endpoints(sensitivity):
   original = MotionDetector(area_scale=camera_area_scale(1, 1928, 1208))

@@ -13,7 +13,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH, CAMERA_WARMUP_SECONDS, RECORDING_CAMERA_MASK, MOTION_CAMERAS
 from openpilot.system.sentry.clock import SentryClock
 from openpilot.system.sentry.location import vehicle_identity, parked_location, gps_location
-from openpilot.system.sentry.motion import MotionDetector, Motion
+from openpilot.system.sentry.motion import MotionDetector, Motion, PreviewSelector
 
 
 def recent(sm, service, now, timeout=2.):
@@ -37,19 +37,6 @@ def inactive_reason(params, sm, now, device_type):
   if sm['deviceState'].started or not params.get_bool('IsOffroad'):
     return 'Waiting for offroad'
   return ''
-
-
-def trigger_source(results, previous, recording=False, manual=False):
-  # Start on a confirmed lens so pre-roll shows what triggered the event. Once
-  # saving, follow the largest fresh moving region without another confirmation
-  # delay. Scores are fractions of the same sampled image area for both lenses.
-  candidates = {stream: motion for stream, motion in results.items() if stream in MOTION_CAMERAS and
-                (motion.triggered or (recording or manual) and motion.active)}
-  if candidates:
-    return max(candidates, key=lambda stream: (candidates[stream].score, stream == previous))
-  if manual:
-    return next((stream for stream in MOTION_CAMERAS if stream in results), previous)
-  return previous
 
 
 class CameraMotion:
@@ -99,6 +86,7 @@ def main():
   cooldown = False
   record_until = 0.
   trigger_camera = 2
+  preview = PreviewSelector()
   gps_finished = False
   low_since = None
   cutoff_reason = ''
@@ -120,6 +108,7 @@ def main():
       best, motion_camera = Motion(), 2
       triggered = False
       if not session:
+        preview.reset()
         off_since, location, cameras = None, None, {}
         ready_since = None
         arm_complete = False
@@ -238,13 +227,14 @@ def main():
           if manual:
             params.remove('SentryManualTrigger')
           if manual or can_trigger:
-            trigger_camera = trigger_source(results, trigger_camera, recording=record_until > now, manual=manual)
+            trigger_camera = preview.update(results, now, recording=record_until > now, manual=manual)
           if manual or triggered:
             record_until = now+setting(params, 'SentryPostSeconds')
           if recorder_fresh and sm['sentryRecorderState'].recording:
             phase = 'Recording'
         else:
           cameras.clear()
+          preview.reset()
           ready_since = None
           arm_complete = False
           record_until = 0.

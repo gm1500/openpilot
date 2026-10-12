@@ -1,6 +1,9 @@
 """Immediate eye motion and sustained, connected-region recording triggers."""
 from dataclasses import dataclass
+import math
 import numpy as np
+
+from openpilot.system.sentry.config import MOTION_CAMERAS
 
 MOTION_HOLD_SECONDS = .6
 MOTION_GAP_SECONDS = .5
@@ -36,6 +39,54 @@ class Motion:
   triggered: bool = False
 
 
+class PreviewSelector:
+  """Follow stronger motion without alternating views on near-ties or brief shadows."""
+  def __init__(self):
+    self.reset()
+
+  def reset(self):
+    self.camera = 2
+    self.scores = {}
+    self.last_time = None
+    self.switched_at = -math.inf
+    self.pending = None
+    self.pending_since = 0.
+
+  def update(self, results, now, recording=False, manual=False):
+    fresh = {stream: m.score for stream, m in results.items() if stream in MOTION_CAMERAS and m.active}
+    dt = now-self.last_time if self.last_time is not None else 0.
+    self.last_time = now
+    if not recording or manual:
+      candidates = {s: score for s, score in fresh.items() if manual or results[s].triggered}
+      if candidates:
+        self.camera = max(candidates, key=lambda s: (candidates[s], s == self.camera))
+      elif manual:
+        self.camera = next((s for s in MOTION_CAMERAS if s in results), self.camera)
+      self.scores, self.pending, self.switched_at = fresh, None, now
+      return self.camera
+
+    # Brief pauses in a person's stride should not let a reflection steal the
+    # view. Only fresh motion can challenge; decayed scores support staying put.
+    if not 0 < dt <= 1.:
+      self.scores, self.pending = {}, None
+    self.scores = {s: max(fresh.get(s, 0.), self.scores.get(s, 0.)*math.exp(-max(dt, 0.)/.2)) for s in MOTION_CAMERAS}
+    challenger = max(fresh, key=lambda s: (fresh[s], s == self.camera), default=self.camera)
+    score, current = fresh.get(challenger, 0.), self.scores.get(self.camera, 0.)
+    if challenger == self.camera or score < max(.001, 1.35*current+.0005):
+      self.pending = None
+      return self.camera
+
+    # A clear new subject still hands off immediately. Smaller differences
+    # need two samples (0.2 s at 5 Hz), plus a one-second hold after a cut.
+    decisive = score >= max(.005, 2.5*current+.002)
+    if self.pending != challenger:
+      self.pending, self.pending_since = challenger, now
+    # Leave scheduling tolerance around the nominal 0.2 s sample interval.
+    if decisive or (now-self.pending_since >= .15 and now-self.switched_at >= 1.-1e-6):
+      self.camera, self.switched_at, self.pending = challenger, now, None
+    return self.camera
+
+
 @dataclass
 class Region:
   area: int = 0
@@ -50,6 +101,11 @@ class Region:
   def near(self, other):
     return (self.left <= other.right+4 and other.left <= self.right+4 and
             self.top <= other.bottom+4 and other.top <= self.bottom+4)
+
+
+def box_mean(values):
+  padded = np.pad(values, 1, mode='edge')
+  return sum(padded[y:y+values.shape[0], x:x+values.shape[1]] for y in range(3) for x in range(3))/9.
 
 
 def regions(mask, changed):
@@ -152,7 +208,20 @@ class MotionDetector:
     threshold = float(np.interp(sensitivity, (.01, .5, 1.), (27.8, self.midpoint_threshold, 8.)))
     movement = current-self.previous
     movement -= np.median(movement)
-    changed = np.abs(movement) > max(6., threshold*.6)
+    movement_threshold = max(6., threshold*.6)
+    # In a dark garage the subject can differ by just 3-5 luma levels. Use a
+    # lower contrast threshold only in low light, with spatial averaging and
+    # a measured temporal-noise floor. Daylight thresholds stay unchanged.
+    light = float(np.clip((np.percentile(self.background, 80)-28.)/36., 0., 1.))
+    if light < 1.:
+      difference = light*difference+(1.-light)*box_mean(difference)
+      movement = light*movement+(1.-light)*box_mean(movement)
+      noise = float(np.median(np.abs(movement)))
+      dark_threshold = float(np.interp(sensitivity, (.01, .5, 1.), (6., 2.5, 1.75)))
+      dark_movement = float(np.interp(sensitivity, (.01, .5, 1.), (3., 1., .75)))
+      threshold = max(light*threshold+(1.-light)*dark_threshold, 4.*noise)
+      movement_threshold = max(light*movement_threshold+(1.-light)*dark_movement, 3.*noise)
+    changed = np.abs(movement) > movement_threshold
     self.previous = current.copy()
     mask = np.abs(difference) > threshold
     # Require local support; isolate hot pixels, sensor noise and rain speckles.
