@@ -7,7 +7,8 @@ import json
 import math
 import re
 import time
-from dataclasses import dataclass
+from bisect import bisect_right
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import pairwise
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -21,6 +22,33 @@ ZONE_RADIUS = 1500.
 MAX_ROWS = 1000
 MAX_BYTES = 2 * 1024 * 1024
 EDMONTON_URL = 'https://data.edmonton.ca/resource/6vjs-shqe.json'
+MIN_HEADING_BASELINE = 12.  # metres; short median flares aren't the road's overall direction
+
+
+def _segment_bearings(geometry) -> tuple[float, ...]:
+  latitude, longitude = geometry[0]
+  scale = math.pi / 180 * 6371000.
+  points = [((lon - longitude) * scale * math.cos(math.radians(latitude)), (lat - latitude) * scale) for lat, lon in geometry]
+  along = [0.]
+  for (ax, ay), (bx, by) in pairwise(points):
+    along.append(along[-1] + math.hypot(bx - ax, by - ay))
+
+  def point_at(distance):
+    i = min(bisect_right(along, distance) - 1, len(points) - 2)
+    length = along[i + 1] - along[i]
+    alpha = (distance - along[i]) / length if length > 0. else 0.
+    return tuple(a + alpha * (b - a) for a, b in zip(points[i], points[i + 1], strict=True))
+
+  bearings = []
+  for i, (a, b) in enumerate(pairwise(points)):
+    if along[i + 1] - along[i] < MIN_HEADING_BASELINE:
+      midpoint = (along[i] + along[i + 1]) / 2
+      start = max(0., min(midpoint - MIN_HEADING_BASELINE / 2, along[-1] - MIN_HEADING_BASELINE))
+      before, after = point_at(start), point_at(min(along[-1], start + MIN_HEADING_BASELINE))
+      if math.hypot(after[0] - before[0], after[1] - before[1]) >= 1.:
+        a, b = before, after
+    bearings.append(math.degrees(math.atan2(b[0] - a[0], b[1] - a[1])))
+  return tuple(bearings)
 
 
 @dataclass(frozen=True)
@@ -32,6 +60,11 @@ class SpeedZone:
   timezone: str
   kind: str
   source: str
+  _bearings: tuple[float, ...] = field(init=False, repr=False, compare=False)
+
+  def __post_init__(self):
+    # Geometry is immutable. Compute once per download, outside mapd's 5 Hz loop.
+    object.__setattr__(self, '_bearings', _segment_bearings(self.geometry))
 
 
 @dataclass(frozen=True)
@@ -97,7 +130,7 @@ def _on_zone(zone: SpeedZone, match) -> bool:
   latitude, longitude = match.position
   scale = math.pi / 180 * 6371000.
   points = [((lon - longitude) * scale * math.cos(math.radians(latitude)), (lat - latitude) * scale) for lat, lon in zone.geometry]
-  for (ax, ay), (bx, by) in pairwise(points):
+  for ((ax, ay), (bx, by)), bearing in zip(pairwise(points), zone._bearings, strict=True):
     dx, dy = bx - ax, by - ay
     length_sq = dx * dx + dy * dy
     if length_sq < 1.:
@@ -106,7 +139,7 @@ def _on_zone(zone: SpeedZone, match) -> bool:
     # No endpoint-radius extension: being near a zone is insufficient.
     if not 0. <= projection <= 1. or math.hypot(ax + projection * dx, ay + projection * dy) > 12.:
       continue
-    delta = abs((math.degrees(math.atan2(dx, dy)) - match.bearing + 180) % 360 - 180)
+    delta = abs((bearing - match.bearing + 180) % 360 - 180)
     if min(delta, 180 - delta) <= 30.:
       return True
   return False
