@@ -19,7 +19,6 @@ class SentrySlider(Widget):
     self.value = setting(params, key)
     self.dragging = False
     self._rect.height = 190
-    self.set_enabled(lambda: not ui_state.ignition)
 
   def set_parent_rect(self, rect):
     super().set_parent_rect(rect)
@@ -63,7 +62,6 @@ class SentryCameraButtons(MultipleButtonAction):
   def __init__(self, params):
     super().__init__(['Narrow', 'Wide', 'Cabin'], button_width=210)
     self.params = params
-    self.set_enabled(lambda: not ui_state.ignition)
 
   def is_button_selected(self, index):
     return setting(self.params, self.KEYS[index])
@@ -77,7 +75,6 @@ class SentryDurationButtons(MultipleButtonAction):
   def __init__(self, params, key):
     super().__init__([f'{seconds}s' for seconds in DURATION_PRESETS], button_width=210)
     self.params, self.key = params, key
-    self.set_enabled(lambda: not ui_state.ignition)
 
   def is_button_selected(self, index):
     return setting(self.params, self.key) == DURATION_PRESETS[index]
@@ -92,9 +89,10 @@ class SentryLayout(Widget):
     super().__init__()
     self.params = Params()
     self._enable_toggle = toggle_item('Enable Sentry',
-                                     'Arms after ignition turns off. Switch off or press STOP to end Sentry until you enable it again.',
+                                     'Can be changed in any vehicle state. Arms after ignition turns off. ' +
+                                     'Switch off or press STOP to end Sentry until you enable it again.',
                                      initial_state=setting(self.params, 'SentryEnabled'),
-                                     callback=self._set_sentry_enabled, enabled=self._can_toggle_sentry)
+                                     callback=self._set_sentry_enabled)
     self._stop_button = button_item('Sentry', 'STOP',
                                    'Stops parked capture and the red eye. Saved events remain available for manual upload from Connect.',
                                    callback=lambda: self._set_sentry_enabled(False),
@@ -142,12 +140,8 @@ class SentryLayout(Widget):
     ])
     self.scroller = self._child(Scroller(items, spacing=0, line_separator=True))
 
-  def _can_toggle_sentry(self):
-    return setting(self.params, 'SentryEnabled') or (not ui_state.ignition and not ui_state.started)
-
   def _set_sentry_enabled(self, enabled):
-    if enabled and (ui_state.ignition or ui_state.started):
-      return
+    # Settings persist in any vehicle state; sentryd gates parked capture.
     # Persist the command before refreshing the switch or evaluating process gates.
     self.params.put_bool('SentryEnabled', enabled, block=True)
     if not enabled:
@@ -160,7 +154,7 @@ class SentryLayout(Widget):
 
   def toggle(self, key, title, description=None):
     return toggle_item(title, description, initial_state=setting(self.params, key),
-                       callback=lambda value: self.params.put_bool(key, value), enabled=lambda: not ui_state.ignition)
+                       callback=lambda value: self.params.put_bool(key, value))
 
   def phase_status(self):
     if not setting(self.params, 'SentryEnabled'):

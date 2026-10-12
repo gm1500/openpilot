@@ -353,8 +353,8 @@ def test_eye_touch_suppression_lasts_until_next_timeout(monkeypatch):
 
 
 @pytest.mark.parametrize('stop_control', ['button', 'toggle'])
-@pytest.mark.parametrize('ignition,started', [(False, False), (True, False), (False, True)])
-def test_settings_can_stop_sentry_and_only_reenable_offroad(monkeypatch, tmp_path, stop_control, ignition, started):
+@pytest.mark.parametrize('ignition,started', [(False, False), (True, False), (False, True), (True, True)])
+def test_settings_remain_editable_in_all_vehicle_states(monkeypatch, tmp_path, stop_control, ignition, started):
   monkeypatch.setenv('SCALE', '1')
   import pyray as rl
   from openpilot.common.params import Params
@@ -391,6 +391,13 @@ def test_settings_can_stop_sentry_and_only_reenable_offroad(monkeypatch, tmp_pat
   assert layout._enable_toggle.action_item.enabled
   assert layout._enable_toggle.action_item.get_state()
   assert state.sentry_active == (not ignition and not started)
+  for row in layout.scroller._items:
+    if isinstance(row, ui.SentrySlider):
+      assert row.enabled
+    elif row.title == 'Save an event now':
+      assert row.action_item.enabled == state.sentry_active
+    else:
+      assert row.action_item.enabled
 
   if stop_control == 'button':
     layout._stop_button.callback()
@@ -404,12 +411,12 @@ def test_settings_can_stop_sentry_and_only_reenable_offroad(monkeypatch, tmp_pat
   assert device.sentry_motion_until == 0.
   assert not state.sentry_active  # A fresh capture=true message cannot keep the eye alive.
 
-  assert layout._enable_toggle.action_item.enabled == (not ignition and not started)
-  layout._set_sentry_enabled(True)
-  assert params.get_bool('SentryEnabled') == (not ignition and not started)
-  state.ignition = state.started = False
-  layout._set_sentry_enabled(True)
+  assert layout._enable_toggle.action_item.enabled
+  layout._enable_toggle.action_item.toggle._handle_mouse_release(rl.Vector2())
   assert params.get_bool('SentryEnabled') and layout._enable_toggle.action_item.get_state()
+  assert state.sentry_active == (not ignition and not started)
+  state.ignition = state.started = False
+  assert state.sentry_active
   # Reflect an external change, e.g. a stop issued over SSH, on the next UI update.
   params.put_bool('SentryEnabled', False, block=True)
   layout._update_state()
@@ -442,8 +449,9 @@ def test_camera_buttons_toggle_independently_and_keep_personality_exclusive(monk
     buttons._handle_mouse_release(rl.Vector2(x, 85))
   assert not any(buttons.is_button_selected(i) for i in range(3))
   state.ignition = True
+  assert buttons.enabled
   buttons._handle_mouse_release(rl.Vector2(105, 85))
-  assert not any(buttons.is_button_selected(i) for i in range(3))
+  assert [buttons.is_button_selected(i) for i in range(3)] == [True, False, False]
   selected = []
   personality = MultipleButtonAction(['A', 'B', 'C'], 210, callback=selected.append)
   personality.select_button(2)
@@ -469,8 +477,9 @@ def test_duration_buttons_select_one_preset(monkeypatch, tmp_path, key):
     assert params.get(key) == config.DURATION_PRESETS[index]
     assert [buttons.is_button_selected(i) for i in range(3)] == [i == index for i in range(3)]
   state.ignition = True
+  assert buttons.enabled
   buttons._handle_mouse_release(rl.Vector2(105, 85))
-  assert params.get(key) == 60
+  assert params.get(key) == 15
 
 
 def test_process_gates_do_not_start_driving_controls(monkeypatch):

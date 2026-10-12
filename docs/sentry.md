@@ -2,7 +2,9 @@
 
 Branch: `sentry-mode-poc`, based on `boat-anchor` at `2ee8df154017362e3a791c90d788172508f428df`.
 
-Manage the feature under **Settings → Sentry** while parked. On first use it defaults on;
+Manage the feature under **Settings → Sentry** in any vehicle state, including onroad.
+All configuration controls remain editable; enabling Sentry onroad takes effect when parked.
+Capture and manual saves still require an active parked session. On first use it defaults on;
 previously saved enable/disable choices are retained, including an explicit STOP.
 The status row reports ignition/offroad/health blockers, missing camera frames, missing encoded
 video or an unavailable controller. Camera warmup and arming have separate countdowns once video is arriving; the
@@ -237,7 +239,8 @@ To stop an active session, tap the display, open **Settings → Sentry**, and pr
 at the top or turn **Enable Sentry** off. Turning it off remains available even if ignition
 is reported. Capture/GPS process gates and the eye honor the master switch directly;
 the current event is finalized and saved events remain available for manual upload from
-Connect. Sentry stays disabled until you explicitly enable it again while offroad.
+Connect. Sentry stays disabled until you explicitly enable it again. The switch can be changed
+onroad; capture still waits for ignition off and an offroad state.
 
 Sentry's cutoff/time limits replace the stock offroad software limits only while the
 controller has a fresh parked-session lease. `DisablePowerDown` does not bypass sentry's cutoff.
