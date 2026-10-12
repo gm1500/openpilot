@@ -100,6 +100,7 @@ public:
       write(cp_message.toBytes());
     }
     sentinel(number ? SentinelType::START_OF_SEGMENT : SentinelType::START_OF_ROUTE, start);
+    sentry_timeline(start);
   }
   void write(kj::ArrayPtr<const kj::byte> bytes) {
     rlog->write(const_cast<kj::byte *>(bytes.begin()), bytes.size());
@@ -110,6 +111,26 @@ public:
     auto event = msg.initEvent();
     event.setLogMonoTime(time);
     event.initSentinel().setType(type);
+    write(msg.toBytes());
+  }
+  void sentry_timeline(uint64_t time) {
+    // Saved-log annotation only: never publish synthetic selfdriveState on IPC.
+    // Connect paints userPrompt intervals orange and bookmarks above them yellow.
+    // Repeat at segment boundaries so partial uploads retain the Sentry identity.
+    MessageBuilder msg;
+    auto event = msg.initEvent(true);
+    event.setLogMonoTime(time);
+    auto state = event.initSelfdriveState();
+    state.setState(cereal::SelfdriveState::OpenpilotState::DISABLED);
+    state.setEnabled(false);
+    state.setActive(false);
+    state.setEngageable(false);
+    state.setAlertStatus(cereal::SelfdriveState::AlertStatus::USER_PROMPT);
+    state.setAlertSize(cereal::SelfdriveState::AlertSize::SMALL);
+    state.setAlertType("sentryRecording/permanent");
+    state.setAlertText1("Sentry recording");
+    state.setAlertText2("Parked event");
+    state.setAlertSound(cereal::SelfdriveState::AudibleAlert::NONE);
     write(msg.toBytes());
   }
   void append(const Packet &packet) {
@@ -180,6 +201,7 @@ public:
     for (auto &v : video) if (v) v->flush();
   }
   void close(bool last) {
+    sentry_timeline(last_time);
     sentinel(last ? SentinelType::END_OF_ROUTE : SentinelType::END_OF_SEGMENT, last_time);
     for (auto &v : video) v.reset();
     rlog.reset();

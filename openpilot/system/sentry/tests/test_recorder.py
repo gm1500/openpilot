@@ -103,6 +103,7 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
     params.put('SentryPreSeconds', pre_seconds, block=True)
     pm = messaging.PubMaster([*STREAMS, 'sentryState', 'pandaStates', 'deviceState'])
     status = messaging.SubMaster(['sentryRecorderState'])
+    live_selfdrive = messaging.sub_sock('selfdriveState')
     with (tmp_path/'recorder.log').open('w') as logfile:
       process = subprocess.Popen([str(BINARY)], cwd=BINARY.parent, stdout=logfile, stderr=subprocess.STDOUT)
       try:
@@ -196,6 +197,7 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
           await_state(lambda s: not s.recording and s.bufferBytes == 0, trigger=True,
                       ignition=stop_reason == 'ignition', capture=stop_reason != 'disabled')
         dirs = sorted((tmp_path/'routes').iterdir())
+        assert messaging.recv_one_or_none(live_selfdrive) is None, 'timeline annotation leaked to live alerts'
         assert len(dirs) == (1 if pre_seconds == 15 else 2)
         assert {directory.name.rsplit('--', 1)[0] for directory in dirs} == {event_route}
         route_init = messages(dirs[0]/'qlog.zst')[0]
@@ -233,6 +235,20 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
             start = next(e for e in log_events if e.which() == 'sentinel')
             assert start.logMonoTime == timestamps[0]
             assert start.sentinel.type == ('startOfRoute' if number == 0 else 'startOfSegment')
+            # Orange Sentry annotations span the saved pre-roll and tail in both
+            # logs, without ever claiming driving engagement or requesting sound.
+            timeline = [e for e in log_events if e.which() == 'selfdriveState']
+            assert len(timeline) == 2
+            assert timeline[0].logMonoTime == start.logMonoTime
+            assert timeline[-1].logMonoTime == log_events[-1].logMonoTime
+            for event in timeline:
+              state = event.selfdriveState
+              assert event.valid
+              assert state.state == 'disabled' and not state.enabled and not state.active and not state.engageable
+              assert state.alertStatus == 'userPrompt' and state.alertSize == 'small'
+              assert state.alertType == 'sentryRecording/permanent'
+              assert state.alertText1 == 'Sentry recording' and state.alertText2 == 'Parked event'
+              assert state.alertSound == 'none' and state.alertHudVisual == 'none'
           indexes = [getattr(e, e.which()) for e in events if e.which().endswith('EncodeIdx')]
           assert len(indexes) == 4*len(expected_frames)
           assert all(i.segmentNum == number for i in indexes)

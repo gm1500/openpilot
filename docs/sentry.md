@@ -74,6 +74,14 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
 - Warmup and arming footage stays in the RAM history. A later event can therefore include
   the initial exposure/IR fade in its pre-roll even though that fade did not trigger a save.
   The motion bookmark identifies the confirmed trigger, rather than the start of pre-roll.
+- Saved Sentry segments carry a log-only `selfdriveState` annotation labeled **Sentry recording**,
+  with `alertStatus=userPrompt`, at their start and end. Connect's existing timeline draws that
+  alert interval orange; motion bookmarks remain yellow above it in both the route list and
+  playback timeline. The annotation includes saved pre-roll and the post-motion tail, with
+  driving state disabled and no audible alert. It is written directly to qlog/rlog, never
+  published to live driving/UI processes. Existing uploaded routes are not recolored.
+  Connect's server must index these states into route events; its deployed indexing and
+  final appearance still require a newly uploaded event to verify.
 - On ignition, shutdown, stale controller/health, thermal pause or disable, recording ends
   and the RAM buffer is discarded. This version does not retain the unsaved ring across reboots.
 
