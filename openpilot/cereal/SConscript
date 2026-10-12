@@ -17,6 +17,10 @@ cereal = env.Library('cereal', [f'gen/cpp/{s}.c++' for s in all_output])
 services_h = env.Command(['services.h'], ['services.py'], 'python3 ' + cereal_dir.path + '/services.py > $TARGET')
 env.Program('messaging/bridge', ['messaging/bridge.cc', 'messaging/msgq_to_zmq.cc', 'messaging/bridge_zmq.cc'], LIBS=[msgq, common, 'pthread'])
 
-socketmaster = env.Library('socketmaster', ['messaging/socketmaster.cc'])
+socketmaster_objects = env.Object(['messaging/socketmaster.cc'])
+# Track the registry generator directly too, so adding services invalidates the
+# compiled registry and its cache entry during incremental/branch-switch builds.
+env.Depends(socketmaster_objects, [services_h, 'services.py'])
+socketmaster = env.Library('socketmaster', socketmaster_objects)
 
 Export('cereal', 'socketmaster')

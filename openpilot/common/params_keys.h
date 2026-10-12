@@ -6,6 +6,20 @@
 #include "openpilot/cereal/gen/cpp/log.capnp.h"
 
 inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
+    {"SentryEnabled", {PERSISTENT, BOOL, "1"}},
+    {"SentrySensitivity", {PERSISTENT, INT, "75"}},
+    {"SentryArmDelay", {PERSISTENT, INT, "30"}},
+    {"SentryPreSeconds", {PERSISTENT, INT, "60"}},
+    {"SentryPostSeconds", {PERSISTENT, INT, "60"}},
+    {"SentryCutoffVoltage", {PERSISTENT, FLOAT, "11.8"}},
+    {"SentryMaxHours", {PERSISTENT, INT, "4"}},
+    {"SentryShutdownOnTimeLimit", {PERSISTENT, BOOL, "1"}},
+    {"SentryMaxTemp", {PERSISTENT, INT, "70"}},
+    {"SentryShutdownOnOverheat", {PERSISTENT, BOOL, "0"}},
+    {"SentryEye", {PERSISTENT, BOOL, "1"}},
+    {"SentryWatermark", {PERSISTENT, BOOL, "1"}},
+    {"SentryTimeZone", {PERSISTENT | DONT_LOG, STRING}},
+    {"SentryManualTrigger", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
     {"AccessToken", {CLEAR_ON_MANAGER_START | DONT_LOG, STRING}},
     {"AdbEnabled", {PERSISTENT, BOOL}},
     {"AlwaysOnDM", {PERSISTENT, BOOL}},

@@ -85,6 +85,14 @@ _services: dict[str, tuple] = {
   "mapSpeedLimit": (True, 5., 1),
   "mapTrafficControl": (True, 5., 1),
   "mapCruiseState": (True, 5., 1),
+  "sentryState": (True, 5., 1),
+  "sentryRecorderState": (True, 2., 1),
+  "sentryNarrowEncodeData": (False, 20., None, QueueSize.BIG),
+  "sentryWideEncodeData": (False, 20., None, QueueSize.BIG),
+  "sentryCabinEncodeData": (False, 20., None, QueueSize.BIG),
+  "sentryQcamEncodeData": (False, 20., None, QueueSize.BIG),
+  "sentryWideQcamEncodeData": (False, 20., None, QueueSize.BIG),
+  "sentryCabinQcamEncodeData": (False, 20., None, QueueSize.BIG),
 
   # debug
   "uiDebug": (True, 0., 1),
