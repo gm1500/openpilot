@@ -11,6 +11,7 @@ public:
   ZstdFileWriter(const std::string &filename, int compression_level);
   ~ZstdFileWriter();
   void write(void* data, size_t size);
+  void flush();
   inline void write(kj::ArrayPtr<capnp::byte> array) { write(array.begin(), array.size()); }
 
 private:

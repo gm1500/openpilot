@@ -77,6 +77,7 @@ public:
   bool record = true;
   bool include_audio = false;
   bool is_live = false;
+  bool is_sentry = false;
   int frame_width = -1;
   int frame_height = -1;
   int fps = MAIN_FPS;
@@ -197,3 +198,40 @@ const LogCameraInfo stream_cabin_camera_info{
 
 const LogCameraInfo cameras_logged[] = {narrow_road_camera_info, wide_road_camera_info, cabin_camera_info};
 const LogCameraInfo stream_cameras_logged[] = {stream_road_camera_info, stream_wide_road_camera_info, stream_cabin_camera_info};
+
+// Parked streams use separate sockets and native route filenames. No audio is captured.
+inline EncoderInfo sentry_encoder(EncoderInfo info, const char *service, bool preview = false) {
+  info.publish_name = service;
+  info.thumbnail_name = nullptr;
+  info.record = true;
+  info.is_sentry = true;
+  info.include_audio = false;
+  info.frame_width = 526;
+  info.frame_height = 330;
+  info.get_settings = [preview](int) {
+    return EncoderSettings{.encode_type = preview ? cereal::EncodeIndex::Type::QCAMERA_H264 : MAIN_ENCODE_TYPE,
+                           .bitrate = 256'000, .gop_size = 20};
+  };
+  return info;
+}
+const EncoderInfo sentry_encoders[] = {
+  sentry_encoder(main_road_encoder_info, "sentryNarrowEncodeData"),
+  sentry_encoder(main_wide_road_encoder_info, "sentryWideEncodeData"),
+  sentry_encoder(main_cabin_encoder_info, "sentryCabinEncodeData"),
+  sentry_encoder(qcam_encoder_info, "sentryQcamEncodeData", true),
+  sentry_encoder(qcam_encoder_info, "sentryWideQcamEncodeData", true),
+  sentry_encoder(qcam_encoder_info, "sentryCabinQcamEncodeData", true),
+};
+// The first three streams retain their camera filenames. The remaining three
+// buffer independent H264 previews, selected into one qcamera.ts per segment.
+constexpr int SENTRY_ENCODER_COUNT = 6;
+inline int sentry_preview_encoder(int camera) {
+  if (camera == VISION_STREAM_WIDE_ROAD) return 4;
+  if (camera == VISION_STREAM_CABIN) return 5;
+  return 3;
+}
+const LogCameraInfo sentry_cameras[] = {
+  {.thread_name = "sentry_narrow", .stream_type = VISION_STREAM_NARROW_ROAD, .encoder_infos = {sentry_encoders[0], sentry_encoders[3]}},
+  {.thread_name = "sentry_wide", .stream_type = VISION_STREAM_WIDE_ROAD, .encoder_infos = {sentry_encoders[1], sentry_encoders[4]}},
+  {.thread_name = "sentry_cabin", .stream_type = VISION_STREAM_CABIN, .encoder_infos = {sentry_encoders[2], sentry_encoders[5]}},
+};
