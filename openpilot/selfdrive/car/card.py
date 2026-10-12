@@ -19,8 +19,9 @@ from opendbc.car.fw_versions import ObdCallback
 from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
-from openpilot.selfdrive.car.map_cruise import read_map_speed
+from openpilot.selfdrive.car.map_cruise import read_map_speed, fallback_e2e_ready
 from openpilot.selfdrive.car.cruise import VCruiseHelper
+from openpilot.selfdrive.controls.lib.longitudinal_mode import automatic_e2e_selected
 
 REPLAY = "REPLAY" in os.environ
 
@@ -66,7 +67,7 @@ class Car:
 
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
-    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents', 'mapSpeedLimit'])
+    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents', 'mapSpeedLimit', 'longitudinalPlan'])
     self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'radarTracks', 'mapCruiseState'])
 
     self.can_rcv_cum_timeout_counter = 0
@@ -155,6 +156,8 @@ class Car:
     self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
     self.is_metric = self.params.get_bool("IsMetric")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
+    self.automatic_e2e = automatic_e2e_selected(self.params, self.CP, self.experimental_mode)
+    self._last_map_status = None
 
     # card is driven by can recv, expected at 100Hz
     self.rk = Ratekeeper(100, print_delay_threshold=None)
@@ -187,7 +190,8 @@ class Car:
     # Old logs predate map cruise and must retain their manual button behavior.
     map_enabled = self.map_cruise_enabled and (not REPLAY or self.sm.seen['mapSpeedLimit'])
     self.v_cruise_helper.update_v_cruise(CS, self.sm['carControl'].enabled, self.is_metric,
-                                      map_enabled=map_enabled, map_speed=map_speed, map_gps_time=gps_time, now=now)
+                                      map_enabled=map_enabled, map_speed=map_speed, map_gps_time=gps_time, now=now,
+                                      automatic_e2e=self.automatic_e2e, e2e_ready=fallback_e2e_ready(self.sm, now, replay=REPLAY))
     if self.sm['carControl'].enabled and not self.CC_prev.enabled:
       # Use CarState w/ buttons from the step selfdrived enables on
       self.v_cruise_helper.initialize_v_cruise(self.CS_prev, self.experimental_mode)
@@ -222,12 +226,18 @@ class Car:
     cs_send.carState.cumLagMs = -self.rk.remaining * 1000.
     self.pm.send('carState', cs_send)
 
-    if self.sm.frame % 20 == 0:
+    selector = self.v_cruise_helper.map_cruise
+    status = (selector.state(self.sm['carControl'].enabled and CS.cruiseState.available),
+              selector.target_kph, selector.e2e_fallback, selector.automatic_e2e, CS.vCruise)
+    if self.sm.frame % 20 == 0 or status != self._last_map_status:
+      self._last_map_status = status
       map_msg = messaging.new_message('mapCruiseState', valid=CS.canValid)
-      selector = self.v_cruise_helper.map_cruise
-      map_msg.mapCruiseState.state = selector.state(self.sm['carControl'].enabled and CS.cruiseState.available)
+      map_msg.mapCruiseState.state = status[0]
       map_msg.mapCruiseState.targetSpeed = (selector.target_kph or 0.) / 3.6
       map_msg.mapCruiseState.adjustingSpeed = (self.v_cruise_helper.map_pulse.target_kph or 0.) / 3.6
+      map_msg.mapCruiseState.e2eFallback = selector.e2e_fallback
+      map_msg.mapCruiseState.automaticE2e = selector.automatic_e2e
+      map_msg.mapCruiseState.setSpeed = CS.vCruise / 3.6
       self.pm.send('mapCruiseState', map_msg)
 
     if RD is not None:
@@ -272,6 +282,7 @@ class Car:
       self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
       self.is_metric = self.params.get_bool("IsMetric")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
+      self.automatic_e2e = automatic_e2e_selected(self.params, self.CP, self.experimental_mode)
       time.sleep(0.1)
 
   def card_thread(self):

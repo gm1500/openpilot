@@ -1,4 +1,4 @@
-"""Optional map target selection; no actuator, planner or engagement policy."""
+"""Map SET selection and SLC's automatic E2E request/recovery handshake."""
 import math
 
 from openpilot.common.constants import CV
@@ -6,10 +6,23 @@ from openpilot.common.constants import CV
 MAP_MESSAGE_MAX_AGE = 0.8
 MAP_GPS_MAX_AGE = 3.0
 MAP_STABLE_TIME = 2.0
+MAP_MISSING_TIME = 1.0
 
 
 def map_cruise_supported(CP) -> bool:
   return CP is not None and CP.openpilotLongitudinalControl and not (CP.pcmCruise or CP.notCar or CP.passive)
+
+
+def fallback_e2e_ready(sm, now: float, replay: bool = False) -> bool:
+  """SET may rise only after the planner acknowledges active no-speed E2E."""
+  service = 'longitudinalPlan'
+  if service not in sm.services:
+    return False
+  if (not sm.valid[service] or not 0 <= now - sm.logMonoTime[service] * 1e-9 <= .3 or
+      not replay and not 0 <= now - sm.recv_time[service] <= .3):
+    return False
+  policy = sm[service].conditionalExperimental
+  return policy.e2eEnabled and str(policy.state) == 'active' and policy.reason == 'noSpeedLimit'
 
 
 def read_map_speed(sm, now: float, replay: bool = False) -> tuple[float | None, float]:
@@ -59,8 +72,11 @@ class MapCruise:
     self._first_fix = 0.
     self._last_fix = 0.
     self._last_qualified: float | None = None
+    self.automatic_e2e = self.e2e_fallback = self.fallback_set_pending = False
+    self._missing_since: float | None = None
 
-  def update(self, enabled: bool, speed_ms: float | None, gps_time: float, now: float):
+  def update(self, enabled: bool, speed_ms: float | None, gps_time: float, now: float, automatic_e2e: bool = False):
+    previous_target = self.target_kph
     enabled = enabled and self.supported
     if enabled and not self.enabled:
       self.tracking = True
@@ -81,9 +97,37 @@ class MapCruise:
       self.target_kph = candidate
       if self.enabled and candidate != self._last_qualified:
         self.tracking = True
-      # Keep this across missing/ambiguous data: recovering the SAME limit is
-      # not a new speed zone and must not undo RES or a manual adjustment.
+      # A brief map gap recovering the SAME limit is not a new speed zone.
+      # Preserve manual selection unless the no-speed E2E fallback recovers.
       self._last_qualified = candidate
+    self.automatic_e2e = self.enabled and automatic_e2e
+    if not self.automatic_e2e:
+      self.e2e_fallback = self.fallback_set_pending = False
+      self._missing_since = None
+    elif candidate is None:
+      if self._missing_since is None or now < self._missing_since:
+        self._missing_since = now
+      if now - self._missing_since >= MAP_MISSING_TIME and not self.e2e_fallback:
+        # A new no-speed interval owns its initial SET even if an earlier
+        # manual adjustment paused SLC. Later buttons can still cancel it.
+        self.request_fallback()
+    else:
+      self._missing_since = None
+      if self.e2e_fallback and previous_target is None and self.target_kph is not None:
+        # A real recovery resumes SLC even if it is the same pre-outage limit.
+        # Buttons processed after this update can still override it explicitly.
+        self.tracking = True
+
+  def request_fallback(self):
+    if self.automatic_e2e:
+      self.e2e_fallback = True
+      self.fallback_set_pending = True
+
+  def finish_recovery(self, set_kph: float):
+    # Keep E2E requested until the mapped SET has been applied (or the driver
+    # explicitly chooses a manual SET). Publishing follows the carState update.
+    if self.target_kph is not None and (abs(set_kph - self.target_kph) < .01 or not self.tracking):
+      self.e2e_fallback = self.fallback_set_pending = False
 
   @property
   def pending_kph(self) -> float | None:
@@ -102,6 +146,7 @@ class MapCruise:
   def pause(self):
     """A manual selection also wins over this limit's pending qualification."""
     self.tracking = False
+    self.fallback_set_pending = False
     if self._candidate is not None:
       self._last_qualified = self._candidate
 
