@@ -4,12 +4,11 @@ Branch: `sentry-mode-poc`, based on `boat-anchor` at `2ee8df154017362e3a791c90d7
 
 Manage the feature under **Settings → Sentry** in any vehicle state, including onroad.
 All configuration controls remain editable; enabling Sentry onroad takes effect when parked.
-Capture and manual saves still require an active parked session. On first use it defaults on;
+Capture still requires an active parked session. On first use it defaults on;
 previously saved enable/disable choices are retained, including an explicit STOP.
 The status row reports ignition/offroad/health blockers, missing camera frames, missing encoded
 video or an unavailable controller. Camera warmup and arming have separate countdowns once video is arriving; the
 buffer counter confirms capture. The voltage row shows the current vehicle supply reading.
-**Save an event now** also works during arming once capture has started.
 This implementation is ready for parked hardware evaluation; comma 3X encoding,
 thermal behavior, battery draw, and Connect indexing/playback still require device validation.
 
@@ -18,7 +17,7 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
 - Requires a comma 3X, a recent valid panda/device state, ignition off and `IsOffroad`.
   Driving controls, modeld and locationd are never started for sentry. Ignition/onroad
   stops capture; driving and sentry encoders cannot run simultaneously.
-- Starts filling the RAM buffer after the offroad transition. Once all selected cameras
+- Starts filling the RAM buffer after the offroad transition. Once both wide cameras
   deliver frames and the recorder has buffered video, a separate 10-second camera warmup
   runs before the selected 15/30/60-second arming delay (default 30). With the default, motion
   arms 40 seconds after video is ready. The detector learns the changing exposure throughout
@@ -28,14 +27,13 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   and existing event deadline; once buffered video is available again, detection resumes without
   another countdown. Saving an event does not re-arm the cameras. Camera preview/livestream
   pauses capture.
-- Samples all selected cameras at 5 Hz for luminance changes. The eye reacts immediately
+- Samples only the front-wide and cabin-wide cameras at 5 Hz for luminance changes. The eye reacts immediately
   to smaller local movements. Saving instead requires about one second of sustained
   movement in the same connected region, allowing gaps no longer than half a second.
-  Saving area is scaled by each lens's configured focal length and image dimensions:
-  narrow requires a larger region, while front-wide and cabin require smaller ones.
-  At sensitivity 75, the OX03C10 cameras in this comma 3X require about 5.25% of the narrow
-  image or 0.5% of either wide image. OS04C10 uses its own configured optics (about 0.73%
-  for either wide image). A connected region must cover at least 0.5% regardless of lens;
+  Saving area is scaled by each lens's configured focal length and image dimensions.
+  At sensitivity 75, the OX03C10 cameras in this comma 3X require about 0.5% of either wide
+  image. OS04C10 uses its own configured optics (about 0.73% for either wide image).
+  The narrow camera is still recorded for detail, but cannot trigger an event or take the preview. A connected region must cover at least 0.5% regardless of lens;
   scattered snowflakes cannot pool their area to meet that floor. Fisheye size compensation
   is approximate, especially near the edges; this is not a physical object-size estimate.
   Exposure compensation, neighboring-pixel support and frame-to-frame change checks reject
@@ -47,7 +45,7 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   large nearby droplets, heavy snow, shadows, reflections and passing traffic can still
   trigger it. Small/distant objects or brief movement may not save an event. There are no
   person, vehicle or license-plate rules in this version.
-- All three cameras default on. Device targets are 526×330, 20 fps, HEVC at 256 kbit/s
+- All three cameras are always recorded; obsolete camera-disable preferences are ignored. Device targets are 526×330, 20 fps, HEVC at 256 kbit/s
   per camera, plus a separate 256 kbit/s H264 preview buffer for each enabled camera.
   This retains pre-event previews from whichever lens confirms motion. With all cameras
   enabled, the nominal one-minute compressed-video payload is about 11.5 MB, before logs/overhead.
@@ -109,7 +107,7 @@ request just to keep the clock running.
 
 Each event gets its own native route identifier and rebased segment/encode indexes:
 
-- `fcamera.hevc`, `ecamera.hevc`, `dcamera.hevc`, `qcamera.ts` for selected cameras;
+- `fcamera.hevc`, `ecamera.hevc`, `dcamera.hevc`, `qcamera.ts` for all three cameras;
 - native `rlog.zst` / `qlog.zst`, init data, saved car parameters, camera states,
   sentry metadata, timestamps, position estimate and segment/route sentinels;
 - an internal `.sentry` marker for uploader identification and lock recovery.
@@ -140,8 +138,8 @@ Handoffs wait for the next H264 keyframe, normally within one second. Playback h
 the previous view until that frame; timestamps remain increasing and each minute still
 has one `qcamera.ts`. Earlier preview choices are retained when saved event histories
 overlap. Manual saves use a confirming camera, otherwise the strongest currently active
-camera, then an enabled wide/narrow/cabin fallback. Disabling narrow no longer disables
-the preview: any enabled camera can supply it.
+wide camera, then a front-wide/cabin fallback. Only the two wide cameras drive the preview;
+the narrow recording remains available separately.
 
 Only the preview changes lenses. Full recordings always retain their original mapping:
 `fcamera.hevc` is narrow, `ecamera.hevc` is wide, and `dcamera.hevc` is cabin. Their
@@ -151,7 +149,7 @@ Qlogs and the motion preview use the ordinary route uploader, so Connect can ind
 and display their motion bookmarks. The stock metered-connection policy still applies:
 qlogs upload normally, and previews on metered links require viewing the route in Connect.
 
-Full logs (`rlog.zst`) and the selected-camera videos (`fcamera.hevc`, `ecamera.hevc`,
+Full logs (`rlog.zst`) and all three camera videos (`fcamera.hevc`, `ecamera.hevc`,
 `dcamera.hevc`) stay on the device until requested manually from Connect. Open the event
 route and use its upload controls to request the camera footage or all files. These requests
 use the normal Athena upload queue. Sentry does not request batch upload URLs or retry full
@@ -160,7 +158,7 @@ files automatically, including files saved by earlier builds.
 The optional Sentry account-token setup has been removed. No account token is needed on the
 device for this workflow. On startup, the uploader removes the obsolete
 `/persist/comma/sentry_connect.json` credential if present; it never reads or uses that file.
-The **Event uploads** settings row now says **Request in Connect**.
+The settings panel no longer includes a separate upload-information row.
 
 Failed or refused automatic Sentry preview/qlog uploads remain pending and use the normal
 retry/backoff. They are not marked successful, and a failed file does not block the remaining
@@ -191,28 +189,30 @@ through instantaneous power loss.
 | Pre-event history | 60 s; one row with 15s / 30s / 60s presets |
 | Tail after motion | 60 s; one row with 15s / 30s / 60s presets |
 | Battery cutoff | 11.8 V (stock threshold); adjustable 11.0–11.8 V |
-| Maximum parked time | 4 h |
-| Thermal pause | 70 °C, resume 8 °C cooler |
-| Cameras: Narrow / Wide / Cabin | All on; three independent buttons in one row |
+| Maximum parked time | 4 h; inline Shut down switch defaults on |
+| Thermal pause | 70 °C, resume 8 °C cooler; inline Shut down switch defaults off |
+| Cameras | All three record; only the two wide lenses detect motion; no camera-selection row |
 | Cabin IR | Stock automatic exposure/timeout behavior; no separate setting |
 | Red eye | On |
 | Video watermark | On: local timestamp with UTC offset, camera name and known parking coordinates |
 
-Enable/STOP, cameras, red eye, watermark and arming presets are at the top. Sensitivity and
-manual save follow; recording lengths, battery/time limits and thermal pause come farther
-down. All three duration rows use the same single-choice 15s / 30s / 60s buttons.
+The row order is Sentry status/STOP, Enable Sentry, Arming delay, Pre-event buffer,
+Record after motion stops, Motion sensitivity, Battery cutoff, Maximum parked time,
+Pause capture above, Red eye, Video watermark, then Buffered footage and Current time.
+Sensitivity is the first slider. Battery cutoff includes the current voltage inline; stale
+readings say unavailable. Camera selection, manual SAVE, Event uploads and Battery protection
+rows are removed. All three duration rows use the same single-choice 15s / 30s / 60s buttons.
 New defaults only initialize missing settings; older arming and post-event slider values
 are interpreted as the nearest preset. The old 1–5 minute pre-event setting is replaced by
 `SentryPreSeconds`, defaulting to 60 seconds; an existing seconds choice is retained.
 The battery default remains openpilot's 11.8 V threshold.
-Camera/watermark changes pause capture briefly to restart the encoders. Watermarks are burned
+Watermark changes pause capture briefly to restart the encoders. Watermarks are burned
 into private low-resolution frames, never into shared camera buffers. Local timestamps include
 a numeric UTC offset, with explicitly labeled UTC as the fallback. Native route/log timestamps
 remain UTC. The coordinate line is omitted when the fixed parking position is unknown.
 The single watermark switch turns all three fields on/off together. Existing voltage settings
-above 11.8 V are clamped to the new maximum. There is no sentry energy-budget limit; voltage
-and maximum parked time remain the shutdown limits. Full camera uploads are requested
-manually in Connect, as indicated by the read-only Event uploads row.
+above 11.8 V are clamped to the new maximum. There is no sentry energy-budget limit.
+Full camera uploads are requested manually in Connect.
 
 The eye follows the approximate image position of motion from the front wide or cabin lens;
 the cabin direction is mirrored. Its target and cross-camera score use the pixels changing
@@ -242,9 +242,23 @@ the current event is finalized and saved events remain available for manual uplo
 Connect. Sentry stays disabled until you explicitly enable it again. The switch can be changed
 onroad; capture still waits for ignition off and an offroad state.
 
-Sentry's cutoff/time limits replace the stock offroad software limits only while the
-controller has a fresh parked-session lease. `DisablePowerDown` does not bypass sentry's cutoff.
-A lost lease restores stock behavior. Stock thermal shutdown and hardware protections remain.
+Sentry's battery cutoff remains mandatory while its parked controller lease is fresh.
+`DisablePowerDown` does not bypass that cutoff or an enabled Sentry shutdown switch.
+The parked-time switch defaults on: expiry shuts down the device. With it off, expiry ends
+capture for this parking session and restores ordinary offroad power management. Cooling,
+missing readings, changing the time slider after expiry, or toggling Sentry off/on cannot
+renew the budget; ignition/onroad starts a new parking session. The timer starts when Sentry
+first has a valid parked session, and keeps running during pauses.
+
+The temperature shutdown switch defaults off: reaching the threshold pauses capture, and
+capture warms up/re-arms automatically at 8 °C below the threshold. Turning that switch on
+requests device shutdown instead. Missing/non-finite temperature readings pause capture
+without being treated as proof of overheating. The parked-time limit takes priority over
+thermal resumption; cooling after expiry cannot restart capture.
+
+Returning to ordinary offroad mode does not guarantee the device stays on: stock voltage,
+capacity and maximum-offroad-time rules still apply. A lost controller lease also restores
+stock power policy. Hardware protections remain active.
 The fan can exceed the usual offroad limit during capture/cooldown. Camera processing keeps
 the necessary CPU power state available, even with the display off.
 
@@ -318,7 +332,8 @@ Preview tests cover all three trigger lenses, first-confirmed priority during ov
 motion, real H264 keyframe handoffs within a minute, increasing timestamps, retained preview
 choices in overlapping events, and byte-for-byte unchanged full-camera files. The encoder test
 uses three synthetic VisionIPC camera streams and checks each preview's watermark output
-without modifying the shared camera buffer, with narrow both enabled and disabled.
+without modifying the shared camera buffer. It also checks that all six encoded streams
+remain present even when obsolete camera-disable preferences are on disk.
 PC main-camera encoding uses the existing lossless codec; production hardware uses HEVC.
 
 Duration tests save real encoded footage with each 15/30/60-second history setting, check
@@ -337,7 +352,7 @@ Before considering it ready for unattended use, verify on a parked comma 3X:
 3. Cached parking position leaves GPS processes off; missing checkpoint starts/stops a
    bounded GPS acquisition; no-fix recording still works.
 4. Ignition promptly stops sentry and restores normal camera encoding without interfering
-   with driving process startup. Repeat onroad/offroad and camera-setting transitions.
+   with driving process startup. Repeat onroad/offroad and watermark-setting transitions.
 5. Battery cutoff, thermal pause/resume, time limits, actual input power and RAM
    consumption under sustained motion and upload. Test controlled shutdown and interrupted
    event recovery.

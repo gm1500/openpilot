@@ -10,7 +10,7 @@ from openpilot.common.hardware import HARDWARE
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
-from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH, CAMERA_WARMUP_SECONDS
+from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH, CAMERA_WARMUP_SECONDS, RECORDING_CAMERA_MASK, MOTION_CAMERAS
 from openpilot.system.sentry.clock import SentryClock
 from openpilot.system.sentry.location import vehicle_identity, parked_location, gps_location
 from openpilot.system.sentry.motion import MotionDetector, Motion
@@ -40,7 +40,7 @@ def inactive_reason(params, sm, now, device_type):
 
 
 def trigger_source(results, previous, confirmed_since, now, manual=False):
-  confirmed = {stream: motion for stream, motion in results.items() if motion.triggered}
+  confirmed = {stream: motion for stream, motion in results.items() if stream in MOTION_CAMERAS and motion.triggered}
   for stream in tuple(confirmed_since):
     if stream not in confirmed:
       del confirmed_since[stream]
@@ -51,10 +51,10 @@ def trigger_source(results, previous, confirmed_since, now, manual=False):
   if confirmed_since:
     return min(confirmed_since, key=confirmed_since.get)
   if manual:
-    active = {stream: motion for stream, motion in results.items() if motion.active}
+    active = {stream: motion for stream, motion in results.items() if stream in MOTION_CAMERAS and motion.active}
     if active:
       return max(active, key=lambda stream: active[stream].score)
-    return next((stream for stream in (2, 0, 1) if stream in results), previous)
+    return next((stream for stream in MOTION_CAMERAS if stream in results), previous)
   return previous
 
 
@@ -93,13 +93,13 @@ def main():
   pm = messaging.PubMaster(['sentryState'])
   rk = Ratekeeper(5, print_delay_threshold=None)
   off_since = None
+  parking_since, parking_expired = None, False
   ready_since = None
   location = None
   cameras = {}
   cooldown = False
   record_until = 0.
   trigger_camera, confirmed_since = 2, {}
-  last_camera_mask = 0
   gps_finished = False
   low_since = None
   cutoff_reason = ''
@@ -111,17 +111,27 @@ def main():
       now, wall = time.monotonic(), time.time()  # noqa: TID251
       phase = inactive_reason(params, sm, now, HARDWARE.get_device_type())
       session = not phase
+      driving = (not params.get_bool('IsOffroad') or
+                 recent(sm, 'deviceState', now) and sm['deviceState'].started or
+                 recent(sm, 'pandaStates', now) and any(p.ignitionLine or p.ignitionCan for p in sm['pandaStates']))
+      if driving:
+        parking_since, parking_expired = None, False
+        cooldown = False
       capture, gps_request = False, False
       best, motion_camera = Motion(), 2
       triggered = False
-      camera_mask = sum(1 << i for i, key in enumerate(('SentryNarrowCamera', 'SentryCabinCamera', 'SentryWideCamera')) if setting(params, key))
       if not session:
         off_since, location, cameras = None, None, {}
         ready_since = None
-        record_until, cooldown, gps_finished, low_since = 0., False, False, None
+        record_until, gps_finished, low_since = 0., False, None
         confirmed_since.clear()
         cutoff_reason = ''
       else:
+        # Cooling, health gaps and enable-switch changes cannot renew an expired
+        # parking budget. Only a new ignition/onroad cycle starts another one.
+        if parking_since is None:
+          parking_since = now
+        parking_expired |= now-parking_since >= setting(params, 'SentryMaxHours')*3600
         if off_since is None:
           off_since = now
           try:
@@ -131,14 +141,16 @@ def main():
                 location = parked_location(params.get('MapParkedPosition'), vehicle_identity(CP), wall)
           except Exception:
             cloudlog.exception('sentry parking checkpoint')
-        signature = (camera_mask, setting(params, 'SentryWatermark'))
+        signature = setting(params, 'SentryWatermark')
         if config_signature is not None and signature != config_signature:
           restart_until = now+3.  # manager must observe an off period before reconfiguring encoders
         config_signature = signature
         elapsed = now-off_since
         temp = sm['deviceState'].maxTempC
         limit = setting(params, 'SentryMaxTemp')
-        cooldown = not math.isfinite(temp) or (temp >= limit if not cooldown else temp > limit-8)
+        temperature_ok = math.isfinite(temp)
+        if temperature_ok:
+          cooldown = temp >= limit if not cooldown else temp > limit-8
         voltage = sm['peripheralState'].voltage / 1000.
         voltage_ok = sm.valid['peripheralState'] and now-sm.recv_time['peripheralState'] < 3. and 6 < voltage < 20
         if voltage_ok and voltage < setting(params, 'SentryCutoffVoltage'):
@@ -146,19 +158,20 @@ def main():
         else:
           low_since = None
         low_battery = low_since is not None and now-low_since >= 10
-        expired = elapsed >= setting(params, 'SentryMaxHours')*3600
-        if not cutoff_reason and (low_battery or expired):
-          cutoff_reason = 'Battery cutoff' if low_battery else 'Parking budget reached'
+        if low_battery:
+          cutoff_reason = 'Battery cutoff'
+        elif parking_expired and cutoff_reason != 'Battery cutoff':
+          cutoff_reason = 'Parking budget reached'
         if cutoff_reason:
           phase = cutoff_reason
         elif not voltage_ok:
           phase = 'Waiting for battery reading'
+        elif not temperature_ok:
+          phase = 'Waiting for temperature reading'
         elif cooldown:
           phase = 'Cooling down'
         elif now < restart_until:
           phase = 'Applying camera settings'
-        elif not camera_mask:
-          phase = 'No cameras selected'
         elif params.get_bool('IsDriverViewEnabled') or params.get_bool('IsLiveStreaming'):
           phase = 'Camera preview in use'
         else:
@@ -173,23 +186,17 @@ def main():
             gps_finished = location is not None or elapsed >= 90.
             gps_request = not gps_finished
         if capture:
-          if camera_mask != last_camera_mask:
-            cameras.clear()
-            ready_since = None
-          last_camera_mask = camera_mask
           arm_delay = setting(params, 'SentryArmDelay')
           armed = ready_since is not None and now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
           results = {}
-          for stream in (2, 1, 0):
-            if camera_mask & (1 << stream):
-              if stream not in cameras:
-                cameras[stream] = CameraMotion(stream)
-              result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'), armed)
-              results[stream] = result
-              triggered |= result.triggered
-              # Wide cameras drive the eye. Narrow camera can still trigger recording.
-              if stream in (1, 2) and result.active and (not best.active or result.score > best.score):
-                best, motion_camera = result, stream
+          for stream in MOTION_CAMERAS:
+            if stream not in cameras:
+              cameras[stream] = CameraMotion(stream)
+            result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'), armed)
+            results[stream] = result
+            triggered |= result.triggered
+            if result.active and (not best.active or result.score > best.score):
+              best, motion_camera = result, stream
           ready = sum(0 <= now-camera.last_received < 1. for camera in cameras.values())
           recorder_fresh = recent(sm, 'sentryRecorderState', now)
           recorder_ready = recorder_fresh and sm['sentryRecorderState'].bufferBytes > 0
@@ -251,7 +258,7 @@ def main():
       clock.update(time_location, now)
       zone_name, utc_offset = clock.snapshot(wall)
       write_runtime({'monoTime': now, 'session': bool(session), 'capture': capture, 'gps': gps_request,
-                     'location': location, 'phase': phase})
+                     'location': location, 'phase': phase, 'parkingStartedAt': parking_since, 'parkingLimitReached': parking_expired})
       msg = messaging.new_message('sentryState', valid=True)
       state = msg.sentryState
       state.sessionActive, state.capture, state.phase = bool(session), capture, phase
@@ -259,7 +266,7 @@ def main():
       state.motionX, state.motionY, state.motionScore, state.motionCamera = best.x, best.y, best.score, motion_camera
       state.recordUntilMonoTime = int(record_until*1e9)
       state.triggerCamera = trigger_camera
-      state.eyeEnabled, state.cameraMask = setting(params, 'SentryEye'), camera_mask
+      state.eyeEnabled, state.cameraMask = setting(params, 'SentryEye'), RECORDING_CAMERA_MASK
       state.timeZone, state.utcOffsetSeconds = zone_name, utc_offset
       state.locationValid = location is not None
       if location:

@@ -116,10 +116,23 @@ class PowerMonitoring:
     sentry_runtime = read_runtime(now)
     sentry = sentry_runtime.get('session', False) and setting(self.params, 'SentryEnabled')
     if sentry and in_car and not ignition:
-      return bool(self.params.get_bool('ForcePowerDown') or
-                  sentry_runtime.get('phase') in ('Battery cutoff', 'Parking budget reached') or
-                  (offroad_time > 60 and self.car_voltage_mV < setting(self.params, 'SentryCutoffVoltage')*1000) or
-                  offroad_time >= setting(self.params, 'SentryMaxHours')*3600)
+      phase = sentry_runtime.get('phase')
+      if (self.params.get_bool('ForcePowerDown') or phase == 'Battery cutoff' or
+          offroad_time > 60 and self.car_voltage_mV < setting(self.params, 'SentryCutoffVoltage')*1000):
+        return True
+      parking_since = sentry_runtime.get('parkingStartedAt', offroad_timestamp)
+      expired = (sentry_runtime.get('parkingLimitReached', False) or phase == 'Parking budget reached' or
+                 now-parking_since >= setting(self.params, 'SentryMaxHours')*3600)
+      if expired:
+        if setting(self.params, 'SentryShutdownOnTimeLimit'):
+          return True
+      elif phase == 'Cooling down':
+        if setting(self.params, 'SentryShutdownOnOverheat'):
+          return True
+      else:
+        return False
+      # An unchecked shutdown switch ends/pauses capture under ordinary offroad
+      # power policy. It does not disable stock low-battery or maximum-time limits.
     low_voltage_shutdown = (self.car_voltage_mV < (VBATT_PAUSE_CHARGING * 1e3) and
                             offroad_time > VOLTAGE_SHUTDOWN_MIN_OFFROAD_TIME_S)
     should_shutdown |= offroad_time > MAX_TIME_OFFROAD_S

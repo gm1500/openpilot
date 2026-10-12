@@ -458,8 +458,8 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
 
 
 @pytest.mark.skipif(not (ROOT/'system/loggerd/encoderd').exists(), reason='build encoderd first')
-@pytest.mark.parametrize('narrow_enabled', [True, False])
-def test_encoder_private_watermark_buffers(monkeypatch, tmp_path, narrow_enabled):
+@pytest.mark.parametrize('legacy_cameras_disabled', [True, False])
+def test_encoder_private_watermark_buffers(monkeypatch, tmp_path, legacy_cameras_disabled):
   import io
   import socket as unix_socket
   try:
@@ -475,7 +475,10 @@ def test_encoder_private_watermark_buffers(monkeypatch, tmp_path, narrow_enabled
     params = Params()
     for key, value in DEFAULTS.items():
       params.put(key, value, block=True)
-    params.put_bool('SentryNarrowCamera', narrow_enabled, block=True)
+    if legacy_cameras_disabled:
+      # Old camera choices must not silently remove footage now that the row is gone.
+      for key in ('SentryNarrowCamera', 'SentryWideCamera', 'SentryCabinCamera'):
+        (Path(params.get_param_path())/key).write_bytes(b'0')
     server = VisionIpcServer('camerad')
     width, height = 640, 360
     for camera in (0, 1, 2):
@@ -486,7 +489,7 @@ def test_encoder_private_watermark_buffers(monkeypatch, tmp_path, narrow_enabled
     while not observer.connect(False) and time.monotonic() < deadline:
       time.sleep(.01)
     assert observer.is_connected()
-    sockets = [messaging.sub_sock(service, timeout=100) for service in STREAMS[3 if narrow_enabled else 4:]]
+    sockets = [messaging.sub_sock(service, timeout=100) for service in STREAMS]
     image = np.full(width*height*3//2, 128, dtype=np.uint8)
     packets = [[] for _ in sockets]
     with (tmp_path/'encoder.log').open('w') as logfile:
@@ -499,10 +502,10 @@ def test_encoder_private_watermark_buffers(monkeypatch, tmp_path, narrow_enabled
           for camera in (0, 1, 2):
             server.send(camera, image, frame, now, now)
           time.sleep(.05)
-          for socket, frames in zip(sockets, packets, strict=True):
+          for i, (socket, frames) in enumerate(zip(sockets, packets, strict=True)):
             msg = messaging.recv_one_or_none(socket)
             if msg:
-              frames.append(bytes(msg.qNarrowRoadEncodeData.data))
+              frames.append(bytes(getattr(msg, FIELDS[i]).data))
         source = observer.recv(100)
         assert source is not None and np.all(source.data == 128), 'watermark modified a shared camera buffer'
       finally:
@@ -510,8 +513,11 @@ def test_encoder_private_watermark_buffers(monkeypatch, tmp_path, narrow_enabled
         process.wait(timeout=8)
       assert process.returncode == 0, (tmp_path/'encoder.log').read_text()
       del observer, server
-    for source in packets:
+    for i, source in enumerate(packets):
       assert len(source) > 20
+      assert all(source)
+      if i < 3:
+        continue  # PC encoderd uses FFVHUFF instead of the device's HEVC codec.
       with av.open(io.BytesIO(b''.join(source)), format='h264') as video:
         frames = list(video.decode(video=0))
       assert len(frames) > 20

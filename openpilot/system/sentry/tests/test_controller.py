@@ -11,8 +11,8 @@ from openpilot.system.sentry.location import vehicle_identity
 from openpilot.system.sentry.motion import Motion
 
 
-@pytest.mark.parametrize('first,second,third', [(0, 1, 2), (1, 2, 0), (2, 0, 1)])
-def test_preview_follows_confirmed_motion_in_first_detection_order(first, second, third):
+@pytest.mark.parametrize('first,second', [(1, 2), (2, 1)])
+def test_preview_follows_wide_motion_in_first_detection_order(first, second):
   since = {}
   results = {stream: Motion() for stream in range(3)}
   results[first] = Motion(active=True, score=.1, triggered=True)
@@ -21,17 +21,18 @@ def test_preview_follows_confirmed_motion_in_first_detection_order(first, second
   # Stronger motion in an overlapping camera must not steal the preview.
   results[second] = Motion(active=True, score=.8, triggered=True)
   assert sentryd.trigger_source(results, camera, since, 101.) == first
-  results[third] = Motion(active=True, score=1., triggered=True)
+  results[0] = Motion(active=True, score=1., triggered=True)  # Narrow cannot take preview priority.
   assert sentryd.trigger_source(results, camera, since, 102.) == first
   # As a person leaves one view, the next already-confirmed lens takes over.
   results[first] = Motion(active=True, score=.9, triggered=False)
   camera = sentryd.trigger_source(results, camera, since, 103.)
   assert camera == second
   results[second] = Motion()
-  assert sentryd.trigger_source(results, camera, since, 104.) == third
+  assert sentryd.trigger_source(results, camera, since, 104.) == second
+  assert not since  # Narrow alone is not a confirmed detection source.
 
 
-@pytest.mark.parametrize('enabled,expected', [((0, 1, 2), 2), ((0, 1), 0), ((1,), 1), ((2,), 2)])
+@pytest.mark.parametrize('enabled,expected', [((1, 2), 2), ((1,), 1), ((2,), 2)])
 def test_manual_preview_uses_an_enabled_camera_and_eye_only_motion_does_not_switch(enabled, expected):
   results = {stream: Motion() for stream in enabled}
   assert sentryd.trigger_source(results, 2, {}, 100., manual=True) == expected
@@ -306,3 +307,94 @@ def test_activation_blockers_are_visible(blocker, expected):
   if blocker in ('panda', 'device'):
     sm.recv_time['pandaStates' if blocker == 'panda' else 'deviceState'] = 95.
   assert sentryd.inactive_reason(params, sm, 100., 'pc' if blocker == 'hardware' else 'tizi') == expected
+
+
+@pytest.mark.parametrize('shutdown', [False, True])
+def test_cooling_resumes_only_before_parking_expiry_and_detection_uses_wide_cameras(monkeypatch, tmp_path, shutdown):
+  class Params(dict):
+    get_bool = dict.get
+    def remove(self, key):
+      self.pop(key, None)
+
+  params = Params(DEFAULTS | {'IsOffroad': True, 'SentryMaxHours': 1,
+                            'SentryShutdownOnTimeLimit': shutdown, 'SentryShutdownOnOverheat': shutdown})
+  # Capture, heat pause, a bad reading, recovery, then another pause extending
+  # through the parking limit. Neither cooling nor a health/enable gap renews it.
+  temperatures = {100: 50., 102: 50., 143: 50., 150: 70., 160: 66., 170: float('nan'),
+                  180: 63., 190: 62., 231: 50., 250: 72., 3700: 72., 3701: 40.,
+                  3702: 40., 3703: 40., 3704: 40., 3705: 40., 3710: 40., 3711: 40., 3713: 40.}
+  times = list(temperatures)
+  index = [0]
+  def clock():
+    return float(times[index[0]])
+  runtime, sent, opened = {}, {}, []
+
+  class SubMaster(dict):
+    def __init__(self, services):
+      super().__init__({
+        'deviceState': SimpleNamespace(started=False, maxTempC=50.),
+        'pandaStates': [SimpleNamespace(pandaType=log.PandaState.PandaType.tres, ignitionLine=False, ignitionCan=False)],
+        'peripheralState': SimpleNamespace(voltage=12500),
+        'sentryRecorderState': SimpleNamespace(recording=False, error='', bufferBytes=1000),
+        'gpsLocation': SimpleNamespace(hasFix=False), 'gpsLocationExternal': SimpleNamespace(hasFix=False),
+      })
+      self.valid = {s: not s.startswith('gps') for s in services}
+      self.recv_time, self.logMonoTime = {}, {}
+
+    def update(self, timeout):
+      now = clock()
+      self.recv_time = dict.fromkeys(self, now)
+      self.logMonoTime = dict.fromkeys(self, int(now*1e9))
+      self['deviceState'].maxTempC = temperatures[now]
+      self['pandaStates'][0].ignitionLine = now == 3710.
+      self.valid['deviceState'] = now != 3704.
+      params['SentryEnabled'] = now != 3702.
+
+  class Camera:
+    def __init__(self, stream):
+      opened.append(stream)
+      self.last_received = 0.
+    def sample(self, now, sensitivity, armed):
+      self.last_received = now
+      return Motion()
+
+  class Finished(Exception):
+    pass
+
+  class Ratekeeper:
+    def __init__(self, *args, **kwargs):
+      pass
+    def keep_time(self):
+      index[0] += 1
+      if index[0] == len(times):
+        raise Finished
+
+  monkeypatch.setattr(sentryd.time, 'monotonic', clock)
+  monkeypatch.setattr(sentryd, 'Params', lambda: params)
+  monkeypatch.setattr(sentryd, 'SentryClock', lambda params: SimpleNamespace(update=lambda *args: None, snapshot=lambda wall: ('', 0)))
+  monkeypatch.setattr(sentryd, 'HARDWARE', SimpleNamespace(get_device_type=lambda: 'tizi'))
+  monkeypatch.setattr(sentryd.messaging, 'SubMaster', SubMaster)
+  monkeypatch.setattr(sentryd.messaging, 'PubMaster',
+                      lambda services: SimpleNamespace(send=lambda service, msg: sent.update({clock(): msg.to_dict()['sentryState']})))
+  monkeypatch.setattr(sentryd, 'CameraMotion', Camera)
+  monkeypatch.setattr(sentryd, 'Ratekeeper', Ratekeeper)
+  monkeypatch.setattr(sentryd, 'write_runtime', lambda state: runtime.update({clock(): state}))
+  monkeypatch.setattr(sentryd, 'RUNTIME_PATH', tmp_path/'runtime.json')
+  with pytest.raises(Finished):
+    sentryd.main()
+
+  assert runtime[143]['phase'] == runtime[231]['phase'] == 'Watching'
+  for now in (150, 160, 180, 250):
+    assert runtime[now]['phase'] == 'Cooling down' and not runtime[now]['capture']
+  assert runtime[170]['phase'] == 'Waiting for temperature reading' and not runtime[170]['capture']
+  assert runtime[190]['capture'] and runtime[190]['phase'] == 'Camera warmup: 10 s'
+  for now in (3700, 3701, 3703, 3705):
+    assert runtime[now]['phase'] == 'Parking budget reached' and not runtime[now]['capture']
+    assert runtime[now]['parkingStartedAt'] == 100.
+    assert runtime[now]['parkingLimitReached']
+  assert runtime[3702]['phase'] == 'Off' and runtime[3704]['phase'] == 'Waiting for device state'
+  assert runtime[3710]['phase'] == 'Waiting for ignition off'
+  assert runtime[3711]['parkingStartedAt'] == 3711. and not runtime[3711]['parkingLimitReached']
+  assert runtime[3713]['capture']
+  assert set(opened) == {1, 2}  # Narrow is recorded, never opened by the detector.
+  assert all(state['cameraMask'] == 0b111 for state in sent.values())

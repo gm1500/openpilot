@@ -8,14 +8,15 @@ import time
 RUNTIME_PATH = Path('/dev/shm/openpilot_sentry.json')
 LEASE_SECONDS = 2.0
 CAMERA_WARMUP_SECONDS = 10.
+RECORDING_CAMERA_MASK = 0b111
+MOTION_CAMERAS = (2, 1)  # Front wide, cabin wide (VisionStreamType).
 DURATION_PRESETS = (15, 30, 60)
 DURATION_KEYS = ('SentryArmDelay', 'SentryPreSeconds', 'SentryPostSeconds')
 DEFAULTS = {
   'SentryEnabled': True, 'SentrySensitivity': 75, 'SentryArmDelay': 30,
   'SentryPreSeconds': 60, 'SentryPostSeconds': 60,
-  'SentryNarrowCamera': True, 'SentryWideCamera': True, 'SentryCabinCamera': True,
-  'SentryCutoffVoltage': 11.8, 'SentryMaxHours': 4,
-  'SentryMaxTemp': 70, 'SentryEye': True,
+  'SentryCutoffVoltage': 11.8, 'SentryMaxHours': 4, 'SentryShutdownOnTimeLimit': True,
+  'SentryMaxTemp': 70, 'SentryShutdownOnOverheat': False, 'SentryEye': True,
   'SentryWatermark': True,
 }
 RANGES = {

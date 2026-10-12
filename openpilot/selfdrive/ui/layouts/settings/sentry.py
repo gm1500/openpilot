@@ -9,16 +9,28 @@ from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.list_view import ListItem, MultipleButtonAction, toggle_item, text_item, button_item
 from openpilot.system.ui.widgets.scroller_tici import Scroller
+from openpilot.system.ui.widgets.toggle import Toggle, WIDTH as TOGGLE_WIDTH, HEIGHT as TOGGLE_HEIGHT
 
 
 class SentrySlider(Widget):
-  def __init__(self, params, key, title, unit='', step=1):
+  def __init__(self, params, key, title, unit='', step=1, suffix=None, shutdown_key=None, hint=''):
     super().__init__()
     self.params, self.key, self.title, self.unit, self.step = params, key, title, unit, step
     self.low, self.high = RANGES[key]
     self.value = setting(params, key)
     self.dragging = False
     self._rect.height = 190
+    self.suffix, self.shutdown_key = suffix, shutdown_key
+    self.hint = hint
+    self.shutdown_toggle = None
+    if shutdown_key:
+      self.shutdown_toggle = self._child(Toggle(initial_state=setting(params, shutdown_key),
+                                              callback=lambda value: params.put_bool(shutdown_key, value, block=True)))
+
+  def set_touch_valid_callback(self, callback):
+    super().set_touch_valid_callback(callback)
+    if self.shutdown_toggle:
+      self.shutdown_toggle.set_touch_valid_callback(callback)
 
   def set_parent_rect(self, rect):
     super().set_parent_rect(rect)
@@ -30,17 +42,28 @@ class SentrySlider(Widget):
     color = rl.WHITE if self.enabled else rl.GRAY
     value = f'{self.value:g}{self.unit}'
     font = gui_app.font(FontWeight.NORMAL)
-    rl.draw_text_ex(font, f'{self.title}: {value}', rl.Vector2(rect.x+10, rect.y+25), 43, 0, color)
+    suffix = f' ({self.suffix()})' if self.suffix else ''
+    rl.draw_text_ex(font, f'{self.title}: {value}{suffix}', rl.Vector2(rect.x+10, rect.y+25), 43, 0, color)
+    if self.shutdown_toggle:
+      x = rect.x+rect.width-TOGGLE_WIDTH-20
+      rl.draw_text_ex(font, 'Shut down', rl.Vector2(x-185, rect.y+32), 32, 0, color)
+      self.shutdown_toggle.set_state(setting(self.params, self.shutdown_key))
+      self.shutdown_toggle.set_enabled(self.enabled)
+      self.shutdown_toggle.set_parent_rect(self._parent_rect or rect)
+      self.shutdown_toggle.render(rl.Rectangle(x, rect.y+10, TOGGLE_WIDTH, TOGGLE_HEIGHT))
     self.track = rl.Rectangle(rect.x+35, rect.y+120, rect.width-70, 12)
     x = self.track.x + (self.value-self.low)/(self.high-self.low)*self.track.width
     rl.draw_rectangle_rounded(self.track, 1, 12, rl.Color(80, 80, 80, 255))
     rl.draw_rectangle_rounded(rl.Rectangle(self.track.x, self.track.y, max(1, x-self.track.x), 12), 1, 12, rl.MAROON)
     rl.draw_circle(int(x), int(self.track.y+6), 23, color)
+    if self.hint:
+      rl.draw_text_ex(font, self.hint, rl.Vector2(rect.x+10, rect.y+158), 24, 0, rl.GRAY)
     if not self._touch_valid() or not self.enabled:
       self.dragging = False
 
   def _handle_mouse_press(self, pos):
-    self.dragging = abs(pos.y-self.track.y) < 45
+    on_toggle = self.shutdown_toggle and rl.check_collision_point_rec(pos, self.shutdown_toggle.rect)
+    self.dragging = not on_toggle and abs(pos.y-self.track.y) < 45
 
   def _handle_mouse_event(self, event):
     if self.dragging and self._touch_valid() and self.enabled:
@@ -54,21 +77,6 @@ class SentrySlider(Widget):
   def hide_event(self):
     self.dragging = False
     super().hide_event()
-
-
-class SentryCameraButtons(MultipleButtonAction):
-  KEYS = ('SentryNarrowCamera', 'SentryWideCamera', 'SentryCabinCamera')
-
-  def __init__(self, params):
-    super().__init__(['Narrow', 'Wide', 'Cabin'], button_width=210)
-    self.params = params
-
-  def is_button_selected(self, index):
-    return setting(self.params, self.KEYS[index])
-
-  def select_button(self, index):
-    if self.enabled:
-      self.params.put_bool(self.KEYS[index], not self.is_button_selected(index))
 
 
 class SentryDurationButtons(MultipleButtonAction):
@@ -101,43 +109,28 @@ class SentryLayout(Widget):
     items = [
       self._stop_button,
       self._enable_toggle,
-      ListItem('Cameras', description='Each camera switches independently. Green means on. Cabin infrared adjusts automatically.',
-               action_item=SentryCameraButtons(self.params)),
-      self.toggle('SentryEye', 'Red eye', 'Reacts immediately to smaller movements after the screen times out. ' +
-                  'Saving requires 1 second of movement, with larger regions required for the narrow lens and smaller ones for both wide lenses. ' +
-                  'Tap to dismiss until the next timeout.'),
-      self.toggle('SentryWatermark', 'Video watermark',
-                  'Local timestamp with UTC offset, camera name and parking coordinates when available. Uses UTC until the timezone is known.'),
       ListItem('Arming delay', description=f'Starts after {CAMERA_WARMUP_SECONDS:g} seconds of camera warmup. ' +
                'Footage buffers throughout; motion saves and the eye wait until both stages finish.',
                action_item=SentryDurationButtons(self.params, 'SentryArmDelay')),
+      ListItem('Pre-event buffer', description='How much available footage to keep before motion is confirmed.',
+               action_item=SentryDurationButtons(self.params, 'SentryPreSeconds')),
+      ListItem('Record after motion stops', description='Keep recording for this long after the last confirmed movement. New motion extends it.',
+               action_item=SentryDurationButtons(self.params, 'SentryPostSeconds')),
       SentrySlider(self.params, 'SentrySensitivity', 'Motion sensitivity'),
-      button_item('Save an event now', 'SAVE', callback=lambda: self.params.put_bool('SentryManualTrigger', True),
-                  enabled=lambda: ui_state.sentry_active),
+      SentrySlider(self.params, 'SentryCutoffVoltage', 'Battery cutoff', ' V', .1, suffix=self.voltage_status),
+      SentrySlider(self.params, 'SentryMaxHours', 'Maximum parked time', ' h', shutdown_key='SentryShutdownOnTimeLimit',
+                   hint='Shutdown off: stop Sentry until the next drive. Normal offroad power rules apply.'),
+      SentrySlider(self.params, 'SentryMaxTemp', 'Pause capture above', ' °C', shutdown_key='SentryShutdownOnOverheat',
+                   hint='Shutdown off: pause until 8°C cooler. The parked-time limit still applies.'),
+      self.toggle('SentryEye', 'Red eye', 'Reacts immediately to smaller movements from the front wide and cabin cameras. ' +
+                  'Saving requires 1 second of movement. All three cameras are recorded. Tap to dismiss until the next timeout.'),
+      self.toggle('SentryWatermark', 'Video watermark',
+                  'Local timestamp with UTC offset, camera name and parking coordinates when available. Uses UTC until the timezone is known.'),
       text_item('Buffered footage', self.buffer_status),
       text_item('Current time', self.clock_status,
                 'Uses the device clock, synchronized by the system through the network or GPS. ' +
                 'Uses the remembered geographic timezone, or the cellular network offset when available. Continuous GPS is not needed.'),
-      text_item('Battery voltage', self.voltage_status),
-      SentrySlider(self.params, 'SentryCutoffVoltage', 'Battery cutoff', ' V', .1),
-      ListItem('Pre-event buffer', description='How much available footage to keep before motion is confirmed or SAVE is pressed.',
-               action_item=SentryDurationButtons(self.params, 'SentryPreSeconds')),
-      ListItem('Record after motion stops', description='Keep recording for this long after the last confirmed movement. New motion extends it.',
-               action_item=SentryDurationButtons(self.params, 'SentryPostSeconds')),
     ]
-    for key, title, unit, step in (
-      ('SentryMaxHours', 'Maximum parked time', ' h', 1),
-      ('SentryMaxTemp', 'Pause capture above', ' °C', 1),
-    ):
-      items.append(SentrySlider(self.params, key, title, unit, step))
-    items.extend([
-      text_item('Event uploads', 'Request in Connect',
-                'The preview follows motion between enabled cameras. Request full camera videos and logs from Connect when needed. ' +
-                'Saved events follow normal storage cleanup.'),
-      text_item('Battery protection', 'Sentry cutoff',
-                'While Sentry is active, its voltage and time limits replace the stock offroad software limits. ' +
-                'Default cutoff is 11.8 V; adjustable down to 11.0 V. Hardware protections remain active.'),
-    ])
     self.scroller = self._child(Scroller(items, spacing=0, line_separator=True))
 
   def _set_sentry_enabled(self, enabled):
@@ -167,8 +160,8 @@ class SentryLayout(Widget):
   def voltage_status(self):
     sm = ui_state.sm
     if not sm.valid['peripheralState'] or not 0 <= time.monotonic()-sm.recv_time['peripheralState'] < 3.:
-      return 'Unavailable'
-    return f"{sm['peripheralState'].voltage/1000.:.1f} V"
+      return 'now unavailable'
+    return f"now {sm['peripheralState'].voltage/1000.:.1f} V"
 
   def clock_status(self):
     sm = ui_state.sm

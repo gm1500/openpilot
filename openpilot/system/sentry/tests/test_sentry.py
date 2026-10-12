@@ -316,6 +316,59 @@ def test_battery_override_and_ignition(monkeypatch, tmp_path):
   assert not p.should_shutdown(False, True, 0., True)  # stock DisablePowerDown restored
 
 
+@pytest.mark.parametrize('phase,key', [('Cooling down', 'SentryShutdownOnOverheat'), ('Parking budget reached', 'SentryShutdownOnTimeLimit')])
+@pytest.mark.parametrize('shutdown', [False, True])
+@pytest.mark.parametrize('disable_stock', [False, True])
+def test_optional_limit_shutdown_and_stock_fallback(monkeypatch, phase, key, shutdown, disable_stock):
+  from openpilot.system.hardware import power_monitoring as power
+  params = FakeParams(config.DEFAULTS | {key: shutdown, 'SentryCutoffVoltage': 11., 'DisablePowerDown': disable_stock, 'ForcePowerDown': False})
+  monitor = SimpleNamespace(params=params, car_voltage_mV=12500, car_battery_capacity_uWh=20e6)
+  runtime = {'session': True, 'phase': phase, 'parkingStartedAt': 900.}
+  monkeypatch.setattr(power.time, 'monotonic', lambda: 2000.)
+  monkeypatch.setattr(power, 'read_runtime', lambda now: runtime)
+
+  def should_shutdown(ignition=False):
+    return power.PowerMonitoring.should_shutdown(monitor, ignition, True, 500., True)
+
+  assert should_shutdown() == shutdown
+  assert not should_shutdown(True)
+  # Returning to ordinary offroad mode must respect stock protections, but must
+  # not reinterpret an unchecked switch as a mandatory shutdown.
+  monitor.car_voltage_mV = 11500  # Above sentry cutoff, below stock cutoff.
+  assert should_shutdown() == (shutdown or not disable_stock)
+  monitor.car_voltage_mV = 10900
+  assert should_shutdown()  # Battery cutoff remains mandatory in either mode.
+
+
+def test_parked_time_overrules_thermal_resume_and_uses_controller_clock(monkeypatch):
+  from openpilot.system.hardware import power_monitoring as power
+  params = FakeParams(config.DEFAULTS | {'SentryMaxHours': 1, 'SentryShutdownOnTimeLimit': False,
+                                       'SentryShutdownOnOverheat': True, 'DisablePowerDown': True, 'ForcePowerDown': False})
+  monitor = SimpleNamespace(params=params, car_voltage_mV=12500, car_battery_capacity_uWh=20e6)
+  runtime = {'session': True, 'phase': 'Cooling down', 'parkingStartedAt': 1000.}
+  clock = [4599.]
+  monkeypatch.setattr(power.time, 'monotonic', lambda: clock[0])
+  monkeypatch.setattr(power, 'read_runtime', lambda now: runtime)
+
+  def should_shutdown():
+    return power.PowerMonitoring.should_shutdown(monitor, False, True, 0., True)
+
+  assert should_shutdown()  # Still within Sentry's hour, so thermal shutdown applies.
+  runtime['phase'] = 'Watching'
+  assert not should_shutdown()  # Earlier stock offroad timestamp cannot expire it early.
+  runtime['phase'] = 'Cooling down'
+  clock[0] = 4600.
+  assert not should_shutdown()  # Expired time budget takes priority; return to stock policy.
+  params['SentryShutdownOnTimeLimit'] = True
+  assert should_shutdown()
+  params['SentryMaxHours'] = 4
+  runtime['parkingLimitReached'] = True
+  assert should_shutdown()  # A latched expiry stays expired even if the slider increases.
+  runtime['parkingLimitReached'] = False
+  runtime['phase'] = 'Waiting for temperature reading'
+  assert not should_shutdown()  # Missing/NaN readings are not proof of overheating.
+
+
 def test_eye_touch_suppression_lasts_until_next_timeout(monkeypatch):
   # SCALE avoids monitor probing when importing the UI in a headless test process.
   monkeypatch.setenv('SCALE', '1')
@@ -385,8 +438,14 @@ def test_settings_remain_editable_in_all_vehicle_states(monkeypatch, tmp_path, s
   monkeypatch.setattr(ui.gui_app, 'font', lambda *args: rl.Font())
   monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*20, 40))
   layout = ui.SentryLayout()
-  assert [row.title for row in layout.scroller._items[:6]] == ['Sentry', 'Enable Sentry', 'Cameras', 'Red eye', 'Video watermark', 'Arming delay']
-  assert not any(getattr(row, 'title', '') in ('Parking location', 'Event storage') for row in layout.scroller._items)
+  assert [row.title for row in layout.scroller._items] == [
+    'Sentry', 'Enable Sentry', 'Arming delay', 'Pre-event buffer', 'Record after motion stops',
+    'Motion sensitivity', 'Battery cutoff', 'Maximum parked time', 'Pause capture above',
+    'Red eye', 'Video watermark', 'Buffered footage', 'Current time',
+  ]
+  assert layout.voltage_status() == 'now 12.0 V'
+  sm.valid['peripheralState'] = False
+  assert layout.voltage_status() == 'now unavailable'
   assert layout._stop_button.action_item.enabled
   assert layout._enable_toggle.action_item.enabled
   assert layout._enable_toggle.action_item.get_state()
@@ -394,8 +453,6 @@ def test_settings_remain_editable_in_all_vehicle_states(monkeypatch, tmp_path, s
   for row in layout.scroller._items:
     if isinstance(row, ui.SentrySlider):
       assert row.enabled
-    elif row.title == 'Save an event now':
-      assert row.action_item.enabled == state.sentry_active
     else:
       assert row.action_item.enabled
 
@@ -423,40 +480,39 @@ def test_settings_remain_editable_in_all_vehicle_states(monkeypatch, tmp_path, s
   assert not layout._enable_toggle.action_item.get_state()
 
 
-def test_camera_buttons_toggle_independently_and_keep_personality_exclusive(monkeypatch):
+@pytest.mark.parametrize('key,shutdown_key', [('SentryMaxHours', 'SentryShutdownOnTimeLimit'), ('SentryMaxTemp', 'SentryShutdownOnOverheat')])
+def test_shutdown_switch_is_independent_of_limit_slider_and_respects_scrolling(monkeypatch, key, shutdown_key):
   monkeypatch.setenv('SCALE', '1')
   import pyray as rl
   from openpilot.selfdrive.ui.layouts.settings import sentry as ui
-  from openpilot.system.ui.widgets.list_view import MultipleButtonAction
-
-  monkeypatch.setattr(ui.gui_app, 'font', lambda *args: None)
-  state = SimpleNamespace(ignition=False)
-  monkeypatch.setattr(ui, 'ui_state', state)
+  monkeypatch.setattr(ui.gui_app, 'font', lambda *args: rl.Font())
+  monkeypatch.setattr(ui.Toggle, '_render', lambda *args: None)
+  for name in ('draw_text_ex', 'draw_rectangle_rounded', 'draw_circle'):
+    monkeypatch.setattr(rl, name, lambda *args: None)
 
   class Params(dict):
-    def put_bool(self, key, value):
+    def put_bool(self, key, value, block=False):
       self[key] = value
+    put = put_bool
 
-  params = Params()
-  buttons = ui.SentryCameraButtons(params)
-  buttons.set_rect(rl.Rectangle(0, 0, 670, 170))
-  assert all(buttons.is_button_selected(i) for i in range(3))
-  buttons._handle_mouse_release(rl.Vector2(335, 85))
-  assert [buttons.is_button_selected(i) for i in range(3)] == [True, False, True]
-  buttons._handle_mouse_release(rl.Vector2(335, 85))
-  assert all(buttons.is_button_selected(i) for i in range(3))
-  for x in (105, 335, 565):
-    buttons._handle_mouse_release(rl.Vector2(x, 85))
-  assert not any(buttons.is_button_selected(i) for i in range(3))
-  state.ignition = True
-  assert buttons.enabled
-  buttons._handle_mouse_release(rl.Vector2(105, 85))
-  assert [buttons.is_button_selected(i) for i in range(3)] == [True, False, False]
-  selected = []
-  personality = MultipleButtonAction(['A', 'B', 'C'], 210, callback=selected.append)
-  personality.select_button(2)
-  assert selected == [2]
-  assert [personality.is_button_selected(i) for i in range(3)] == [False, False, True]
+  params = Params(config.DEFAULTS)
+  slider = ui.SentrySlider(params, key, 'Limit', shutdown_key=shutdown_key)
+  slider._render(rl.Rectangle(0, 0, 1400, 190))
+  toggle = slider.shutdown_toggle
+  assert 0 <= toggle.rect.x < toggle.rect.x+toggle.rect.width <= 1400
+  pos = rl.Vector2(toggle.rect.x+40, toggle.rect.y+toggle.rect.height-5)
+  slider._handle_mouse_press(pos)
+  assert not slider.dragging  # Tapping the switch must not change the duration/temperature.
+  toggle._handle_mouse_release(pos)
+  assert params[shutdown_key] == (not config.DEFAULTS[shutdown_key])
+  assert params[key] == config.DEFAULTS[key]
+  pos = rl.Vector2(slider.track.x, slider.track.y)
+  slider._handle_mouse_press(pos)
+  slider._handle_mouse_event(SimpleNamespace(pos=pos, left_released=True))
+  assert params[key] == config.RANGES[key][0]
+  assert params[shutdown_key] == (not config.DEFAULTS[shutdown_key])
+  slider.set_touch_valid_callback(lambda: False)
+  assert not toggle._touch_valid()
 
 
 @pytest.mark.parametrize('key', config.DURATION_KEYS)

@@ -191,11 +191,6 @@ void encoderd_thread(const LogCameraInfo (&cameras)[N], bool sentry = false) {
       auto it = std::find_if(std::begin(cameras), std::end(cameras),
                              [stream](auto &cam) { return cam.stream_type == stream; });
       assert(it != std::end(cameras));
-      if (sentry) {
-        const char *key = stream == VISION_STREAM_NARROW_ROAD ? "SentryNarrowCamera" :
-                          stream == VISION_STREAM_WIDE_ROAD ? "SentryWideCamera" : "SentryCabinCamera";
-        if (!Params().getBool(key)) continue;
-      }
       ++s.max_waiting;
       encoder_threads.push_back(std::thread(encoder_thread, &s, *it));
     }
