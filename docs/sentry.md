@@ -22,11 +22,13 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   runs before the selected 15/30/60-second arming delay (default 30). With the default, motion
   arms 40 seconds after video is ready. The detector learns the changing exposure throughout
   both stages; automatic events and the eye wait until both finish. Manual saves work during
-  either stage. Missing camera frames or a capture restart resets both delays. A recorder-only
-  status delay or empty buffer pauses automatic save requests but keeps the camera arming clock
-  and existing event deadline; once buffered video is available again, detection resumes without
-  another countdown. Saving an event does not re-arm the cameras. Camera preview/livestream
-  pauses capture.
+  either stage. Once armed, the capture session stays armed through quiet periods, completed
+  events and brief camera/recorder gaps. A real camera reconnect or frame-counter reset gives
+  that lens a new 10-second exposure warmup without repeating the user's arming delay or
+  disarming the other lens. Missing frames before initial arming restart the initial countdown.
+  A recorder-only status delay or empty buffer pauses new events, but confirmed motion can
+  still extend an already-open event. A capture restart, including camera preview/livestream
+  or thermal pause, starts a new warmup and arming cycle.
 - Samples only the front-wide and cabin-wide cameras at 5 Hz for luminance changes. The eye reacts immediately
   to smaller local movements. Saving instead requires about one second of sustained
   movement in the same connected region, allowing gaps no longer than half a second.
@@ -62,8 +64,13 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   leave less history available. Original native minute time anchors are retained even when
   the first minute is partial, so subsequent segments and bookmarks keep their real timestamps.
   The confirmation period is included in this pre-roll.
-  Only confirmed motion or manual Save extends the tail; eye-only movement does not.
-  Events split after 15 minutes of continuous activity.
+  Only confirmed motion or a diagnostic manual trigger extends the tail; eye-only movement
+  does not. Each confirmation renews the selected post-motion interval from that trigger.
+  Further confirmations before that deadline remain on the same route,
+  including when someone moves between lenses. Quiet periods turn off the eye without
+  disarming capture. The route closes after the tail expires; the next event can start immediately
+  without another arming delay. There is no fixed 15-minute split; parking, battery, thermal
+  and storage limits still apply, and completed minute segments upload normally.
 - Warmup and arming footage stays in the RAM history. A later event can therefore include
   the initial exposure/IR fade in its pre-roll even though that fade did not trigger a save.
   The motion bookmark identifies the confirmed trigger, rather than the start of pre-roll.

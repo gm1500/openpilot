@@ -168,6 +168,7 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
         assert params.get('RouteCount') is None
         trigger_time = time.monotonic_ns()
         await_state(lambda s: s.recording, trigger=True)
+        event_route = status['sentryRecorderState'].route
         if stop_reason == 'disabled':
           # Keep visual motion active through the tail without confirming new
           # motion. It must not create extra markers, even after the quiet gap.
@@ -175,7 +176,16 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
           while time.monotonic() < deadline:
             control()
             status.update(50)
+          first_deadline = record_until
           await_state(lambda s: s.recording and status.updated['sentryRecorderState'], trigger=True)
+          assert record_until > first_deadline
+          # The second confirmation must retain the route beyond the first
+          # event's original tail, not close it and replay pre-roll as a new one.
+          while time.monotonic_ns() <= first_deadline+200_000_000:
+            control()
+            status.update(50)
+            assert status['sentryRecorderState'].recording
+            assert status['sentryRecorderState'].route == event_route
         if stop_reason == 'manager':
           # The manager can observe the master switch before the controller does.
           # Its normal stop signal must finalize an event that is still recording.
@@ -187,6 +197,7 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
                       ignition=stop_reason == 'ignition', capture=stop_reason != 'disabled')
         dirs = sorted((tmp_path/'routes').iterdir())
         assert len(dirs) == (1 if pre_seconds == 15 else 2)
+        assert {directory.name.rsplit('--', 1)[0] for directory in dirs} == {event_route}
         route_init = messages(dirs[0]/'qlog.zst')[0]
         first_source = 1 if pre_seconds == 15 else 0
         assert route_init.logMonoTime == base+first_source*60_000_000_000

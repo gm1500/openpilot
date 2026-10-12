@@ -205,7 +205,7 @@ public:
   kj::Array<capnp::word> init = logger_build_init_data(true);
   kj::Array<capnp::word> route_init;
   int first_segment = 0, closed_segment = -1;
-  uint64_t event_start = 0, retry_after = 0, storage_check = 0;
+  uint64_t retry_after = 0, storage_check = 0;
   uint64_t last_motion = 0;
   uint64_t last_record_until = 0;
   uint64_t event_cutoff = 0;
@@ -293,7 +293,7 @@ public:
   }
   void tick(uint64_t record_until, uint64_t now, uint64_t control_time, int trigger_camera) {
     pre_seconds = history_seconds();
-    // Only confirmed motion or a manual Save advances the recording deadline.
+    // Only confirmed motion or a diagnostic manual trigger advances the deadline.
     // The immediate eye signal must never create bookmarks or extend a route.
     uint64_t motion_time = record_until > now && record_until > last_record_until ? control_time : 0;
     last_record_until = record_until;
@@ -302,7 +302,7 @@ public:
     bool bookmark = motion_time && (!last_motion || motion_time >= last_motion+5*SECOND);
     if (motion_time) last_motion = motion_time;
     if (!route.empty()) {
-      if (now >= record_until || now-event_start >= 15*60*SECOND) finish();
+      if (now >= record_until) finish();
       else if (now-storage_check > 5*SECOND) {
         storage_check = now;
         if (!disk_ok()) { finish(); retry_after = now+30*SECOND; }
@@ -333,7 +333,7 @@ public:
       if (begin == ring.end()) return;
       if (!disk_ok()) { retry_after = now+30*SECOND; return; }
       route = logger_get_identifier("RouteCount");
-      event_start = storage_check = now;
+      storage_check = now;
       first_segment = begin->first;
       closed_segment = first_segment-1;
       // Anchor the route to its retained pre-roll, not the trigger, daemon
@@ -358,7 +358,7 @@ public:
         for (const auto *packet : packets) save(it->first, *packet);
       }
       select_preview(control_time, trigger_camera);
-      bookmark = true;  // Also mark manual saves and the start of a split event.
+      bookmark = true;  // Also mark diagnostic triggers and the start of a new event.
     }
     if (bookmark && !route.empty()) {
       MessageBuilder message;

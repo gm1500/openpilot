@@ -66,24 +66,28 @@ class CameraMotion:
     self.detector = MotionDetector()
     self.last_frame = -1
     self.last_received = 0.
+    self.warm_until = 0.
 
   def sample(self, now, sensitivity, armed):
-    if not self.client.is_connected() and not self.client.connect(False):
-      return Motion()
+    if not self.client.is_connected():
+      if not self.client.connect(False):
+        return Motion()
+      self.size, self.last_frame = None, -1
     buf = self.client.recv(5)
     if buf is None or self.client.frame_id == self.last_frame or not 0 <= now-self.client.timestamp_eof/1e9 <= .5:
       return Motion()
-    self.last_frame = self.client.frame_id
-    self.last_received = now
     size = self.client.width, self.client.height
-    if size != self.size:
+    if size != self.size or self.client.frame_id < self.last_frame:
       self.detector = MotionDetector.for_camera(self.stream, *size)
       self.size = size
+      self.warm_until = now+CAMERA_WARMUP_SECONDS
+    self.last_frame = self.client.frame_id
+    self.last_received = now
     image = np.frombuffer(buf.data, dtype=np.uint8, count=self.client.stride*self.client.height)
     image = image.reshape(self.client.height, self.client.stride)[:, :self.client.width]
     rows = np.linspace(0, image.shape[0]-1, 80, dtype=int)
     cols = np.linspace(0, image.shape[1]-1, 128, dtype=int)
-    return self.detector.update(image[np.ix_(rows, cols)], now, sensitivity, armed=armed)
+    return self.detector.update(image[np.ix_(rows, cols)], now, sensitivity, armed=armed and now >= self.warm_until)
 
 
 def main():
@@ -95,6 +99,7 @@ def main():
   off_since = None
   parking_since, parking_expired = None, False
   ready_since = None
+  arm_complete = False
   location = None
   cameras = {}
   cooldown = False
@@ -123,6 +128,7 @@ def main():
       if not session:
         off_since, location, cameras = None, None, {}
         ready_since = None
+        arm_complete = False
         record_until, gps_finished, low_since = 0., False, None
         confirmed_since.clear()
         cutoff_reason = ''
@@ -187,7 +193,7 @@ def main():
             gps_request = not gps_finished
         if capture:
           arm_delay = setting(params, 'SentryArmDelay')
-          armed = ready_since is not None and now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
+          armed = arm_complete or ready_since is not None and now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
           results = {}
           for stream in MOTION_CAMERAS:
             if stream not in cameras:
@@ -202,7 +208,8 @@ def main():
           recorder_ready = recorder_fresh and sm['sentryRecorderState'].bufferBytes > 0
           if ready != len(cameras):
             phase = f'Waiting for cameras ({ready}/{len(cameras)})'
-            ready_since = None
+            if not arm_complete:
+              ready_since = None
           elif not recorder_fresh:
             phase = 'Starting recorder'
           elif not recorder_ready:
@@ -214,21 +221,30 @@ def main():
             # syncing segments can delay status while cameras stay exposed.
             if ready_since is None:
               ready_since = now
-            warmup_remaining = CAMERA_WARMUP_SECONDS-(now-ready_since)
-            if warmup_remaining > 0:
-              phase = f'Camera warmup: {math.ceil(warmup_remaining)} s'
+            if arm_complete:
+              recovery = max(camera.warm_until-now for camera in cameras.values())
+              phase = f'Camera recovering: {math.ceil(recovery)} s' if recovery > 0 else 'Watching'
             else:
-              remaining = max(0., arm_delay+warmup_remaining)
-              phase = f'Arming: {math.ceil(remaining)} s' if remaining else 'Watching'
-          armed = ready_since is not None and now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
+              warmup_remaining = CAMERA_WARMUP_SECONDS-(now-ready_since)
+              if warmup_remaining > 0:
+                phase = f'Camera warmup: {math.ceil(warmup_remaining)} s'
+              else:
+                remaining = max(0., arm_delay+warmup_remaining)
+                phase = f'Arming: {math.ceil(remaining)} s' if remaining else 'Watching'
+              arm_complete = now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
+          # Arming belongs to this capture session, not an event or the eye.
+          # Brief frame gaps do not disarm it; CameraMotion independently learns
+          # exposure again after an actual camera reconnect/frame-counter reset.
+          armed = arm_complete
           if not armed:
             best = Motion()  # Exposure ramp cannot trigger an event or the eye.
-          if not armed or not recorder_ready:
+          can_trigger = armed and (recorder_ready or record_until > now)
+          if not can_trigger:
             triggered = False
           manual = params.get_bool('SentryManualTrigger')
           if manual:
             params.remove('SentryManualTrigger')
-          if manual or (armed and recorder_ready):
+          if manual or can_trigger:
             trigger_camera = trigger_source(results, trigger_camera, confirmed_since, now, manual)
           else:
             confirmed_since.clear()
@@ -236,11 +252,10 @@ def main():
             record_until = now+setting(params, 'SentryPostSeconds')
           if recorder_fresh and sm['sentryRecorderState'].recording:
             phase = 'Recording'
-            if triggered or manual:
-              record_until = now+setting(params, 'SentryPostSeconds')
         else:
           cameras.clear()
           ready_since = None
+          arm_complete = False
           record_until = 0.
           confirmed_since.clear()
         error = sm['sentryRecorderState'].error if now-sm.recv_time['sentryRecorderState'] < 2. else ''

@@ -50,16 +50,146 @@ def test_live_camera_sampling_applies_lens_area_and_one_second_confirmation(monk
                            is_connected=lambda: True, recv=lambda timeout: SimpleNamespace(data=image.tobytes()))
   monkeypatch.setattr(sentryd, 'VisionIpcClient', lambda *args: client)
   camera = sentryd.CameraMotion(stream)
-  for i in range(24):
+  for i in range(74):
     now = 100.+i*.2
     client.frame_id, client.timestamp_eof = i, int(now*1e9)
     image.fill(70)
-    if i >= 15:
-      x = 65+i-15
+    if i >= 65:
+      x = 65+i-65
       image[25*height//80:35*height//80, x*width//128:(x+12)*width//128] = 170
-    result = camera.sample(now, 75, armed=i >= 15)
-    assert result.active == (i >= 15)
-    assert result.triggered == (stream in (1, 2) and i >= 20)
+    result = camera.sample(now, 75, armed=i >= 65)
+    assert result.active == (i >= 65)
+    assert result.triggered == (stream in (1, 2) and i >= 70)
+
+
+@pytest.mark.parametrize('restart', ['reconnect', 'frame_counter', 'size', 'frame_gap'])
+def test_camera_recovery_learns_exposure_without_replaying_arm_delay(monkeypatch, restart):
+  client = SimpleNamespace(width=640, height=400, stride=640, frame_id=1000, timestamp_eof=0, connected=True)
+  image = [None]
+  client.is_connected = lambda: client.connected
+  client.connect = lambda blocking: setattr(client, 'connected', True) or True
+  client.recv = lambda timeout: SimpleNamespace(data=image[0].tobytes())
+  monkeypatch.setattr(sentryd, 'VisionIpcClient', lambda *args: client)
+  camera = sentryd.CameraMotion(1)
+
+  def sample(now, small):
+    client.frame_id += 1
+    client.timestamp_eof = int(now*1e9)
+    image[0] = np.repeat(np.repeat(small, client.height//80, axis=0), client.width//128, axis=1).astype(np.uint8)
+    return camera.sample(now, 75, armed=True)
+
+  base = np.full((80, 128), 70, dtype=np.uint8)
+  for i in range(60):
+    sample(round(100+i*.2, 1), base)
+  assert camera.warm_until == 110.
+  if restart == 'reconnect':
+    client.connected = False
+  elif restart == 'frame_counter':
+    client.frame_id = -1
+  elif restart == 'size':
+    client.width, client.stride = 1280, 1280
+
+  for i in range(50 if restart != 'frame_gap' else 15):
+    frame = base.copy()
+    if restart != 'frame_gap':
+      # A spatial IR/exposure ramp must remain suppressed through recovery.
+      frame[20:50, 30:90] += i*2
+    result = sample(round(120+i*.2, 1), frame)
+    assert not result.active and not result.triggered
+  assert camera.warm_until == (110. if restart == 'frame_gap' else 130.)
+  start = 123. if restart == 'frame_gap' else 130.
+  for i in range(8):
+    frame = base.copy()
+    frame[20:50, 30:90] += 98 if restart != 'frame_gap' else 0
+    frame[25:40, 50+i*3:65+i*3] = 250
+    result = sample(round(start+i*.2, 1), frame)
+  assert result.active and result.triggered  # No extra 15/30/60-second user delay.
+
+
+@pytest.mark.parametrize('post_seconds', [15, 30, 60])
+def test_quiet_eye_and_later_lens_extend_event_without_rearming(monkeypatch, tmp_path, post_seconds):
+  class Params(dict):
+    get_bool = dict.get
+    def remove(self, key):
+      self.pop(key, None)
+
+  params = Params(DEFAULTS | {'IsOffroad': True, 'SentryArmDelay': 30, 'SentryPostSeconds': post_seconds})
+  clock, sent, samples = [100.], {}, []
+  first, second = 145., 145.+post_seconds-3.
+  end = second+1.+post_seconds
+  third = end+3.
+
+  class SubMaster(dict):
+    def __init__(self, services):
+      super().__init__({
+        'deviceState': SimpleNamespace(started=False, maxTempC=50.),
+        'pandaStates': [SimpleNamespace(pandaType=log.PandaState.PandaType.tres, ignitionLine=False, ignitionCan=False)],
+        'peripheralState': SimpleNamespace(voltage=12000),
+        'sentryRecorderState': SimpleNamespace(recording=False, error='', bufferBytes=1000),
+        'gpsLocation': SimpleNamespace(hasFix=False), 'gpsLocationExternal': SimpleNamespace(hasFix=False),
+      })
+      self.valid = {s: not s.startswith('gps') for s in services}
+      self.recv_time, self.logMonoTime = {}, {}
+
+    def update(self, timeout):
+      now = clock[0]
+      self.recv_time = dict.fromkeys(self, now)
+      self.logMonoTime = dict.fromkeys(self, int(now*1e9))
+      previous = sent.get(round(now-.2, 1))
+      self['sentryRecorderState'].recording = bool(previous and previous['recordUntilMonoTime'] > now*1e9)
+      # Changing the arming preset applies at the next capture start, not after
+      # the eye disappears or while an event is still open.
+      if now == first+2.:
+        params['SentryArmDelay'] = 60
+
+  class Camera:
+    warm_until = 0.
+    def __init__(self, stream):
+      self.stream, self.last_received = stream, 0.
+    def sample(self, now, sensitivity, armed):
+      self.last_received = now
+      samples.append((now, armed))
+      burst = any(t <= now <= t+1 for t in ((first, third) if self.stream == 2 else (second,)))
+      # Also show a brief eye-only hit: it must not extend the route.
+      eye = burst or first+5 <= now <= first+5.4
+      return Motion(eye, .2, .8, .4, triggered=burst)
+
+  class Finished(Exception):
+    pass
+
+  class Ratekeeper:
+    def __init__(self, *args, **kwargs):
+      pass
+    def keep_time(self):
+      clock[0] = round(clock[0]+.2, 1)
+      if clock[0] > third+1.:
+        raise Finished
+
+  monkeypatch.setattr(sentryd.time, 'monotonic', lambda: clock[0])
+  monkeypatch.setattr(sentryd, 'Params', lambda: params)
+  monkeypatch.setattr(sentryd, 'SentryClock', lambda params: SimpleNamespace(update=lambda *args: None, snapshot=lambda wall: ('', 0)))
+  monkeypatch.setattr(sentryd, 'HARDWARE', SimpleNamespace(get_device_type=lambda: 'tizi'))
+  monkeypatch.setattr(sentryd.messaging, 'SubMaster', SubMaster)
+  monkeypatch.setattr(sentryd.messaging, 'PubMaster',
+                      lambda services: SimpleNamespace(send=lambda service, msg: sent.update({clock[0]: msg.to_dict()['sentryState']})))
+  monkeypatch.setattr(sentryd, 'CameraMotion', Camera)
+  monkeypatch.setattr(sentryd, 'Ratekeeper', Ratekeeper)
+  monkeypatch.setattr(sentryd, 'write_runtime', lambda state: None)
+  monkeypatch.setattr(sentryd, 'RUNTIME_PATH', tmp_path/'runtime.json')
+  with pytest.raises(Finished):
+    sentryd.main()
+
+  assert all(armed for now, armed in samples if now >= 142.)
+  assert not any(s['phase'].startswith(('Arming:', 'Camera warmup:')) for now, s in sent.items() if now >= 142.)
+  for now in (first+2., first+6., second-.2):
+    assert not sent[round(now, 1)]['motion']
+    assert sent[round(now, 1)]['recordUntilMonoTime'] == int((first+1.+post_seconds)*1e9)
+  assert sent[first+5.]['motion']
+  assert sent[first]['triggerCamera'] == 2 and sent[second]['triggerCamera'] == 1
+  assert sent[second+1.]['recordUntilMonoTime'] == int(end*1e9)
+  assert sent[end-.2]['phase'] == 'Recording'
+  assert sent[end]['phase'] == 'Watching'
+  assert sent[third]['recordUntilMonoTime'] == int((third+post_seconds)*1e9)
 
 
 @pytest.mark.parametrize('cached,fix_after,video_ready', [(True, None, True), (False, 20, True), (False, None, True), (True, None, False)])
@@ -127,6 +257,7 @@ def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp
   monkeypatch.setattr(sentryd.messaging, 'PubMaster', lambda services: SimpleNamespace(send=lambda service, msg: sent.append(msg.to_dict())))
   monkeypatch.setattr(sentryd, 'Ratekeeper', Ratekeeper)
   class Camera:
+    warm_until = 0.
     last_received = 0.
     def sample(self, now, sensitivity, armed):
       self.last_received = now
@@ -165,7 +296,7 @@ def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp
 @pytest.mark.parametrize('arm_delay', [15, 30, 60])
 @pytest.mark.parametrize('eye_only', [False, True])
 @pytest.mark.parametrize('recorder_gap', [None, 'heartbeat', 'buffer'])
-def test_warmup_restarts_for_camera_loss_but_not_recorder_gaps(monkeypatch, tmp_path, arm_delay, eye_only, recorder_gap):
+def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_delay, eye_only, recorder_gap):
   class Params(dict):
     get_bool = dict.get
     def remove(self, key):
@@ -218,6 +349,7 @@ def test_warmup_restarts_for_camera_loss_but_not_recorder_gaps(monkeypatch, tmp_
         params['SentryEnabled'] = False
 
   class Camera:
+    warm_until = 0.
     def __init__(self, stream):
       self.stream, self.last_received = stream, 0.
     def sample(self, now, sensitivity, armed):
@@ -227,8 +359,7 @@ def test_warmup_restarts_for_camera_loss_but_not_recorder_gaps(monkeypatch, tmp_
       self.last_received = now
       # Deliberately return motion even while unarmed: the controller must gate
       # both automatic requests and the eye independently of the detector.
-      ready = arm_at if now < drop_at else rearm_at
-      confirmed = not eye_only and (not armed or now >= ready+arm_delay+1.)
+      confirmed = not eye_only and (not armed or now >= arm_at+arm_delay+1.)
       return Motion(True, .2, .8, .4, triggered=confirmed)
 
   class Finished(Exception):
@@ -275,13 +406,15 @@ def test_warmup_restarts_for_camera_loss_but_not_recorder_gaps(monkeypatch, tmp_
     assert all(s['capture'] and s['motion'] for now, s in sent.items() if saving_at <= now < saved_at)
     last_gap = sent[round(saved_at-.2, 1)]
     assert last_gap['phase'] == ('Starting recorder' if recorder_gap == 'heartbeat' else 'Waiting for encoded video')
-    assert last_gap['recordUntilMonoTime'] == sent[round(saved_at-.4, 1)]['recordUntilMonoTime']
+    assert (last_gap['recordUntilMonoTime'] > sent[round(saved_at-.4, 1)]['recordUntilMonoTime']) == (not eye_only)
     assert (sent[saved_at]['recordUntilMonoTime'] > last_gap['recordUntilMonoTime']) == (not eye_only)
-  assert all(not s['motion'] for now, s in sent.items() if drop_at+1. <= now < rearm_at+arm_delay)
-  # The 15-second recording tail can outlast the restarted camera warmup.
-  assert sent[rearm_at+3.]['phase'] == f'Arming: {arm_delay-3} s'
-  assert sent[rearm_at+arm_delay-1.]['phase'] == 'Arming: 1 s'
-  assert sent[rearm_at+arm_delay+1.]['motion']
+  # A missing cabin sample must not disarm the healthy wide camera, replay the
+  # user's delay, or stop confirmed motion from extending the open event.
+  assert all(s['motion'] for now, s in sent.items() if drop_at <= now < stop_at)
+  assert all(armed for now, armed in samples if arm_at+arm_delay <= now < stop_at)
+  assert all(not s['phase'].startswith(('Arming:', 'Camera warmup:')) for now, s in sent.items()
+             if arm_at+arm_delay <= now < stop_at)
+  assert sent[restart_at]['phase'] == ('Watching' if eye_only else 'Recording')
   assert not sent[stop_at]['capture'] and not sent[stop_at]['motion']
   assert sent[stop_at]['recordUntilMonoTime'] == 0
 
@@ -351,6 +484,7 @@ def test_cooling_resumes_only_before_parking_expiry_and_detection_uses_wide_came
       params['SentryEnabled'] = now != 3702.
 
   class Camera:
+    warm_until = 0.
     def __init__(self, stream):
       opened.append(stream)
       self.last_received = 0.
