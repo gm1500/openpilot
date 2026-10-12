@@ -1,4 +1,5 @@
 import platform
+import time
 import numpy as np
 import pyray as rl
 
@@ -11,7 +12,10 @@ from openpilot.system.ui.lib.egl import init_egl, create_egl_image, destroy_egl_
 from openpilot.system.ui.widgets import Widget
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 
+from openpilot.selfdrive.ui.onroad.camera_fade import FadingCamera, CAMERA_FADE_TIME, CAMERA_FADE_STALE
+
 CONNECTION_RETRY_INTERVAL = 0.2  # seconds between connection attempts
+STREAM_DISCOVERY_INTERVAL = 1.0  # retry discovery when a camera was missing at startup
 
 VERSION = """
 #version 300 es
@@ -47,6 +51,7 @@ if COMMA_HARDWARE:
     in vec2 fragTexCoord;
     uniform samplerExternalOES texture0;
     out vec4 fragColor;
+    uniform float frame_alpha;
     uniform int engaged;
     uniform int enhance_driver;
 
@@ -68,7 +73,7 @@ if COMMA_HARDWARE:
         color.rgb = color.rgb * color.rgb * (3.0 - 2.0 * color.rgb);
         color.rgb = pow(color.rgb, vec3(0.8));
       }
-      fragColor = vec4(color.rgb, color.a);
+      fragColor = vec4(color.rgb, color.a * frame_alpha);
     }
     """
 else:
@@ -77,6 +82,7 @@ else:
     uniform sampler2D texture0;
     uniform sampler2D texture1;
     out vec4 fragColor;
+    uniform float frame_alpha;
     uniform int engaged;
     uniform int enhance_driver;
 
@@ -100,7 +106,7 @@ else:
         rgb = rgb * rgb * (3.0 - 2.0 * rgb);
         rgb = pow(rgb, vec3(0.8));
       }
-      fragColor = vec4(rgb, 1.0);
+      fragColor = vec4(rgb, frame_alpha);
     }
     """
 
@@ -119,9 +125,16 @@ class CameraView(Widget):
     self._target_stream_type: VisionStreamType | None = None
     self._switching: bool = False
 
+    self._crossfade_enabled = False
+    self._fade: FadingCamera | None = None
+    self._last_frame_at = 0.
     self._texture_needs_update = True
     self.last_connection_attempt: float = 0.0
+    self._last_target_connection_attempt = float('-inf')
+    self._last_stream_check = float('-inf')
     self.shader = rl.load_shader_from_memory(VERTEX_SHADER, FRAME_FRAGMENT_SHADER)
+    self._alpha_loc = rl.get_shader_location(self.shader, "frame_alpha")
+    self._alpha_value = rl.ffi.new("float[1]", [1.])
     self._texture1_loc: int = rl.get_shader_location(self.shader, "texture1") if not COMMA_HARDWARE else -1
     self._engaged_loc = rl.get_shader_location(self.shader, "engaged")
     self._engaged_val = rl.ffi.new("int[1]", [1])
@@ -151,6 +164,11 @@ class CameraView(Widget):
     ui_state.add_offroad_transition_callback(self._offroad_transition)
 
   def _offroad_transition(self):
+    self._last_stream_check = float('-inf')
+    self.available_streams.clear()
+    self._clear_fade()
+    self._target_client = self._target_stream_type = None
+    self._switching = False
     # Drain queued SubSocket messages to prevent old frames from showing when going
     # onroad. Qt had a separate thread which drains the VisionIpcClient SubSocket for us.
     if self.client and self.client.is_connected():
@@ -164,6 +182,9 @@ class CameraView(Widget):
 
   def switch_stream(self, stream_type: VisionStreamType) -> None:
     if self._stream_type == stream_type:
+      # The requested view can reverse while the other camera is connecting.
+      self._target_client = self._target_stream_type = None
+      self._switching = False
       return
 
     if self._switching and self._target_stream_type == stream_type:
@@ -174,8 +195,10 @@ class CameraView(Widget):
     if self._target_client:
       del self._target_client
 
+    self._last_target_connection_attempt = float('-inf')
     self._target_stream_type = stream_type
-    self._target_client = VisionIpcClient(self._name, stream_type, conflate=True)
+    self._target_client = (self._fade.client if self._fade is not None and self._fade.stream_type == stream_type
+                           else VisionIpcClient(self._name, stream_type, conflate=True))
     self._switching = True
 
   @property
@@ -183,6 +206,9 @@ class CameraView(Widget):
     return self._stream_type
 
   def close(self) -> None:
+    self._clear_fade()
+    self._target_client = self._target_stream_type = None
+    self._switching = False
     self._clear_textures()
 
     # Clean up EGL texture
@@ -233,6 +259,7 @@ class CameraView(Widget):
     if buffer:
       self._texture_needs_update = True
       self.frame = buffer
+      self._last_frame_at = time.monotonic()
     elif not self.client.is_connected():
       # ensure we clear the displayed frame when the connection is lost
       self.frame = None
@@ -242,9 +269,14 @@ class CameraView(Widget):
       return
 
     transform = self._calc_frame_matrix(rect)
-    src_rect = rl.Rectangle(0, 0, float(self.frame.width), float(self.frame.height))
+    self._render_camera(rect, transform)
+    self._render_fade(rect, transform)
+
+  def _render_camera(self, rect, transform, camera=None, alpha=1.):
+    camera = self if camera is None else camera
+    src_rect = rl.Rectangle(0, 0, float(camera.frame.width), float(camera.frame.height))
     # Flip cabin camera horizontally
-    if self._stream_type == VisionStreamType.VISION_STREAM_CABIN:
+    if camera.stream_type == VisionStreamType.VISION_STREAM_CABIN:
       src_rect.width = -src_rect.width
 
     # Calculate scale
@@ -262,62 +294,68 @@ class CameraView(Widget):
 
     # Render with appropriate method
     if COMMA_HARDWARE:
-      self._render_egl(src_rect, dst_rect)
+      self._render_egl(src_rect, dst_rect, camera, alpha)
     else:
-      self._render_textures(src_rect, dst_rect)
+      self._render_textures(src_rect, dst_rect, camera, alpha)
 
   def _draw_placeholder(self, rect: rl.Rectangle):
     if self._placeholder_color:
       rl.draw_rectangle_rec(rect, self._placeholder_color)
 
-  def _render_egl(self, src_rect: rl.Rectangle, dst_rect: rl.Rectangle) -> None:
+  def _render_egl(self, src_rect: rl.Rectangle, dst_rect: rl.Rectangle, camera=None, alpha=1.) -> None:
     """Render using EGL for direct buffer access"""
-    if self.frame is None or self.egl_texture is None:
+    camera = self if camera is None else camera
+    if camera.frame is None or camera.egl_texture is None:
       return
 
-    idx = self.frame.idx
-    egl_image = self.egl_images.get(idx)
+    idx = camera.frame.idx
+    egl_image = camera.egl_images.get(idx)
 
     # Create EGL image if needed
     if egl_image is None:
-      egl_image = create_egl_image(self.frame.width, self.frame.height, self.frame.stride, self.frame.fd, self.frame.uv_offset)
+      egl_image = create_egl_image(camera.frame.width, camera.frame.height, camera.frame.stride, camera.frame.fd, camera.frame.uv_offset)
       if egl_image:
-        self.egl_images[idx] = egl_image
+        camera.egl_images[idx] = egl_image
       else:
         return
 
     # Update texture dimensions to match current frame
-    self.egl_texture.width = self.frame.width
-    self.egl_texture.height = self.frame.height
+    camera.egl_texture.width = camera.frame.width
+    camera.egl_texture.height = camera.frame.height
 
     # Bind the EGL image to our texture
-    bind_egl_image_to_texture(self.egl_texture.id, egl_image)
+    bind_egl_image_to_texture(camera.egl_texture.id, egl_image)
 
     # Render with shader
     rl.begin_shader_mode(self.shader)
+    self._alpha_value[0] = alpha
+    rl.set_shader_value(self.shader, self._alpha_loc, self._alpha_value, rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT)
     self._update_texture_color_filtering()
-    rl.draw_texture_pro(self.egl_texture, src_rect, dst_rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
+    rl.draw_texture_pro(camera.egl_texture, src_rect, dst_rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
     rl.end_shader_mode()
 
-  def _render_textures(self, src_rect: rl.Rectangle, dst_rect: rl.Rectangle) -> None:
+  def _render_textures(self, src_rect: rl.Rectangle, dst_rect: rl.Rectangle, camera=None, alpha=1.) -> None:
     """Render using texture copies"""
-    if not self.texture_y or not self.texture_uv or self.frame is None:
+    camera = self if camera is None else camera
+    if not camera.texture_y or not camera.texture_uv or camera.frame is None:
       return
 
     # Update textures with new frame data
-    if self._texture_needs_update:
-      y_data = self.frame.data[: self.frame.uv_offset]
-      uv_data = self.frame.data[self.frame.uv_offset:]
+    if camera._texture_needs_update:
+      y_data = camera.frame.data[: camera.frame.uv_offset]
+      uv_data = camera.frame.data[camera.frame.uv_offset:]
 
-      rl.update_texture(self.texture_y, rl.ffi.cast("void *", rl.ffi.from_buffer(y_data)))
-      rl.update_texture(self.texture_uv, rl.ffi.cast("void *", rl.ffi.from_buffer(uv_data)))
-      self._texture_needs_update = False
+      rl.update_texture(camera.texture_y, rl.ffi.cast("void *", rl.ffi.from_buffer(y_data)))
+      rl.update_texture(camera.texture_uv, rl.ffi.cast("void *", rl.ffi.from_buffer(uv_data)))
+      camera._texture_needs_update = False
 
     # Render with shader
     rl.begin_shader_mode(self.shader)
+    self._alpha_value[0] = alpha
+    rl.set_shader_value(self.shader, self._alpha_loc, self._alpha_value, rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT)
     self._update_texture_color_filtering()
-    rl.set_shader_value_texture(self.shader, self._texture1_loc, self.texture_uv)
-    rl.draw_texture_pro(self.texture_y, src_rect, dst_rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
+    rl.set_shader_value_texture(self.shader, self._texture1_loc, camera.texture_uv)
+    rl.draw_texture_pro(camera.texture_y, src_rect, dst_rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
     rl.end_shader_mode()
 
   def _update_texture_color_filtering(self):
@@ -325,13 +363,23 @@ class CameraView(Widget):
     rl.set_shader_value(self.shader, self._engaged_loc, self._engaged_val, rl.ShaderUniformDataType.SHADER_UNIFORM_INT)
     rl.set_shader_value(self.shader, self._enhance_driver_loc, self._enhance_driver_val, rl.ShaderUniformDataType.SHADER_UNIFORM_INT)
 
+  def _refresh_available_streams(self, now: float, force: bool = False):
+    if not self.client.is_connected() or not self.client.num_buffers:
+      return
+    if force or now - self._last_stream_check >= STREAM_DISCOVERY_INTERVAL:
+      self._last_stream_check = now
+      self.available_streams = self.client.available_streams(self._name, block=False)
+
   def _ensure_connection(self) -> bool:
-    if not self.client.is_connected():
+    # VisionIPC can report connected after an empty buffer response. It is not
+    # usable until buffers are imported, so retry instead of waiting for frames.
+    if not self.client.is_connected() or not self.client.num_buffers:
+      self._clear_fade()
       self.frame = None
       self.available_streams.clear()
 
       # Throttle connection attempts
-      current_time = rl.get_time()
+      current_time = time.monotonic()
       if current_time - self.last_connection_attempt < CONNECTION_RETRY_INTERVAL:
         return False
       self.last_connection_attempt = current_time
@@ -341,7 +389,7 @@ class CameraView(Widget):
 
       cloudlog.debug(f"Connected to {self._name} stream: {self._stream_type}, buffers: {self.client.num_buffers}")
       self._initialize_textures()
-      self.available_streams = self.client.available_streams(self._name, block=False)
+      self._refresh_available_streams(current_time, force=True)
 
     return True
 
@@ -351,7 +399,11 @@ class CameraView(Widget):
       return
 
     # Try to connect target if needed
-    if not self._target_client.is_connected():
+    if not self._target_client.is_connected() or not self._target_client.num_buffers:
+      now = time.monotonic()
+      if now - self._last_target_connection_attempt < CONNECTION_RETRY_INTERVAL:
+        return
+      self._last_target_connection_attempt = now
       if not self._target_client.connect(False) or not self._target_client.num_buffers:
         return
 
@@ -360,52 +412,100 @@ class CameraView(Widget):
     # Check if target has frames ready
     target_frame = self._target_client.recv(timeout_ms=0)
     if target_frame:
-      self.frame = target_frame  # Update current frame to target frame
-      self._complete_switch()
+      self._complete_switch(target_frame)
 
-  def _complete_switch(self) -> None:
-    """Instantly switch to target stream."""
-    cloudlog.debug(f"Switching to {self._target_stream_type}")
-    # Clean up current resources
-    if self.client:
-      del self.client
-
-    # Switch to target
+  def _complete_switch(self, target_frame) -> None:
+    """Retain the outgoing live stream briefly, with independent GPU buffers."""
     assert self._target_client is not None and self._target_stream_type is not None
-    self.client = self._target_client
-    self._stream_type = self._target_stream_type
+    cloudlog.debug(f"Switching to {self._target_stream_type}")
+    now = time.monotonic()
+    incoming = self._fade if self._fade is not None and self._target_client is self._fade.client else None
+    started = now
+    if incoming is not None:
+      # Reversing an in-flight fade swaps the weights without a flash or a
+      # third stream. Smoothstep is symmetric around its midpoint.
+      started = now - (CAMERA_FADE_TIME - min(max(now - incoming.started_at, 0.), CAMERA_FADE_TIME))
+      self._fade = None
+    else:
+      self._clear_fade()
+    if (self._crossfade_enabled and self.frame is not None and self.client.is_connected() and
+        0 <= now - self._last_frame_at <= CAMERA_FADE_STALE):
+      self._fade = FadingCamera(self.client, self.stream_type, self.frame, self.texture_y, self.texture_uv,
+                                self.egl_texture, self.egl_images, self._texture_needs_update, started, self._last_frame_at)
+      self.texture_y = self.texture_uv = self.egl_texture = None
+      self.egl_images = {}
+    elif incoming is not None:
+      self._clear_textures()
+      if self.egl_texture is not None:
+        rl.unload_texture(self.egl_texture)
+        self.egl_texture = None
+    self.client, self._stream_type = self._target_client, self._target_stream_type
+    self.frame, self._last_frame_at = target_frame, now
     self._texture_needs_update = True
-
-    # Reset state
-    self._target_client = None
-    self._target_stream_type = None
+    self._target_client = self._target_stream_type = None
     self._switching = False
+    if incoming is not None:
+      self.texture_y, self.texture_uv, self.egl_texture = incoming.texture_y, incoming.texture_uv, incoming.egl_texture
+      self.egl_images = incoming.egl_images
+    else:
+      self._initialize_textures()
 
-    # Initialize textures for new stream
-    self._initialize_textures()
+  def _clear_fade(self):
+    if self._fade is not None:
+      self._clear_textures(self._fade)
+      if self._fade.egl_texture is not None:
+        rl.unload_texture(self._fade.egl_texture)
+      self._fade = None
+
+  def _calc_fade_matrix(self, rect, transform):
+    return transform
+
+  def _render_fade(self, rect, transform):
+    fade = self._fade
+    if fade is None:
+      return
+    now = time.monotonic()
+    if not fade.client.is_connected():
+      self._clear_fade()
+      return
+    frame = fade.client.recv(timeout_ms=0)
+    if frame is not None:
+      fade.frame, fade.last_frame_at = frame, now
+      fade._texture_needs_update = True
+    alpha = fade.opacity(now)
+    matrix = self._calc_fade_matrix(rect, transform) if alpha > 0 else None
+    if matrix is None:
+      self._clear_fade()
+      return
+    self._render_camera(rect, matrix, fade, alpha)
 
   def _initialize_textures(self):
     self._clear_textures()
+    if COMMA_HARDWARE and self.egl_texture is None:
+      image = rl.gen_image_color(1, 1, rl.BLACK)
+      self.egl_texture = rl.load_texture_from_image(image)
+      rl.unload_image(image)
     if not COMMA_HARDWARE:
       self.texture_y = rl.load_texture_from_image(rl.Image(None, int(self.client.stride),
         int(self.client.height), 1, rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_GRAYSCALE))
       self.texture_uv = rl.load_texture_from_image(rl.Image(None, int(self.client.stride // 2),
         int(self.client.height // 2), 1, rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA))
 
-  def _clear_textures(self):
-    if self.texture_y and self.texture_y.id:
-      rl.unload_texture(self.texture_y)
-      self.texture_y = None
+  def _clear_textures(self, camera=None):
+    camera = self if camera is None else camera
+    if camera.texture_y and camera.texture_y.id:
+      rl.unload_texture(camera.texture_y)
+      camera.texture_y = None
 
-    if self.texture_uv and self.texture_uv.id:
-      rl.unload_texture(self.texture_uv)
-      self.texture_uv = None
+    if camera.texture_uv and camera.texture_uv.id:
+      rl.unload_texture(camera.texture_uv)
+      camera.texture_uv = None
 
     # Clean up EGL resources
     if COMMA_HARDWARE:
-      for data in self.egl_images.values():
+      for data in camera.egl_images.values():
         destroy_egl_image(data)
-      self.egl_images = {}
+      camera.egl_images = {}
 
 
 if __name__ == "__main__":
