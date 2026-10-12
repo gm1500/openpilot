@@ -75,7 +75,10 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   the initial exposure/IR fade in its pre-roll even though that fade did not trigger a save.
   The motion bookmark identifies the confirmed trigger, rather than the start of pre-roll.
 - Saved Sentry segments carry a log-only `selfdriveState` annotation labeled **Sentry recording**,
-  with `alertStatus=userPrompt`, at their start and end. Connect's existing timeline draws that
+  with `alertStatus=userPrompt`, at their start and end. The first annotation uses the route's
+  `initData` time origin, which can precede the first retained video frame in a trimmed minute,
+  so the leading timeline interval is orange too. Video and bookmark timestamps stay unchanged.
+  Connect's existing timeline draws that
   alert interval orange; motion bookmarks remain yellow above it in both the route list and
   playback timeline. The annotation includes saved pre-roll and the post-motion tail, with
   driving state disabled and no audible alert. It is written directly to qlog/rlog, never

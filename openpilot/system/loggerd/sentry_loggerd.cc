@@ -89,6 +89,11 @@ public:
     // Advancing its timestamps per segment moves Connect's route origin and
     // can hide the earlier minutes from playback and upload requests.
     write(init.asBytes());
+    capnp::FlatArrayMessageReader init_reader(init);
+    // Connect measures route offsets from initData, not the first retained
+    // frame. A trimmed first minute must still be orange from offset zero.
+    // Only the annotation uses that origin; video/bookmark timestamps stay put.
+    sentry_timeline(number ? start : init_reader.getRoot<cereal::Event>().getLogMonoTime());
     std::string cp_bytes = Params().get("CarParamsPersistent");
     if (!cp_bytes.empty()) {
       AlignedBuffer aligned;
@@ -100,7 +105,6 @@ public:
       write(cp_message.toBytes());
     }
     sentinel(number ? SentinelType::START_OF_SEGMENT : SentinelType::START_OF_ROUTE, start);
-    sentry_timeline(start);
   }
   void write(kj::ArrayPtr<const kj::byte> bytes) {
     rlog->write(const_cast<kj::byte *>(bytes.begin()), bytes.size());

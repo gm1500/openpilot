@@ -239,7 +239,11 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
             # logs, without ever claiming driving engagement or requesting sound.
             timeline = [e for e in log_events if e.which() == 'selfdriveState']
             assert len(timeline) == 2
-            assert timeline[0].logMonoTime == start.logMonoTime
+            # Connect's offset zero is initData, which can precede the first
+            # retained frame in a trimmed minute. Cover that leading interval.
+            assert timeline[0].logMonoTime == (route_init.logMonoTime if number == 0 else start.logMonoTime)
+            if number == 0:
+              assert timeline[0].logMonoTime < timestamps[0], 'fixture must exercise a partial first minute'
             assert timeline[-1].logMonoTime == log_events[-1].logMonoTime
             for event in timeline:
               state = event.selfdriveState
