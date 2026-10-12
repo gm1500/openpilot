@@ -9,7 +9,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SentryEnabled", {PERSISTENT, BOOL, "1"}},
     {"SentrySensitivity", {PERSISTENT, INT, "75"}},
     {"SentryArmDelay", {PERSISTENT, INT, "30"}},
-    {"SentryPreMinutes", {PERSISTENT, INT, "5"}},
+    {"SentryPreSeconds", {PERSISTENT, INT, "60"}},
     {"SentryPostSeconds", {PERSISTENT, INT, "60"}},
     {"SentryNarrowCamera", {PERSISTENT, BOOL, "1"}},
     {"SentryWideCamera", {PERSISTENT, BOOL, "1"}},

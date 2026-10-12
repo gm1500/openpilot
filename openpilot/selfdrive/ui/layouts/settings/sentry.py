@@ -3,7 +3,7 @@ import time
 
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.ui_state import ui_state, device
-from openpilot.system.sentry.config import setting, RANGES, ARM_DELAYS, CAMERA_WARMUP_SECONDS
+from openpilot.system.sentry.config import setting, RANGES, DURATION_PRESETS, CAMERA_WARMUP_SECONDS
 from openpilot.system.sentry.clock import time_status
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.widgets import Widget
@@ -73,18 +73,18 @@ class SentryCameraButtons(MultipleButtonAction):
       self.params.put_bool(self.KEYS[index], not self.is_button_selected(index))
 
 
-class SentryArmButtons(MultipleButtonAction):
-  def __init__(self, params):
-    super().__init__([f'{delay}s' for delay in ARM_DELAYS], button_width=210)
-    self.params = params
+class SentryDurationButtons(MultipleButtonAction):
+  def __init__(self, params, key):
+    super().__init__([f'{seconds}s' for seconds in DURATION_PRESETS], button_width=210)
+    self.params, self.key = params, key
     self.set_enabled(lambda: not ui_state.ignition)
 
   def is_button_selected(self, index):
-    return setting(self.params, 'SentryArmDelay') == ARM_DELAYS[index]
+    return setting(self.params, self.key) == DURATION_PRESETS[index]
 
   def select_button(self, index):
     if self.enabled:
-      self.params.put('SentryArmDelay', ARM_DELAYS[index], block=True)
+      self.params.put(self.key, DURATION_PRESETS[index], block=True)
 
 
 class SentryLayout(Widget):
@@ -112,7 +112,7 @@ class SentryLayout(Widget):
                   'Local timestamp with UTC offset, camera name and parking coordinates when available. Uses UTC until the timezone is known.'),
       ListItem('Arming delay', description=f'Starts after {CAMERA_WARMUP_SECONDS:g} seconds of camera warmup. ' +
                'Footage buffers throughout; motion saves and the eye wait until both stages finish.',
-               action_item=SentryArmButtons(self.params)),
+               action_item=SentryDurationButtons(self.params, 'SentryArmDelay')),
       SentrySlider(self.params, 'SentrySensitivity', 'Motion sensitivity'),
       button_item('Save an event now', 'SAVE', callback=lambda: self.params.put_bool('SentryManualTrigger', True),
                   enabled=lambda: ui_state.sentry_active),
@@ -121,11 +121,13 @@ class SentryLayout(Widget):
                 'Uses the device clock, synchronized by the system through the network or GPS. ' +
                 'Uses the remembered geographic timezone, or the cellular network offset when available. Continuous GPS is not needed.'),
       text_item('Battery voltage', self.voltage_status),
+      SentrySlider(self.params, 'SentryCutoffVoltage', 'Battery cutoff', ' V', .1),
+      ListItem('Pre-event buffer', description='How much available footage to keep before motion is confirmed or SAVE is pressed.',
+               action_item=SentryDurationButtons(self.params, 'SentryPreSeconds')),
+      ListItem('Record after motion stops', description='Keep recording for this long after the last confirmed movement. New motion extends it.',
+               action_item=SentryDurationButtons(self.params, 'SentryPostSeconds')),
     ]
     for key, title, unit, step in (
-      ('SentryCutoffVoltage', 'Battery cutoff', ' V', .1),
-      ('SentryPreMinutes', 'Pre-event buffer', ' min', 1),
-      ('SentryPostSeconds', 'Record after motion stops', ' s', 10),
       ('SentryMaxHours', 'Maximum parked time', ' h', 1),
       ('SentryMaxTemp', 'Pause capture above', ' °C', 1),
     ):

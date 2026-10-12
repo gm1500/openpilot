@@ -256,8 +256,15 @@ def test_settings_clamp_and_default():
   assert config.setting(FakeParams(), 'SentryArmDelay') == 30
   assert config.setting(FakeParams(SentryEnabled=False), 'SentryEnabled') is False
   assert config.setting(FakeParams(SentrySensitivity=42), 'SentrySensitivity') == 42
-  for previous, expected in ((10, 15), (20, 15), (30, 30), (40, 30), (60, 60), (300, 60)):
-    assert config.setting(FakeParams(SentryArmDelay=previous), 'SentryArmDelay') == expected
+  for key in config.DURATION_KEYS:
+    for previous, expected in ((10, 15), (20, 15), (30, 30), (40, 30), (60, 60), (300, 60)):
+      assert config.setting(FakeParams({key: previous}), key) == expected
+    assert config.setting(FakeParams({key: float('nan')}), key) == config.DEFAULTS[key]
+  # Every former 1–5 minute choice maps to the longest available preset.
+  # The obsolete key must never be interpreted as a number of seconds.
+  for minutes in range(1, 6):
+    assert config.setting(FakeParams(SentryPreMinutes=minutes), 'SentryPreSeconds') == 60
+  assert config.setting(FakeParams(SentryPreMinutes=5, SentryPreSeconds=15), 'SentryPreSeconds') == 15
   assert config.setting(FakeParams(SentrySensitivity=400), 'SentrySensitivity') == 100
   assert config.setting(FakeParams(SentryCutoffVoltage=float('nan')), 'SentryCutoffVoltage') == 11.8
   assert config.setting(FakeParams(SentryCutoffVoltage=12.3), 'SentryCutoffVoltage') == 11.8
@@ -279,6 +286,8 @@ def test_manager_first_use_defaults_match_sentry(tmp_path):
   assert not params.get_bool('SentryEnabled')
   assert params.get('SentrySensitivity') == 75
   assert params.get('SentryArmDelay') == 30
+  assert params.get('SentryPreSeconds') == 60
+  assert params.get('SentryPostSeconds') == 60
 
 
 def test_battery_override_and_ignition(monkeypatch, tmp_path):
@@ -442,7 +451,8 @@ def test_camera_buttons_toggle_independently_and_keep_personality_exclusive(monk
   assert [personality.is_button_selected(i) for i in range(3)] == [False, False, True]
 
 
-def test_arming_buttons_select_one_preset(monkeypatch, tmp_path):
+@pytest.mark.parametrize('key', config.DURATION_KEYS)
+def test_duration_buttons_select_one_preset(monkeypatch, tmp_path, key):
   monkeypatch.setenv('SCALE', '1')
   import pyray as rl
   from openpilot.common.params import Params
@@ -451,16 +461,16 @@ def test_arming_buttons_select_one_preset(monkeypatch, tmp_path):
   state = SimpleNamespace(ignition=False)
   monkeypatch.setattr(ui, 'ui_state', state)
   params = Params(str(tmp_path/'params'))
-  buttons = ui.SentryArmButtons(params)
+  buttons = ui.SentryDurationButtons(params, key)
   buttons.set_rect(rl.Rectangle(0, 0, 670, 170))
-  assert [buttons.is_button_selected(i) for i in range(3)] == [False, True, False]
+  assert [buttons.is_button_selected(i) for i in range(3)] == [n == config.DEFAULTS[key] for n in config.DURATION_PRESETS]
   for index, x in enumerate((105, 335, 565)):
     buttons._handle_mouse_release(rl.Vector2(x, 85))
-    assert params.get('SentryArmDelay') == config.ARM_DELAYS[index]
+    assert params.get(key) == config.DURATION_PRESETS[index]
     assert [buttons.is_button_selected(i) for i in range(3)] == [i == index for i in range(3)]
   state.ignition = True
   buttons._handle_mouse_release(rl.Vector2(105, 85))
-  assert params.get('SentryArmDelay') == 60
+  assert params.get(key) == 60
 
 
 def test_process_gates_do_not_start_driving_controls(monkeypatch):

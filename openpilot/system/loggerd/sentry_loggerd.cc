@@ -3,6 +3,7 @@
 
 #include <array>
 #include <climits>
+#include <cmath>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -20,8 +21,19 @@ constexpr uint64_t SECOND = 1'000'000'000;
 constexpr size_t RAM_LIMIT = 128 * 1024 * 1024;
 constexpr uint64_t DISK_RESERVE = 5ULL * 1024 * 1024 * 1024;
 
-int setting(const char *key, int fallback, int lo, int hi) {
-  try { return std::clamp(std::stoi(Params().get(key)), lo, hi); } catch (...) { return fallback; }
+int history_seconds() {
+  // Match config.setting's nearest-preset rule, including malformed values.
+  try {
+    std::string raw = Params().get("SentryPreSeconds");
+    size_t parsed = 0;
+    double value = std::stod(raw, &parsed);
+    if (!std::isfinite(value) || raw.find_first_not_of(" \t\r\n", parsed) != std::string::npos) return 60;
+    int selected = 15;
+    for (int seconds : {30, 60}) {
+      if (std::abs(seconds-value) < std::abs(selected-value)) selected = seconds;
+    }
+    return selected;
+  } catch (...) { return 60; }
 }
 
 struct Packet {
@@ -196,6 +208,8 @@ public:
   uint64_t event_start = 0, retry_after = 0, storage_check = 0;
   uint64_t last_motion = 0;
   uint64_t last_record_until = 0;
+  uint64_t event_cutoff = 0;
+  int pre_seconds = history_seconds();
   int preview_camera = VISION_STREAM_NARROW_ROAD;
 
   Recorder() { source_segments.fill(-1); }
@@ -227,7 +241,7 @@ public:
     last_record_until = 0;
   }
   void save(int segment, const Packet &packet) {
-    if (segment < first_segment || segment <= closed_segment) return;
+    if (segment < first_segment || segment <= closed_segment || packet.frame_time < event_cutoff) return;
     auto &entry = ring.at(segment);
     if (entry.previews.empty()) entry.previews.push_back({0, preview_camera});
     auto &out = saved[segment];
@@ -262,7 +276,7 @@ public:
     buffered += packet.bytes();
     if (!route.empty()) save(segment, packet);
     entry.packets.emplace_back(std::move(packet));
-    const uint64_t window = setting("SentryPreMinutes", 5, 1, 5) * 60 * SECOND;
+    const uint64_t window = pre_seconds * SECOND;
     while (ring.size() > 1 && (buffered > RAM_LIMIT || ring.begin()->second.end + window < now)) {
       buffered -= ring.begin()->second.bytes;
       ring.erase(ring.begin());
@@ -273,10 +287,12 @@ public:
       size_t bytes = old.packets.front().bytes();
       old.packets.pop_front(); old.bytes -= bytes; buffered -= bytes;
       if (old.packets.empty()) ring.erase(ring.begin());
-      else old.start = old.packets.front().time;
+      // Keep the native minute's original time anchor even if its first frames
+      // were evicted. Moving it would shift subsequent segment timestamps.
     }
   }
   void tick(uint64_t record_until, uint64_t now, uint64_t control_time, int trigger_camera) {
+    pre_seconds = history_seconds();
     // Only confirmed motion or a manual Save advances the recording deadline.
     // The immediate eye signal must never create bookmarks or extend a route.
     uint64_t motion_time = record_until > now && record_until > last_record_until ? control_time : 0;
@@ -304,14 +320,20 @@ public:
       }
     }
     if (route.empty() && record_until > now && now >= retry_after && !ring.empty()) {
+      uint64_t window = pre_seconds*SECOND;
+      event_cutoff = now > window ? now-window : 0;
+      // Retain the partial first minute. save() trims its packets to the chosen
+      // number of seconds; SavedSegment waits for each camera's first keyframe.
+      // Metadata alone must not create an extra empty leading segment.
+      auto begin = std::find_if(ring.begin(), ring.end(), [this](const auto &segment) {
+        return std::any_of(segment.second.packets.begin(), segment.second.packets.end(), [this](const Packet &packet) {
+          return packet.camera >= 0 && packet.frame_time >= event_cutoff;
+        });
+      });
+      if (begin == ring.end()) return;
       if (!disk_ok()) { retry_after = now+30*SECOND; return; }
       route = logger_get_identifier("RouteCount");
       event_start = storage_check = now;
-      uint64_t window = setting("SentryPreMinutes", 5, 1, 5)*60*SECOND;
-      uint64_t cutoff = now > window ? now-window : 0;
-      auto begin = ring.begin();
-      // Whole native minute segments, at most the selected pre-event window.
-      while (std::next(begin) != ring.end() && begin->second.start < cutoff) ++begin;
       first_segment = begin->first;
       closed_segment = first_segment-1;
       // Anchor the route to its retained pre-roll, not the trigger, daemon
@@ -345,6 +367,15 @@ public:
       event.initUserBookmark();
       append(-1, event.asReader(), now);
     }
+  }
+  double buffer_seconds(uint64_t now) const {
+    uint64_t oldest = now;
+    for (const auto &[number, segment] : ring) {
+      for (const auto &packet : segment.packets) {
+        if (packet.camera >= 0) oldest = std::min(oldest, packet.frame_time);
+      }
+    }
+    return std::min(double(pre_seconds), (now-oldest)/double(SECOND));
   }
 };
 
@@ -434,7 +465,7 @@ int main() {
       status.setRecording(!recorder.route.empty());
       status.setRoute(recorder.route);
       status.setBufferBytes(recorder.buffered);
-      status.setBufferSeconds(recorder.ring.empty() ? 0 : (now-recorder.ring.begin()->second.start)/double(SECOND));
+      status.setBufferSeconds(recorder.buffer_seconds(now));
       status.setError(recorder.error);
       status.setPreviewCamera(recorder.preview_camera);
       pm.send("sentryRecorderState", message);

@@ -92,15 +92,15 @@ def test_recorder_waits_for_publishers_at_startup(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
-@pytest.mark.parametrize('stop_reason,trigger_camera', [('ignition', 0), ('disabled', 1), ('manager', 2)])
-def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_camera):
+@pytest.mark.parametrize('stop_reason,trigger_camera,pre_seconds', [('ignition', 0, 15), ('disabled', 1, 30), ('manager', 2, 60)])
+def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_camera, pre_seconds):
   monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
   hevc = [sample_packet('libx265', color=color) for color in COLORS]
   h264 = [sample_packet('libx264', color=color) for color in COLORS]
   with OpenpilotPrefix():
     messaging.reset_context()
     params = Params()
-    params.put('SentryPreMinutes', 5, block=True)
+    params.put('SentryPreSeconds', pre_seconds, block=True)
     pm = messaging.PubMaster([*STREAMS, 'sentryState', 'pandaStates', 'deviceState'])
     status = messaging.SubMaster(['sentryRecorderState'])
     with (tmp_path/'recorder.log').open('w') as logfile:
@@ -142,27 +142,28 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
           pytest.fail(f'recorder timeout: {status["sentryRecorderState"]}\n{(tmp_path/"recorder.log").read_text()}')
 
         await_state(lambda _: status.updated['sentryRecorderState'])
-        base = time.monotonic_ns()-200_000_000_000
+        base = time.monotonic_ns()-75_000_000_000
         wall_base = time.time_ns()-(time.monotonic_ns()-base)
-        # Four minutes of source segments from an already-running encoder. The
-        # saved route must start at zero, with one clock origin for every log.
-        for segment in range(4):
+        # 75 seconds across two native minutes. At each duration, trim the first
+        # minute to actual seconds without shifting the next minute's clock.
+        for segment, count in ((0, 60), (1, 15)):
           control()
-          for frame in range(20):
+          for frame in range(count):
             for c in range(len(STREAMS)):
               msg = messaging.new_message(FIELDS[c], valid=True)
-              msg.logMonoTime = base+segment*60_000_000_000+frame*50_000_000
+              msg.logMonoTime = base+(segment*60+frame)*1_000_000_000
               data = getattr(msg, FIELDS[c])
               data.width, data.height = 526, 330
               data.data = h264[c-3] if c >= 3 else hevc[c]
               idx = data.idx
               idx.type = log.EncodeIndex.Type.qcameraH264 if c >= 3 else log.EncodeIndex.Type.fullHEVC
-              idx.frameId = segment*1200+frame+10000*(c%3)
-              idx.segmentId, idx.segmentNum, idx.flags = frame, segment+7, 8
+              idx.frameId = segment*1200+frame*20+10000*(c%3)
+              idx.segmentId, idx.segmentNum, idx.flags = frame*20, segment+7, 8
               idx.timestampSof = idx.timestampEof = msg.logMonoTime
               pm.send(STREAMS[c], msg)
             time.sleep(.003)
         await_state(lambda s: s.bufferBytes > 10000)
+        assert 0 < status['sentryRecorderState'].bufferSeconds <= pre_seconds
         assert not list((tmp_path/'routes').iterdir()), 'idle capture wrote a route to disk'
         assert params.get('RouteCount') is None
         trigger_time = time.monotonic_ns()
@@ -185,38 +186,48 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
           await_state(lambda s: not s.recording and s.bufferBytes == 0, trigger=True,
                       ignition=stop_reason == 'ignition', capture=stop_reason != 'disabled')
         dirs = sorted((tmp_path/'routes').iterdir())
-        assert len(dirs) == 4
+        assert len(dirs) == (1 if pre_seconds == 15 else 2)
         route_init = messages(dirs[0]/'qlog.zst')[0]
-        assert route_init.logMonoTime == base
-        assert abs(route_init.initData.wallTimeNanos-wall_base) < 100_000_000
+        first_source = 1 if pre_seconds == 15 else 0
+        assert route_init.logMonoTime == base+first_source*60_000_000_000
+        assert abs(route_init.initData.wallTimeNanos-(wall_base+first_source*60_000_000_000)) < 100_000_000
         for number, directory in enumerate(dirs):
           assert directory.name.endswith(f'--{number}')
           assert (directory/'.sentry').exists()
           assert not list(directory.glob('*.lock'))
           assert 'user.preserve' not in os.listxattr(directory)
+          events = messages(directory/'qlog.zst')
+          preview_indexes = [e.qNarrowRoadEncodeIdx for e in events if e.which() == 'qNarrowRoadEncodeIdx']
+          timestamps = [i.timestampEof for i in preview_indexes]
+          assert timestamps and all(t >= trigger_time-pre_seconds*1_000_000_000 for t in timestamps)
+          if number == 0:
+            assert timestamps[0] <= trigger_time-(pre_seconds-2)*1_000_000_000
+          source_segment = first_source+number
+          first_frame = (timestamps[0]-base)//1_000_000_000-source_segment*60
+          expected_frames = list(range(first_frame, 60 if source_segment == 0 else 15))
+          assert timestamps == [base+(source_segment*60+f)*1_000_000_000 for f in expected_frames]
           for c, filename in enumerate(FILES):
             with av.open(str(directory/filename)) as video:
               frames = list(video.decode(video=0))
-            assert len(frames) == 20
+            assert len(frames) == len(expected_frames)
             assert (frames[0].width, frames[0].height) == (526, 330)
             source = c if c < 3 else CAMERA_INDEX[trigger_camera]
             assert abs(float(frames[0].to_ndarray(format='rgb24')[10, 10].mean())-COLORS[source]) < 10
             if c < 3:
-              assert (directory/filename).read_bytes() == hevc[c]*20
-          events = messages(directory/'qlog.zst')
+              assert (directory/filename).read_bytes() == hevc[c]*len(expected_frames)
           for filename in ('qlog.zst', 'rlog.zst'):
             log_events = messages(directory/filename)
             assert log_events[0].which() == 'initData'
             assert log_events[0].as_builder().to_bytes() == route_init.as_builder().to_bytes()
             start = next(e for e in log_events if e.which() == 'sentinel')
-            assert start.logMonoTime == base+number*60_000_000_000
+            assert start.logMonoTime == timestamps[0]
             assert start.sentinel.type == ('startOfRoute' if number == 0 else 'startOfSegment')
           indexes = [getattr(e, e.which()) for e in events if e.which().endswith('EncodeIdx')]
-          assert len(indexes) == 80
+          assert len(indexes) == 4*len(expected_frames)
           assert all(i.segmentNum == number for i in indexes)
-          preview_indexes = [e.qNarrowRoadEncodeIdx for e in events if e.which() == 'qNarrowRoadEncodeIdx']
-          assert [i.frameId for i in preview_indexes] == [number*1200+frame+10000*CAMERA_INDEX[trigger_camera] for frame in range(20)]
-          assert events[-1].sentinel.type == ('endOfRoute' if number == 3 else 'endOfSegment')
+          assert [i.frameId for i in preview_indexes] == [source_segment*1200+frame*20+10000*CAMERA_INDEX[trigger_camera]
+                                                       for frame in expected_frames]
+          assert events[-1].sentinel.type == ('endOfRoute' if number == len(dirs)-1 else 'endOfSegment')
         all_events = [e for directory in dirs for e in messages(directory/'qlog.zst')]
         assert any(e.which() == 'sentryState' and e.sentryState.locationSource == 'slcParked' for e in all_events)
         assert any(e.which() == 'gpsLocation' and e.gpsLocation.source == 'fusion' for e in all_events)
@@ -277,7 +288,7 @@ def test_video_queue_wrap_and_repeated_events(tmp_path, monkeypatch, publisher_f
         for service in STREAMS:
           assert video_pm.wait_for_readers_to_update(service, 2)
 
-        base = time.monotonic_ns()-180_000_000_000
+        base = time.monotonic_ns()-30_000_000_000
         sent_bytes = 0
         for first, last in ((0, frame_count//2), (frame_count//2, frame_count)):
           for frame in range(first, last):

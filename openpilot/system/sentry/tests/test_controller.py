@@ -170,7 +170,7 @@ def test_warmup_restarts_for_camera_loss_but_not_recorder_gaps(monkeypatch, tmp_
     def remove(self, key):
       self.pop(key, None)
 
-  params = Params(DEFAULTS | {'IsOffroad': True, 'SentryArmDelay': arm_delay, 'SentryPostSeconds': 10})
+  params = Params(DEFAULTS | {'IsOffroad': True, 'SentryArmDelay': arm_delay, 'SentryPostSeconds': 15})
   clock = [100.]
   ready_at = 145.
   arm_at = ready_at+CAMERA_WARMUP_SECONDS
@@ -257,11 +257,11 @@ def test_warmup_restarts_for_camera_loss_but_not_recorder_gaps(monkeypatch, tmp_
 
   assert sent[ready_at]['phase'] == f'Camera warmup: {CAMERA_WARMUP_SECONDS:g} s'
   # Manual saves bypass both delays without letting exposure changes extend them.
-  # The manual tail finishes at arm_at+2; the arming clock must still be running.
-  assert sent[arm_at+3.]['phase'] == f'Arming: {arm_delay-3} s'
+  # The manual tail finishes at arm_at+7; the arming clock must still be running.
+  assert sent[arm_at+8.]['phase'] == f'Arming: {arm_delay-8} s'
   assert all(not s['motion'] for now, s in sent.items() if now < arm_at+arm_delay)
   assert all(s['recordUntilMonoTime'] == 0 for now, s in sent.items() if now < ready_at+2.)
-  manual_until = int((ready_at+12.)*1e9)
+  manual_until = int((ready_at+17.)*1e9)
   assert all(s['recordUntilMonoTime'] == manual_until for now, s in sent.items() if ready_at+2. <= now < arm_at+arm_delay)
   assert min(now for now, armed in samples if armed) == arm_at+arm_delay
   assert sent[arm_at+arm_delay+.4]['motion']
@@ -277,7 +277,8 @@ def test_warmup_restarts_for_camera_loss_but_not_recorder_gaps(monkeypatch, tmp_
     assert last_gap['recordUntilMonoTime'] == sent[round(saved_at-.4, 1)]['recordUntilMonoTime']
     assert (sent[saved_at]['recordUntilMonoTime'] > last_gap['recordUntilMonoTime']) == (not eye_only)
   assert all(not s['motion'] for now, s in sent.items() if drop_at+1. <= now < rearm_at+arm_delay)
-  assert sent[rearm_at]['phase'] == f'Arming: {arm_delay} s'
+  # The 15-second recording tail can outlast the restarted camera warmup.
+  assert sent[rearm_at+3.]['phase'] == f'Arming: {arm_delay-3} s'
   assert sent[rearm_at+arm_delay-1.]['phase'] == 'Arming: 1 s'
   assert sent[rearm_at+arm_delay+1.]['motion']
   assert not sent[stop_at]['capture'] and not sent[stop_at]['motion']

@@ -48,16 +48,20 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
 - All three cameras default on. Device targets are 526×330, 20 fps, HEVC at 256 kbit/s
   per camera, plus a separate 256 kbit/s H264 preview buffer for each enabled camera.
   This retains pre-event previews from whichever lens confirms motion. With all cameras
-  enabled, the nominal five-minute compressed-video payload is about 57.6 MB, before logs/overhead.
-  Actual variable bitrate varies. Encoded payloads have a hard 128 MiB RAM cap; IPC queues,
+  enabled, the nominal one-minute compressed-video payload is about 11.5 MB, before logs/overhead.
+  The RAM ring retains native minute boundaries around the selected history; saved footage is
+  trimmed to the selected seconds. Actual variable bitrate varies. Encoded payloads have a hard 128 MiB RAM cap; IPC queues,
   camera buffers and private watermark buffers use additional RAM.
 - No route directories or video files are written while merely watching. Runtime control
   uses tmpfs. Existing system logs and battery-accounting Params still write normally;
   this is not a promise of zero device-wide NAND writes.
-- Confirmed motion saves available preceding native minute segments, then continues through activity
-  and the default 60-second tail. To preserve normal segment boundaries, pre-roll is rounded
-  down to complete available source-segment starts: normally 4–5 minutes with a full buffer,
-  less during startup or RAM pressure. The confirmation period is included in this pre-roll.
+- Confirmed motion saves up to the selected 15/30/60 seconds of preceding footage (default 60),
+  then continues through activity and the selected 15/30/60-second tail (default 60).
+  The first minute is trimmed at the frame level, and each camera starts on its next decodable
+  keyframe, normally shortening history by less than one second. Startup or RAM pressure can
+  leave less history available. Original native minute time anchors are retained even when
+  the first minute is partial, so subsequent segments and bookmarks keep their real timestamps.
+  The confirmation period is included in this pre-roll.
   Only confirmed motion or manual Save extends the tail; eye-only movement does not.
   Events split after 15 minutes of continuous activity.
 - Warmup and arming footage stays in the RAM history. A later event can therefore include
@@ -182,8 +186,8 @@ through instantaneous power loss.
 | Enable Sentry | On, for an unset first-use setting |
 | Sensitivity | 75 / 100 |
 | Arming delay | 30 s; one row with 15s / 30s / 60s presets |
-| Pre-event history | Up to 5 min |
-| Tail after motion | 60 s |
+| Pre-event history | 60 s; one row with 15s / 30s / 60s presets |
+| Tail after motion | 60 s; one row with 15s / 30s / 60s presets |
 | Battery cutoff | 11.8 V (stock threshold); adjustable 11.0–11.8 V |
 | Maximum parked time | 4 h |
 | Thermal pause | 70 °C, resume 8 °C cooler |
@@ -194,8 +198,11 @@ through instantaneous power loss.
 
 Enable/STOP, cameras, red eye, watermark and arming presets are at the top. Sensitivity and
 manual save follow; recording lengths, battery/time limits and thermal pause come farther
-down. New defaults only initialize missing settings; older custom arming slider values
-are interpreted as the nearest preset. The battery default remains openpilot's 11.8 V threshold.
+down. All three duration rows use the same single-choice 15s / 30s / 60s buttons.
+New defaults only initialize missing settings; older arming and post-event slider values
+are interpreted as the nearest preset. The old 1–5 minute pre-event setting is replaced by
+`SentryPreSeconds`, defaulting to 60 seconds; an existing seconds choice is retained.
+The battery default remains openpilot's 11.8 V threshold.
 Camera/watermark changes pause capture briefly to restart the encoders. Watermarks are burned
 into private low-resolution frames, never into shared camera buffers. Local timestamps include
 a numeric UTC offset, with explicitly labeled UTC as the fallback. Native route/log timestamps
@@ -310,6 +317,13 @@ choices in overlapping events, and byte-for-byte unchanged full-camera files. Th
 uses three synthetic VisionIPC camera streams and checks each preview's watermark output
 without modifying the shared camera buffer, with narrow both enabled and disabled.
 PC main-camera encoding uses the existing lossless codec; production hardware uses HEVC.
+
+Duration tests save real encoded footage with each 15/30/60-second history setting, check
+the cutoff in every saved stream, decode partial minute files, and verify that trimming
+does not move the shared route clock or later segment times. Settings checks cover preset
+selection, old values, and agreement between native and Python first-use defaults.
+The duration update passed 105 controller, settings and native-recorder checks. Two encoder
+cases were skipped because the encoder binary was not built for this focused check.
 
 Before considering it ready for unattended use, verify on a parked comma 3X:
 
