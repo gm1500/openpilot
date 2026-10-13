@@ -1,4 +1,5 @@
 """Decode real camera packets across overlapping events and sparse session minutes."""
+import shutil
 import subprocess
 from fractions import Fraction
 
@@ -9,7 +10,7 @@ av = pytest.importorskip('av')
 
 from openpilot.cereal import messaging
 from openpilot.common.prefix import OpenpilotPrefix
-from openpilot.system.sentry.tests.test_recorder import COLORS, FIELDS, FILES, ROOT, assert_footage_timeline, messages
+from openpilot.system.sentry.tests.test_recorder import COLORS, FIELDS, FILES, FILLER_FRAME_ID, ROOT, assert_footage_timeline, messages
 
 BINARY = ROOT/'system/loggerd/test_sentry_recorder'
 
@@ -86,6 +87,8 @@ def validate_session(root, tmp_path):
       logged = messages(directory/filename)
       assert_footage_timeline(logged)
       states = [e for e in logged if e.which() == 'selfdriveState']
+      if states[0].selfdriveState.alertStatus == 'normal':
+        states = states[1:]
       spans = [((a.logMonoTime-base)/1e9, (b.logMonoTime-base)/1e9) for a, b in zip(states[::2], states[1::2], strict=True)]
       assert spans == orange[name], 'orange must cover footage, with no filler state messages during quiet gaps'
     route, number = name.rsplit('--', 1)
@@ -98,16 +101,25 @@ def validate_session(root, tmp_path):
     for c, filename in enumerate(FILES):
       field = ('narrowRoadEncodeIdx', 'wideRoadEncodeIdx', 'cabinEncodeIdx', 'qNarrowRoadEncodeIdx')[c]
       indexes = [getattr(e, field) for e in events if e.which() == field]
-      assert [i.timestampEof for i in indexes] == [base+f*50_000_000 for f in frame_numbers]
-      assert [i.segmentId for i in indexes] == list(range(len(frame_numbers)))
+      real = [i for i in indexes if i.frameId != FILLER_FRAME_ID]
+      assert [i.timestampEof for i in real] == [base+f*50_000_000 for f in frame_numbers]
+      assert [i.segmentId for i in indexes] == list(range(len(indexes)))
+      assert [i.segmentIdEncode for i in indexes] == list(range(len(indexes)))
       assert all(i.segmentNum == number for i in indexes)
       with av.open(str(directory/filename)) as video:
         decoded = list(video.decode(video=0))
-      assert len(decoded) == len(frame_numbers), f'{filename} lost frames at an event boundary'
+      assert len(decoded) == len(indexes), f'{filename} lost frames at an event boundary'
       if c == 3:
         times = [float(f.pts*f.time_base) for f in decoded]
-        assert np.diff(times) == pytest.approx(np.diff(frame_numbers)/20, abs=.001)
-        for frame, n in zip(decoded, frame_numbers, strict=True):
+        assert np.diff(times) == pytest.approx(np.diff([i.timestampEof for i in indexes])/1e9, abs=.001)
+        assert max(np.diff(times)) <= 1.001, 'no holes between real footage and filler'
+        assert indexes[0].timestampEof == origin+number*60_000_000_000
+        for frame, idx in zip(decoded, indexes, strict=True):
+          assert (frame.width, frame.height) == (526, 330)
+          if idx.frameId == FILLER_FRAME_ID:
+            assert np.max(frame.to_ndarray(format='rgb24')) <= 1
+            continue
+          n = (idx.timestampEof-base)//50_000_000
           # The first event keeps its lens through overlap; a later cabin event
           # takes the previously unsaved pre-roll, while each HEVC keeps its lens.
           source = 2 if (600 <= n < 940 or route == second) else 1
@@ -118,16 +130,24 @@ def validate_session(root, tmp_path):
     assert bookmarks == bookmarks_by_segment[name]
     assert [e.which() for e in messages(directory/'rlog.zst')] == [e.which() for e in events]
 
-  sizes = []
+  sizes, video_sizes = [], []
   for name in sorted(gaps):
     directory = root/name
-    assert {f.name for f in directory.iterdir()} == {'.sentry', 'qlog.zst'}, 'gap uploads are qlog only'
+    assert {f.name for f in directory.iterdir()} == {'.sentry', 'qlog.zst', 'qcamera.ts'}, 'no HEVC/rlog or sensor data in a gap'
     events = messages(directory/'qlog.zst')
-    assert [e.which() for e in events] == ['initData', 'sentinel', 'selfdriveState', 'sentinel']
+    assert [e.which() for e in events] == ['initData', 'sentinel', 'selfdriveState']+['qNarrowRoadEncodeIdx']*62+['sentinel']
     route, number = name.rsplit('--', 1)
     origin = origins[route]
     start = origin+int(number)*60_000_000_000
-    assert [e.logMonoTime for e in events] == [origin, start, start, start+60_000_000_000-1]
+    assert [e.logMonoTime for e in events[:3]] == [origin, start, start]
+    assert events[-1].logMonoTime == start+60_000_000_000-1
+    indexes = [e.qNarrowRoadEncodeIdx for e in events[3:-1]]
+    times = [start+n*1_000_000_000 for n in range(60)]+[start+59_900_000_000, start+59_950_000_000]
+    assert [i.timestampEof for i in indexes] == times
+    assert all(i.frameId == FILLER_FRAME_ID and i.flags == 8 for i in indexes)
+    assert [i.segmentId for i in indexes] == list(range(62))
+    assert [i.segmentIdEncode for i in indexes] == list(range(62))
+    assert all(i.segmentNum == int(number) for i in indexes)
     assert events[1].sentinel.type == 'startOfSegment'
     assert events[-1].sentinel.type == 'endOfSegment'
     assert events[2].valid and not events[2].selfdriveState.enabled and not events[2].selfdriveState.active
@@ -139,7 +159,23 @@ def validate_session(root, tmp_path):
       assert getattr(compact, field) == getattr(full, field)
     assert not compact.params.entries and not compact.commands.entries and not compact.kernelArgs
     size = (directory/'qlog.zst').stat().st_size
-    assert 0 < size < 2048, 'one quiet minute must remain a small compressed metadata file'
+    assert 0 < size < 4096, 'one quiet minute must remain a small compressed metadata file'
     sizes.append(size)
-  print(f'Gap logs: {len(sizes)} files, {sum(sizes)} bytes, max {max(sizes)} bytes/minute; '
+    video_size = (directory/'qcamera.ts').stat().st_size
+    assert 0 < video_size < 48_000
+    video_sizes.append(video_size)
+    if int(number) in (1, 2, 599):
+      with av.open(str(directory/'qcamera.ts')) as video:
+        frames = list(video.decode(video=0))
+      assert len(frames) == 62 and all(f.key_frame for f in frames)
+      assert np.diff([float(f.pts*f.time_base) for f in frames]) == pytest.approx(np.diff(times)/1e9, abs=.001)
+      assert all(np.max(f.to_ndarray(format='rgb24')) <= 1 for f in frames)
+  print(f'Gap logs: {len(sizes)} files, {sum(sizes)} bytes, max {max(sizes)} bytes/minute;',
+        f'video: {sum(video_sizes)} bytes, max {max(video_sizes)} bytes/minute;',
         f'finish backlog: {(tmp_path/"gap_finish_ms.txt").read_text().strip()} ms')
+  # Keep a small, anonymous fixture for the optional Connect hls.js contract
+  # check after OpenpilotPrefix cleans up the native route directories.
+  playback = tmp_path/'connect-preview'
+  playback.mkdir()
+  for number in range(4):
+    shutil.copyfile(root/f'{first}--{number}'/'qcamera.ts', playback/f'{number}.ts')

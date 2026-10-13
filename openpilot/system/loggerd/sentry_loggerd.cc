@@ -12,6 +12,7 @@
 
 #include "system/loggerd/encoder/encoder.h"
 #include "system/loggerd/loggerd.h"
+#include "system/loggerd/sentry_filler.h"
 #include "system/loggerd/video_writer.h"
 #include "system/sentry/state.h"
 
@@ -115,10 +116,11 @@ public:
   int number;
   int preview_encoder = -1;
   uint64_t preview_time = 0;
+  uint64_t start_time;
   uint64_t last_time = 0;
 
   SavedSegment(const std::string &route, int number_, kj::ArrayPtr<capnp::word> init, uint64_t start, bool gap = false)
-      : path(Path::log_root() + "/" + route + "--" + std::to_string(number_)), number(number_), last_time(start) {
+      : path(Path::log_root() + "/" + route + "--" + std::to_string(number_)), number(number_), start_time(start), last_time(start) {
     fs::create_directories(path);
     std::ofstream{path + "/sentry.lock"} << getpid() << "\n";
     std::ofstream{path + "/.sentry"} << "1\n";
@@ -170,6 +172,41 @@ public:
     }
     write(msg.toBytes());
   }
+  bool fill_preview(uint64_t from, uint64_t until) {
+    const uint64_t frame_duration = SECOND/MAIN_FPS;
+    if (until < from+frame_duration) return false;
+    if (!video[3]) {
+      video[3] = std::make_unique<VideoWriter>(path.c_str(), "qcamera.ts", true, 526, 330, MAIN_FPS,
+                                             cereal::EncodeIndex::Type::QCAMERA_H264);
+      video[3]->write(nullptr, 0, from/1000, true, false);
+    }
+    uint64_t previous = 0;
+    auto frame = [&](uint64_t time) {
+      if (previous && time <= previous) return;
+      video[3]->write(const_cast<uint8_t *>(SENTRY_FILLER_FRAME), sizeof(SENTRY_FILLER_FRAME), time/1000, false, true);
+      MessageBuilder message;
+      auto event = message.initEvent(true);
+      event.setLogMonoTime(time);
+      auto idx = event.initQNarrowRoadEncodeIdx();
+      idx.setType(cereal::EncodeIndex::Type::QCAMERA_H264);
+      idx.setTimestampSof(time); idx.setTimestampEof(time);
+      idx.setFrameId(SENTRY_FILLER_FRAME_ID);
+      idx.setSegmentNum(number);
+      idx.setSegmentId(frame_count[3]);
+      idx.setSegmentIdEncode(frame_count[3]++);
+      idx.setFlags(V4L2_BUF_FLAG_KEYFRAME);
+      idx.setLen(sizeof(SENTRY_FILLER_FRAME));
+      write(message.toBytes());
+      previous = time;
+    };
+    // Bounded one-second holds remain cheap and seekable. hls.js infers the
+    // final sample duration from the preceding PTS difference: finish at the
+    // regular 20 Hz cadence so it neither lengthens nor shortens this minute.
+    for (uint64_t time = from; time+2*frame_duration < until; time += SECOND) frame(time);
+    if (until >= from+2*frame_duration) frame(until-2*frame_duration);
+    frame(until-frame_duration);
+    return true;
+  }
   void pause() { resume.fill(true); }
   void append(const Packet &packet, const std::vector<PreviewSelection> &previews) {
     capnp::FlatArrayMessageReader reader(packet.words.asPtr());
@@ -191,6 +228,9 @@ public:
     bool restarting = resume[c] && frame_time[c] && packet.frame_time-frame_time[c] > SECOND/info.fps*3/2;
     if (restarting && !keyframe) return;
     bool switching = false;
+    bool preview_gap = false;
+    bool bridge = false;
+    uint64_t preview_end = preview_time ? preview_time+SECOND/MAIN_FPS : start_time;
     if (packet.camera >= 3) {
       int desired = preview_at(previews, packet.frame_time, previews.front().camera);
       // Only qcamera.ts changes lenses. Never splice a dependent frame from a
@@ -200,6 +240,13 @@ public:
       if (packet.camera != sentry_preview_encoder(desired) || (video[c] && packet.frame_time <= preview_time)) return;
       switching = video[c] && preview_encoder != packet.camera;
       if (switching && !keyframe) return;
+      preview_gap = packet.frame_time > preview_end+SECOND/MAIN_FPS/2;
+      // Keep the brief last-frame hold while waiting for a lens handoff IDR.
+      // Black is for unsaved intervals and longer camera interruptions.
+      bridge = preview_gap && (!preview_time || resume[c] || packet.frame_time-preview_time > SECOND+SECOND/MAIN_FPS);
+      // Inserting an IDR filler resets the decoder's references. Real footage
+      // must resume on its own IDR, even after dropped frames within an event.
+      if (bridge && !keyframe) return;
     }
     bool existing = video[c] != nullptr;
     if (!existing) {
@@ -210,9 +257,14 @@ public:
       auto header = data.getHeader();
       video[c]->write(const_cast<uint8_t *>(header.begin()), header.size(), idx.getTimestampEof()/1000, true, false);
     }
+    bool filled = false;
+    if (packet.camera >= 3 && preview_gap) {
+      timeline(preview_end, false);
+      if (bridge) filled = fill_preview(preview_end, packet.frame_time);
+    }
     auto bytes = data.getData();
     std::vector<uint8_t> switched;
-    if (existing && (switching || restarting)) {
+    if ((existing && (switching || restarting)) || filled) {
       // Supply the new encoder's SPS/PPS in-band, without restarting the TS
       // muxer or overwriting the earlier part of this same minute.
       auto header = data.getHeader();
@@ -229,7 +281,6 @@ public:
       // finalization, since overlapping pre-roll can fill a paused interval.
       const uint64_t frame_duration = SECOND/info.fps;
       if (!preview_time || packet.frame_time-preview_time > frame_duration*3/2) {
-        if (preview_time) timeline(preview_time+frame_duration, false);
         timeline(packet.frame_time, true);
       }
       preview_encoder = packet.camera;
@@ -240,7 +291,8 @@ public:
     index_builder.setRoot(idx);
     auto rebased = index_builder.getRoot<cereal::EncodeIndex>();
     rebased.setSegmentNum(number);
-    rebased.setSegmentId(frame_count[c]++);
+    rebased.setSegmentId(frame_count[c]);
+    rebased.setSegmentIdEncode(frame_count[c]++);  // No B-frames in Sentry.
     rebased.setLen(bytes.size());
     MessageBuilder msg;
     auto out = msg.initEvent(event.getValid());
@@ -253,12 +305,17 @@ public:
     qlog->flush();
     for (auto &v : video) if (v) v->flush();
   }
-  void close(bool last) {
+  void close(bool last, bool complete = true) {
+    uint64_t preview_end = preview_time ? preview_time+SECOND/MAIN_FPS : start_time;
     if (preview_time) {
-      uint64_t end = preview_time+SECOND/sentry_encoders[preview_encoder].fps;
-      timeline(end, false);  // Stop orange here, including before wholly absent minutes.
-      last_time = std::max(last_time, end);
+      timeline(preview_end, false);  // Black filler never extends orange.
+      last_time = std::max(last_time, preview_end);
     }
+    uint64_t end = start_time+SEGMENT_LENGTH*SECOND;
+    if (!complete) end = std::min(end, last_time);
+    if (!preview_time && end > start_time) timeline(start_time, false);
+    fill_preview(preview_end, end);
+    if (complete) last_time = std::max(last_time, end-1);
     sentinel(last ? SentinelType::END_OF_ROUTE : SentinelType::END_OF_SEGMENT, last_time);
     for (auto &v : video) v.reset();
     rlog.reset();
@@ -311,7 +368,10 @@ public:
     return true;
   }
   void finish() {
-    for (auto it = saved.begin(); it != saved.end(); ++it) it->second->close(std::next(it) == saved.end());
+    for (auto it = saved.begin(); it != saved.end(); ++it) {
+      bool last = std::next(it) == saved.end();
+      it->second->close(last, !last);
+    }
     saved.clear();
     // No future pre-roll can fill these minutes once this armed session ends.
     if (!gaps.empty() && disk_ok()) while (write_gap(UINT64_MAX)) {}
@@ -346,8 +406,8 @@ public:
     if (!fs::exists(path)) {
       if (next > closed_segment && start+SEGMENT_LENGTH*SECOND > immutable_before) return false;
       SavedSegment gap(route, next, gap_init.asPtr(), start, true);
-      gap.timeline(start, false);
-      // No camera messages, encode indexes, bookmarks, duplicate rlog, or video.
+      // Only compact metadata and synthetic preview indexes, no sensor
+      // messages, bookmarks, duplicate rlog, or full camera videos.
       // End immediately before the following minute; do not extend route time.
       gap.last_time = start+SEGMENT_LENGTH*SECOND-1;
       gap.close(false);
@@ -435,7 +495,7 @@ public:
           recording = false;
           preview_resume_time = last_preview_time+SECOND/MAIN_FPS;
           for (auto &[number, segment] : saved) {
-            segment->close(false);
+            segment->close(false, false);
             closed_segment = std::max(closed_segment, number);
           }
           saved.clear();
@@ -481,7 +541,7 @@ public:
         route_start = clip_start;
         // One identity and real-time origin for this entire armed session.
         // Later events retain their actual offsets; closed quiet minutes get
-        // compact qlogs only after another event supplies the far side of a gap.
+        // compact qlogs/previews after another event supplies the far side of a gap.
         capnp::FlatArrayMessageReader init_reader(init.asPtr());
         MessageBuilder init_message;
         init_message.setRoot(init_reader.getRoot<cereal::Event>());
