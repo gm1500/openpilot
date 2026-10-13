@@ -3,3 +3,4 @@ encoderd
 bootlog
 tests/test_logger
 sentry_loggerd
+test_sentry_recorder

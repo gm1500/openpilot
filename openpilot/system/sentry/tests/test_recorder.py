@@ -238,21 +238,8 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
             start = next(e for e in log_events if e.which() == 'sentinel')
             assert start.logMonoTime == timestamps[0]
             assert start.sentinel.type == ('startOfRoute' if number == 0 else 'startOfSegment')
-            # Orange Sentry annotations span the saved pre-roll and tail in both
-            # logs, without ever claiming driving engagement or requesting sound.
-            timeline = [e for e in log_events if e.which() == 'selfdriveState']
-            assert len(timeline) == 2
-            # Route, video, start sentinel and orange annotation share one origin.
-            assert timeline[0].logMonoTime == route_init.logMonoTime == timestamps[0]
-            assert timeline[-1].logMonoTime == log_events[-1].logMonoTime
-            for event in timeline:
-              state = event.selfdriveState
-              assert event.valid
-              assert state.state == 'disabled' and not state.enabled and not state.active and not state.engageable
-              assert state.alertStatus == 'userPrompt' and state.alertSize == 'small'
-              assert state.alertType == 'sentryRecording/permanent'
-              assert state.alertText1 == 'Sentry recording' and state.alertText2 == 'Parked event'
-              assert state.alertSound == 'none' and state.alertHudVisual == 'none'
+            # Default blue timeline, with motion bookmarks but no fake alerts.
+            assert not any(e.which() == 'selfdriveState' for e in log_events)
           indexes = [getattr(e, e.which()) for e in events if e.which().endswith('EncodeIdx')]
           assert len(indexes) == 4*len(expected_frames)
           assert all(i.segmentNum == number for i in indexes)
@@ -346,12 +333,12 @@ def test_video_queue_wrap_and_repeated_events(tmp_path, monkeypatch, publisher_f
 
         await_state(lambda s: s.bufferBytes == 0, capture=False)
         directories = sorted((tmp_path/'routes').iterdir())
-        assert len(directories) == 2
-        for directory, expected in zip(directories, (frame_count//2, frame_count), strict=True):
+        assert len(directories) == 1
+        for directory in directories:
           assert not list(directory.glob('*.lock'))
           for filename in FILES:
             with av.open(str(directory/filename)) as video:
-              assert sum(1 for _ in video.decode(video=0)) == expected
+              assert sum(1 for _ in video.decode(video=0)) == frame_count
       finally:
         if process.poll() is None:
           process.send_signal(signal.SIGINT)
@@ -447,8 +434,7 @@ def test_output_minutes_start_at_retained_video_instead_of_source_minutes(tmp_pa
           assert [i.frameId for i in indexes] == [f*20+10000 for f in expected]
           start = next(e for e in events if e.which() == 'sentinel')
           assert start.logMonoTime == origin+number*60_000_000_000
-          assert events[1].selfdriveState.alertStatus == 'userPrompt'
-          assert events[1].logMonoTime == start.logMonoTime
+          assert not any(e.which() == 'selfdriveState' for e in events)
           for c, filename in enumerate(FILES):
             with av.open(str(directory/filename)) as video:
               frames = list(video.decode(video=0))
@@ -514,7 +500,7 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
     pm = messaging.PubMaster([*STREAMS, 'sentryState', 'pandaStates', 'deviceState'])
     status = messaging.SubMaster(['sentryRecorderState'])
     base = time.monotonic_ns()-10_000_000_000
-    recording, camera, control_frame = False, 2, 0
+    recording, capture, camera, control_frame = False, True, 2, 0
     record_until = time.monotonic_ns()+60_000_000_000
     with (tmp_path/'recorder.log').open('w') as logfile:
       process = subprocess.Popen([str(BINARY)], cwd=BINARY.parent, stdout=logfile, stderr=subprocess.STDOUT)
@@ -522,7 +508,7 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
         def control():
           msg = messaging.new_message('sentryState', valid=True)
           msg.logMonoTime = base+control_frame*50_000_000
-          msg.sentryState.capture = True
+          msg.sentryState.capture = capture
           msg.sentryState.triggerCamera = camera
           msg.sentryState.recordUntilMonoTime = record_until if recording else 0
           pm.send('sentryState', msg)
@@ -581,14 +567,15 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
         send_frames(90, 120)
         recording = False
         await_state(lambda s: not s.recording)
+        capture = False
+        await_state(lambda s: not s.route)
         directories = sorted((tmp_path/'routes').iterdir())
-        assert len(directories) == 2
+        assert len(directories) == 1
         def next_key(start):
           return next(f for f in range(start, count) if previews[0][f][2])
         expected = [(1, f) for f in range(23)]+[(2, f) for f in range(next_key(23), 63)]+[(0, f) for f in range(next_key(63), 90)]
-        for directory, full_count in zip(directories, (90, 120), strict=True):
-          if full_count == 120:
-            expected += [(2, f) for f in range(next_key(90), 120)]
+        expected += [(2, f) for f in range(next_key(90), 120)]
+        for directory in directories:
           assert directory.name.endswith('--0') and not list(directory.glob('*.lock'))
           with av.open(str(directory/'qcamera.ts')) as video:
             assert video.streams.video[0].codec_context.name == 'h264'
@@ -598,13 +585,12 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
           for image, (source, _) in zip(frames, expected, strict=True):
             assert abs(float(image.to_ndarray(format='rgb24')[10, 10].mean())-COLORS[source]) < 10
           indexes = [e.qNarrowRoadEncodeIdx for e in messages(directory/'qlog.zst') if e.which() == 'qNarrowRoadEncodeIdx']
-          # Handoffs with an unchanged deadline add no bookmarks. The second
-          # route retains the earlier event's marker in its overlapping pre-roll.
-          assert sum(e.which() == 'userBookmark' for e in messages(directory/'qlog.zst')) == (1 if full_count == 90 else 2)
+          # Handoffs add no bookmarks; each event has one in the same route.
+          assert sum(e.which() == 'userBookmark' for e in messages(directory/'qlog.zst')) == 2
           assert [i.frameId for i in indexes] == [10000*source+frame for source, frame in expected]
           assert [i.segmentId for i in indexes] == list(range(len(expected)))
           for c, filename in enumerate(FILES[:3]):
-            assert (directory/filename).read_bytes() == hevc[c]*full_count
+            assert (directory/filename).read_bytes() == hevc[c]*count
       finally:
         if process.poll() is None:
           process.send_signal(signal.SIGINT)
