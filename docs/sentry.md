@@ -33,24 +33,28 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   to smaller local movements. Saving instead requires about 0.6 seconds of sustained
   movement in the same connected region, allowing gaps no longer than half a second.
   Saving area is scaled by each lens's configured focal length and image dimensions.
-  At sensitivity 75, the OX03C10 cameras in this comma 3X require about 0.5% of either wide
-  image. OS04C10 uses its own configured optics (about 0.73% for either wide image).
-  The narrow camera is still recorded for detail, but cannot trigger an event or take the preview. A connected region must cover at least 0.5% regardless of lens;
-  scattered snowflakes cannot pool their area to meet that floor. Fisheye size compensation
-  is approximate, especially near the edges; this is not a physical object-size estimate.
+  Both wide lenses give the middle horizontal third a 2x weight across the full width,
+  tapering continuously to the baseline 1x at the top and bottom. The same weight applies
+  to the region's saving area and fresh-motion score for the eye and preview selector.
+  At sensitivity 75, OX03C10 requires about 0.5% weighted area (0.25% actual connected area
+  inside the central band); OS04C10 uses its own optics, about 0.73% weighted area.
+  The narrow camera is still recorded for detail, but cannot trigger an event or take the
+  preview. Separate snowflakes cannot pool their area. Fisheye size compensation is
+  approximate, especially near the edges; this is not a physical object-size estimate.
   Exposure compensation, neighboring-pixel support and frame-to-frame change checks reject
-  noise and stationary background afterimages. In normal light at sensitivity 50, the minimum luma change is
-  18 levels for the forward cameras and 10 for the cabin's lower-contrast IR/window footage.
-  The cabin slider curve retains the same least/most-sensitive endpoints as the forward
-  cameras; its middle is calibrated separately. The sensitivity slider changes pixel-change
-  thresholds and minimum saving area. In low light, thresholds smoothly decrease with background
-  brightness, reaching 1.5 luma levels at sensitivity 50 in a very dark scene. Each cell in the
+  noise and stationary background afterimages. At sensitivity 50, both wide lenses use a
+  maximum contrast threshold of 10 luma levels in brighter cells. Each cell adapts to its
+  own background brightness, reaching 1.5 levels in very dark areas; bright sky or windows
+  no longer choose the threshold for the entire image. The full bright-cell threshold is
+  reached at background luma 128. The slider still changes contrast and saving area.
+  Each cell in the
   128×80 detection image averages a 4×4 grid of sensor samples, reducing isolated-pixel noise
   without blurring a dim outline across neighboring cells. A measured frame-difference noise
   floor raises thresholds in noisy scenes. Fresh changes also need local spatial support,
   preventing scattered noise inside a departed subject's background footprint from sustaining
-  an event. Connected area and the 0.6-second confirmation still apply. Normal-light contrast
-  thresholds are unchanged.
+  an event. A fresh change must leave a meaningful difference from the learned background.
+  Bright and dark regions are separated so a small passing speck cannot merge with its
+  opposite-polarity departure trail into a larger object. The 0.6-second confirmation still applies.
   This is motion detection, not object identification;
   large nearby droplets, heavy snow, shadows, reflections and passing traffic can still
   trigger it. Small/distant objects or brief movement may not save an event. There are no
@@ -168,13 +172,15 @@ The Connect preview (`qcamera.ts`) starts with a confirmed lens, including its a
 pre-event footage. During an open recording, substantially stronger motion in the other
 wide lens can take over at the next 5 Hz sample, even if the original lens still sees
 movement. The score is the fraction of the sampled image occupied by changing pixels
-in that region, not a physical object-size estimate. Close scores or no motion retain
+in that region, multiplied by its 1x–2x middle-band weight. It is not a physical object-size
+estimate. Close scores or no motion retain
 the current view. A modest challenger must exceed the current score by 35% plus a small
 margin for two samples (about 0.2 seconds), with a one-second hold after a cut. Decisive
 motion can bypass that hold. Recent motion decays over 0.2 seconds to bridge brief pauses
 in a stride without keeping the previous lens dominant as the person leaves its view.
-Both wide lenses use the same selection rules with no position-based weighting or assumed
-window, floor or dashboard regions. The detector does not identify windows or distinguish
+Both wide lenses use the same broad horizontal preference, without assumed window outlines,
+floor or dashboard masks. Top and bottom regions remain eligible, and there is no left/right
+preference. The detector does not identify windows or distinguish
 people from shadows; a strong, persistent shadow can still win. Lens area compensation
 depends on the camera optics, and low-light thresholds adapt to scene brightness and noise,
 rather than a particular vehicle interior. The handoff delay does not affect event detection
@@ -322,6 +328,23 @@ battery and verify with a meter before unattended operation.
 
 ## Validation
 
+The dusk crossing in `000003c2--4b23da1686` runs the preceding build at sensitivity 50.
+The controller is already Watching throughout the front approach: it reports small wide-camera
+motion but never confirms it, then records the first cabin bookmark at 14.896 seconds.
+The bright sky selected the old frame-wide daylight threshold, fragmenting the darker
+silhouette below the recording area floor. Local contrast adaptation and the requested
+middle-horizontal-third preference confirm the front approach at 3.58–3.88 seconds in the
+decoded-video replay, across all four 20-fps frame phases sampled at 5 Hz. The preceding
+detector misses the crossing in every phase. The narrow camera remains excluded from detection
+and preview selection.
+
+The focused detector/controller run passes 154 checks; 14 UI-dependent cases are excluded
+because this environment lacks `pyray`. New checks cover a dim crossing below bright sky,
+mount tilts, middle-band priority across the full width, continued outside-band detection,
+and repeated small bright/dark passes that must not grow into large afterimage triggers.
+This update changes Python detection only and needs a controller restart after updating,
+not a native recorder rebuild. Live raw-camera behavior still needs a parked device test.
+
 The later dark crossing in route `000003b9--0145a7f041` exposed another missed approach at
 the recorded 50% setting: the person is visible in the front-wide footage around 22–24.6
 seconds while the preview remains on the empty cabin. The old sampling and low-light blur
@@ -337,20 +360,20 @@ wide detector confirms motion at 11.20 seconds (11.40 with the preceding low-lig
 15.00 before that); the flashlight first appears at about 13.6 seconds. There are no triggers
 in the preceding quiet portion. Replays sample decoded Y planes at 5 Hz with watermark rows
 excluded, so compression and downsampling make them an approximation of live raw-camera detection.
-Daylight cabin replay still confirms the approach (14.79 seconds, previously 14.99). The walk-around preview only
+The middle-band update also retains the dark-garage detection (11.00 seconds in replay)
+and detects the seated person's cabin movement earlier in the daylight clip (8.19 seconds,
+compared with 14.79 for the previous sampling-only change). The walk-around preview only
 contains the camera selected at each instant; it cannot reconstruct both simultaneous
 camera inputs. A regression using its observed winning scores, without spatial weighting,
-verifies a handoff at 38.178 seconds and no rapid return to the cabin during that crossing,
+checks the selector's hold and switching rules during that crossing,
 including real 5 Hz scheduling jitter. Swapping the lens identities gives the same behavior.
 Full simultaneous-camera behavior still needs a new parked walk-around test. Synthetic
 checks cover dim moving subjects through the real sampling path with padded image strides
 and both sensor resolutions, noise inside a departed subject's footprint, brightness changes, scattered specks,
-near-ties, pauses, large new motion, and returning to the previous lens. Translated and
-rotated subjects receive equal priority, and dim-approach checks include +/-12 degree
+near-ties, pauses, large new motion, and returning to the previous lens. Large subjects remain
+detectable throughout the image, with left/right symmetry; dim-approach checks include +/-12 degree
 tilts at different image heights. Other vehicles and mounting angles still need real footage
 validation; those checks do not establish performance for every installation.
-The update passed 143 detector/controller/settings-data checks and lint. Fourteen UI-dependent
-cases were excluded because this environment lacks `pyray`; this change does not edit the UI.
 
 The 50% calibration was replayed against the supplied two consecutive one-minute segments
 from all three cameras: garage opening/closing in both forward views and cabin-window

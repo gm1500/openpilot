@@ -47,7 +47,7 @@ def test_startup_fade_is_learned_during_warmup():
     result = d.update(moving, 34.+i*.2, 75)
     assert result.active
     assert result.triggered == (i >= 3)
-  assert .7 < result.x < .85
+  assert 86/127 <= result.x < 111/127
 
 
 def test_local_motion_tracks_position_and_needs_persistence():
@@ -60,7 +60,7 @@ def test_local_motion_tracks_position_and_needs_persistence():
     result = d.update(image, 3.+i*.2, 75)
     assert result.active  # Eye reacts on the first sample, well before saving.
     assert result.triggered == (i >= 3)
-  assert .7 < result.x < .85 and .3 < result.y < .5
+  assert 91/127 <= result.x < 116/127 and .3 < result.y < .5
   # Loss of camera continuity re-arms instead of comparing stale pictures.
   assert not d.update(image, 8.).triggered
 
@@ -112,6 +112,48 @@ def test_dark_low_contrast_approach_triggers_at_fifty_without_a_flashlight(strea
 
 
 @pytest.mark.parametrize('stream', [1, 2])
+@pytest.mark.parametrize('angle', [-12, 0, 12])
+def test_bright_sky_does_not_hide_a_dim_crossing_in_the_middle_band(stream, angle):
+  detector = MotionDetector.for_camera(stream, 1928, 1208)
+  base = np.full((80, 128), 55, dtype=np.float32)
+  base[:24] = 180  # Bright sky/window, with a much darker scene below it.
+  warm(detector, base)
+  rows, cols = np.indices(base.shape)
+  radians = np.deg2rad(angle)
+  results = []
+  for i in range(12):
+    dx, dy = cols-(30+i*2), rows-39
+    x = dx*np.cos(radians)+dy*np.sin(radians)
+    y = -dx*np.sin(radians)+dy*np.cos(radians)
+    image = base.copy()
+    image[(np.abs(x) < 3.5) & (np.abs(y) < 5.5)] -= 8
+    results.append(detector.update(image, 3.+i*.2, 50))
+  assert results[0].active
+  assert not any(m.triggered for m in results[:3])
+  assert any(m.triggered for m in results[3:6])
+
+
+@pytest.mark.parametrize('stream', [1, 2])
+def test_middle_horizontal_third_has_priority_across_the_full_width(stream):
+  base = np.full((80, 128), 160, dtype=np.float32)
+  results = {}
+  for top in (3, 37, 72):
+    for left in (10, 85):
+      detector = MotionDetector.for_camera(stream, 1928, 1208)
+      warm(detector, base)
+      samples = []
+      for i in range(8):
+        image = base.copy()
+        image[top:top+5, left+i*2:left+i*2+7] += 60
+        samples.append(detector.update(image, 3.+i*.2, 50))
+      assert all(m.active for m in samples)  # Outer motion still moves the eye.
+      assert samples[-1].triggered == (top == 37)
+      results[top, left] = [m.score for m in samples]
+    assert results[top, 10] == results[top, 85]  # No left/right preference.
+  assert results[37, 10][-1] > 1.5*max(results[3, 10][-1], results[72, 10][-1])
+
+
+@pytest.mark.parametrize('stream', [1, 2])
 @pytest.mark.parametrize('sensitivity', [50, 100])
 @pytest.mark.parametrize('noise', [.5, 2., 5.])
 def test_dark_noise_and_uniform_exposure_changes_do_not_save(stream, sensitivity, noise):
@@ -140,8 +182,7 @@ def test_dark_scattered_specks_cannot_pool_into_an_event(stream):
 
 @pytest.mark.parametrize('stream', [1, 2])
 @pytest.mark.parametrize('brightness,contrast', [(70, 70), (21, -4)])
-def test_motion_priority_is_independent_of_image_position_and_orientation(stream, brightness, contrast):
-  reference = None
+def test_large_motion_remains_detectable_across_positions_and_orientations(stream, brightness, contrast):
   for top, left, orientation in ((5, 8, 0), (30, 50, 0), (62, 96, 0), (30, 50, 1), (30, 50, 2)):
     detector = MotionDetector.for_camera(stream, 1928, 1208)
     base = np.full((80, 128), brightness, dtype=np.float32)
@@ -152,10 +193,6 @@ def test_motion_priority_is_independent_of_image_position_and_orientation(stream
       image[top:top+12, left+i*2:left+15+i*2] += contrast
       results.append(detector.update(np.rot90(image, orientation), 3.+i*.2, 50))
     assert all(m.active for m in results) and results[-1].triggered
-    behavior = [(m.score, m.triggered) for m in results]
-    if reference is None:
-      reference = behavior
-    assert behavior == reference
     if orientation == 0:
       assert top/79 <= results[-1].y <= (top+12)/79
       assert results[-1].x > results[0].x  # Eye follows the subject in every region.
@@ -237,14 +274,15 @@ def test_short_motion_and_background_afterimage_do_not_save(after):
 
 
 @pytest.mark.parametrize('stream', [0, 1, 2])
-def test_small_motion_moves_eye_without_saving(stream):
+@pytest.mark.parametrize('contrast', [-40, 80])
+def test_small_motion_moves_eye_without_saving(stream, contrast):
   base = np.full((80, 128), 70, dtype=np.float32)
   d = MotionDetector.for_camera(stream, 1928, 1208)
   warm(d, base)
   for i in range(40):
     image = base.copy()
     x = 5+(4*i) % 110
-    image[30:35, x:x+5] += 80
+    image[30:35, x:x+5] += contrast
     result = d.update(image, 3.+i*.2, 100)
     assert result.active
     assert not result.triggered

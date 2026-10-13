@@ -10,6 +10,11 @@ MOTION_GAP_SECONDS = .5
 MIN_REGION_FRACTION = .005
 
 
+def focus_weight(y):
+  """Favor the middle horizontal third, smoothly returning to 1x at the edges."""
+  return 1. + max(0., min(1., 1.5-3.*abs(y-.5)))
+
+
 def camera_area_scale(stream, width, height):
   """Approximate projected area from the configured lens, before the speck floor."""
   from openpilot.common.transformations.camera import DEVICE_CAMERAS
@@ -164,10 +169,10 @@ class MotionDetector:
 
   @classmethod
   def for_camera(cls, stream, width, height):
-    # Cabin IR/window motion has lower luma contrast in the supplied footage.
+    # Both wide views need to retain low-contrast outlines in the supplied footage.
     # Calibrate the slider's midpoint per camera while keeping the original
     # least/most-sensitive endpoints, lens area floor and confirmation time.
-    return cls(camera_area_scale(stream, width, height), midpoint_threshold=10. if stream == 1 else 18.)
+    return cls(camera_area_scale(stream, width, height), midpoint_threshold=10. if stream in MOTION_CAMERAS else 18.)
 
   def clear_candidate(self):
     self.candidate_since = None
@@ -207,15 +212,20 @@ class MotionDetector:
     # CameraMotion averages sensor pixels within each sample cell. Do not blur
     # across cells here: a dim head/shoulder outline may be only a few cells
     # wide. Lower contrast thresholds retain it, with a measured temporal-noise
-    # floor protecting high-gain scenes. Daylight thresholds stay unchanged.
-    light = float(np.clip((np.percentile(self.background, 80)-28.)/36., 0., 1.))
-    if light < 1.:
+    # floor protecting high-gain scenes. Adapt each cell to its background,
+    # rather than letting bright sky/windows set the threshold for a dark subject.
+    # Reach the daylight threshold at mid-gray; shaded cells remain more sensitive.
+    light = np.clip((self.background-28.)/100., 0., 1.)
+    if np.any(light < 1.):
       noise = float(np.median(np.abs(movement)))
       dark_threshold = float(np.interp(sensitivity, (.01, .5, 1.), (6., 1.5, 1.)))
       dark_movement = float(np.interp(sensitivity, (.01, .5, 1.), (3., 1., .75)))
-      threshold = max(light*threshold+(1.-light)*dark_threshold, 4.*noise)
-      movement_threshold = max(light*movement_threshold+(1.-light)*dark_movement, 3.*noise)
-    changed = np.abs(movement) > movement_threshold
+      threshold = np.maximum(light*threshold+(1.-light)*dark_threshold, 4.*noise)
+      movement_threshold = np.maximum(light*movement_threshold+(1.-light)*dark_movement, 3.*noise)
+    # A repeatedly passing speck can leave a long, faint background trail.
+    # Its departure changes a pixel strongly between frames but leaves it close
+    # to the background. Do not count that fading trail as a larger fresh object.
+    changed = (np.abs(movement) > movement_threshold) & (np.abs(difference) >= .25*np.abs(movement))
     # A residual background silhouette must not turn scattered sensor noise
     # into motion. Require neighboring fresh changes as well as a supported
     # background difference; a one-cell-wide moving edge still qualifies.
@@ -237,12 +247,20 @@ class MotionDetector:
       self.clear_candidate()
       return Motion()
     # A stationary new object or its background afterimage is not ongoing motion.
-    moving = [r for r in regions(mask, changed) if r.area >= 9 and r.moving >= max(3, r.area*.01)]
-    eye = max(moving, key=lambda r: (r.moving, r.area), default=None)
+    # Keep a bright object's dark departure trail (or vice versa) separate.
+    # Otherwise repeated small passes can grow a large connected afterimage.
+    foreground = regions(mask & (difference > 0), changed) + regions(mask & (difference < 0), changed)
+    moving = [r for r in foreground if r.area >= 9 and r.moving >= max(3, r.area*.01)]
+    def weight(region):
+      return focus_weight(region.sum_y/region.moving/(current.shape[0]-1))
+
+    eye = max(moving, key=lambda r: (r.moving*weight(r), r.area), default=None)
     # Scale recording area by the lens, but never below the speck floor.
     # Scattered rain/snow cannot pool area. The immediate eye is independent.
     required = max(MIN_REGION_FRACTION, (.06-.045*sensitivity)*self.area_scale)*current.size
-    large = [r for r in moving if r.area >= required]
+    # Focus detection and camera selection on the middle horizontal third.
+    # Outer regions retain their baseline weight; separate specks never pool area.
+    large = [r for r in moving if r.area*weight(r) >= required]
     candidate = max(large, key=lambda r: (self.candidate_region is not None and r.near(self.candidate_region), r.area), default=None)
     triggered = False
     if candidate is not None:
@@ -255,5 +273,5 @@ class MotionDetector:
       self.clear_candidate()
     if eye is None:
       return Motion()
-    return Motion(True, eye.moving/current.size, eye.sum_x/eye.moving/(current.shape[1]-1),
+    return Motion(True, eye.moving*weight(eye)/current.size, eye.sum_x/eye.moving/(current.shape[1]-1),
                   eye.sum_y/eye.moving/(current.shape[0]-1), triggered)
