@@ -76,6 +76,32 @@ struct Segment {
   std::vector<PreviewSelection> previews;  // Retain the original view of overlapping history.
 };
 
+kj::Array<capnp::word> gap_init_data(kj::ArrayPtr<capnp::word> route_init) {
+  capnp::FlatArrayMessageReader reader(route_init);
+  auto original = reader.getRoot<cereal::Event>();
+  auto full = original.getInitData();
+  MessageBuilder message;
+  auto event = message.initEvent(original.getValid());
+  event.setLogMonoTime(original.getLogMonoTime());
+  auto init = event.initInitData();
+  // Keep the same route identity and clock origin. The full parameter and
+  // hardware-command snapshots already exist in the real footage segments;
+  // repeating them for every quiet minute would dominate the gap payload.
+  init.setWallTimeNanos(full.getWallTimeNanos());
+  init.setDongleId(full.getDongleId());
+  init.setDeviceType(full.getDeviceType());
+  init.setVersion(full.getVersion());
+  init.setOsVersion(full.getOsVersion());
+  init.setDirty(full.getDirty());
+  init.setGitCommit(full.getGitCommit());
+  init.setGitCommitDate(full.getGitCommitDate());
+  init.setGitBranch(full.getGitBranch());
+  init.setGitRemote(full.getGitRemote());
+  init.setGitSrcCommit(full.getGitSrcCommit());
+  init.setGitSrcCommitDate(full.getGitSrcCommitDate());
+  return capnp::messageToFlatArray(message);
+}
+
 // All files stay locked until video and logs are finalized. The ordinary uploader
 // sends qlog/preview; full logs and camera videos remain available for Connect requests.
 class SavedSegment {
@@ -91,18 +117,18 @@ public:
   uint64_t preview_time = 0;
   uint64_t last_time = 0;
 
-  SavedSegment(const std::string &route, int number_, kj::ArrayPtr<capnp::word> init, uint64_t start)
-      : path(Path::log_root() + "/" + route + "--" + std::to_string(number_)), number(number_) {
+  SavedSegment(const std::string &route, int number_, kj::ArrayPtr<capnp::word> init, uint64_t start, bool gap = false)
+      : path(Path::log_root() + "/" + route + "--" + std::to_string(number_)), number(number_), last_time(start) {
     fs::create_directories(path);
     std::ofstream{path + "/sentry.lock"} << getpid() << "\n";
     std::ofstream{path + "/.sentry"} << "1\n";
-    rlog = std::make_unique<ZstdFileWriter>(path + "/rlog.zst", 3);
+    if (!gap) rlog = std::make_unique<ZstdFileWriter>(path + "/rlog.zst", 3);
     qlog = std::make_unique<ZstdFileWriter>(path + "/qlog.zst", 3);
     // Like loggerd, every segment repeats the SAME route-level initData.
     // Advancing its timestamps per segment moves Connect's route origin and
     // can hide the earlier minutes from playback and upload requests.
     write(init.asBytes());
-    std::string cp_bytes = Params().get("CarParamsPersistent");
+    std::string cp_bytes = gap ? "" : Params().get("CarParamsPersistent");
     if (!cp_bytes.empty()) {
       AlignedBuffer aligned;
       capnp::FlatArrayMessageReader cp_reader(aligned.align(cp_bytes.data(), cp_bytes.size()));
@@ -115,7 +141,7 @@ public:
     sentinel(number ? SentinelType::START_OF_SEGMENT : SentinelType::START_OF_ROUTE, start);
   }
   void write(kj::ArrayPtr<const kj::byte> bytes) {
-    rlog->write(const_cast<kj::byte *>(bytes.begin()), bytes.size());
+    if (rlog) rlog->write(const_cast<kj::byte *>(bytes.begin()), bytes.size());
     qlog->write(const_cast<kj::byte *>(bytes.begin()), bytes.size());
   }
   void sentinel(SentinelType type, uint64_t time) {
@@ -223,7 +249,8 @@ public:
     write(msg.toBytes());
   }
   void flush() {
-    rlog->flush(); qlog->flush();
+    if (rlog) rlog->flush();
+    qlog->flush();
     for (auto &v : video) if (v) v->flush();
   }
   void close(bool last) {
@@ -256,7 +283,9 @@ public:
   size_t buffered = 0;
   std::string route, error;
   kj::Array<capnp::word> init = logger_build_init_data(true);
-  kj::Array<capnp::word> route_init;
+  kj::Array<capnp::word> route_init, gap_init;
+  std::deque<std::pair<int, int>> gaps;  // Half-open ranges of missing output minutes.
+  int latest_segment = -1;
   int closed_segment = -1;
   uint64_t retry_after = 0, storage_check = 0;
   uint64_t last_motion = 0;
@@ -284,11 +313,15 @@ public:
   void finish() {
     for (auto it = saved.begin(); it != saved.end(); ++it) it->second->close(std::next(it) == saved.end());
     saved.clear();
+    // No future pre-roll can fill these minutes once this armed session ends.
+    if (!gaps.empty() && disk_ok()) while (write_gap(UINT64_MAX)) {}
+    gaps.clear();
     route.clear();
     recording = false;
     route_start = clip_start = 0;
     last_preview_time = preview_resume_time = 0;
     closed_segment = -1;
+    latest_segment = -1;
   }
   void reset() {
     finish();
@@ -303,6 +336,26 @@ public:
   int output_segment(uint64_t time) const {
     return time < route_start ? 0 : (time-route_start)/(SEGMENT_LENGTH*SECOND);
   }
+  bool write_gap(uint64_t immutable_before) {
+    if (gaps.empty()) return false;
+    auto &[next, end] = gaps.front();
+    uint64_t start = route_start+next*SEGMENT_LENGTH*SECOND;
+    const std::string path = Path::log_root()+"/"+route+"--"+std::to_string(next);
+    // A larger pre-roll selection may have filled a queued minute meanwhile.
+    // Never replace an existing segment, even if it is still locked.
+    if (!fs::exists(path)) {
+      if (next > closed_segment && start+SEGMENT_LENGTH*SECOND > immutable_before) return false;
+      SavedSegment gap(route, next, gap_init.asPtr(), start, true);
+      gap.timeline(start, false);
+      // No camera messages, encode indexes, bookmarks, duplicate rlog, or video.
+      // End immediately before the following minute; do not extend route time.
+      gap.last_time = start+SEGMENT_LENGTH*SECOND-1;
+      gap.close(false);
+      closed_segment = std::max(closed_segment, next);
+    }
+    if (++next == end) gaps.pop_front();
+    return true;
+  }
   void save(int source_segment, Packet &packet) {
     if (packet.saved || packet.frame_time < clip_start) return;
     int segment = output_segment(packet.frame_time);
@@ -310,7 +363,11 @@ public:
     auto &entry = ring.at(source_segment);
     if (entry.previews.empty()) entry.previews.push_back({0, preview_camera});
     auto &out = saved[segment];
-    if (!out) out = std::make_unique<SavedSegment>(route, segment, route_init.asPtr(), route_start+segment*SEGMENT_LENGTH*SECOND);
+    if (!out) {
+      if (segment > latest_segment+1) gaps.emplace_back(latest_segment+1, segment);
+      latest_segment = std::max(latest_segment, segment);
+      out = std::make_unique<SavedSegment>(route, segment, route_init.asPtr(), route_start+segment*SEGMENT_LENGTH*SECOND);
+    }
     out->append(packet, entry.previews);
     last_preview_time = std::max(last_preview_time, out->preview_time);
     packet.saved = true;
@@ -379,7 +436,7 @@ public:
           preview_resume_time = last_preview_time+SECOND/MAIN_FPS;
           for (auto &[number, segment] : saved) {
             segment->close(false);
-            closed_segment = number;
+            closed_segment = std::max(closed_segment, number);
           }
           saved.clear();
           retry_after = now+30*SECOND;
@@ -392,7 +449,7 @@ public:
       }
       while (recording && saved.size() > 1 && saved.begin()->first < oldest) {
         auto it = saved.begin();
-        closed_segment = it->first;
+        closed_segment = std::max(closed_segment, it->first);
         it->second->close(false);
         saved.erase(it);
       }
@@ -423,7 +480,8 @@ public:
         route = logger_get_identifier("RouteCount");
         route_start = clip_start;
         // One identity and real-time origin for this entire armed session.
-        // Quiet gaps have no files; later events retain their actual offsets.
+        // Later events retain their actual offsets; closed quiet minutes get
+        // compact qlogs only after another event supplies the far side of a gap.
         capnp::FlatArrayMessageReader init_reader(init.asPtr());
         MessageBuilder init_message;
         init_message.setRoot(init_reader.getRoot<cereal::Event>());
@@ -431,6 +489,7 @@ public:
         init_event.setLogMonoTime(route_start);
         init_event.getInitData().setWallTimeNanos(nanos_since_epoch()-(nanos_since_boot()-route_start));
         route_init = capnp::messageToFlatArray(init_message);
+        gap_init = gap_init_data(route_init.asPtr());
       }
       recording = true;
       preview_camera = trigger_camera;
@@ -464,10 +523,19 @@ public:
       uint64_t immutable_before = now > 60*SECOND ? now-60*SECOND : 0;
       while (!saved.empty() && route_start+(saved.begin()->first+1)*SEGMENT_LENGTH*SECOND <= immutable_before) {
         auto it = saved.begin();
-        closed_segment = it->first;
+        closed_segment = std::max(closed_segment, it->first);
         it->second->close(false);
         saved.erase(it);
       }
+    }
+    // Backfill at most one minute per tick so a long parked gap does not block
+    // camera/control polling. Leave recent minutes open to all 60s of pre-roll.
+    if (!gaps.empty() && now >= retry_after) {
+      if (now-storage_check > 5*SECOND) {
+        storage_check = now;
+        if (!disk_ok()) retry_after = now+30*SECOND;
+      }
+      if (now >= retry_after) write_gap(now > 60*SECOND ? now-60*SECOND : 0);
     }
   }
   double buffer_seconds(uint64_t now) const {

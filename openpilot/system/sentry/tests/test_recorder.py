@@ -213,7 +213,11 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
                       ignition=stop_reason == 'ignition', capture=stop_reason != 'disabled')
         dirs = sorted((tmp_path/'routes').iterdir())
         assert messaging.recv_one_or_none(live_selfdrive) is None, 'timeline annotation leaked to live alerts'
-        assert len(dirs) == 1
+        # The camera fixture stops sending frames before the live stop signal.
+        # With 60s pre-roll, status polling can carry ongoing control telemetry
+        # into minute 1. That metadata tail is not another saved video interval.
+        assert 1 <= len(dirs) <= 2
+        assert [d for d in dirs if (d/'qcamera.ts').exists()] == [dirs[0]]
         assert {directory.name.rsplit('--', 1)[0] for directory in dirs} == {event_route}
         route_init = messages(dirs[0]/'qlog.zst')[0]
         assert abs(route_init.initData.wallTimeNanos-(wall_base+route_init.logMonoTime-base)) < 100_000_000
@@ -225,6 +229,19 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
           events = messages(directory/'qlog.zst')
           preview_indexes = [e.qNarrowRoadEncodeIdx for e in events if e.which() == 'qNarrowRoadEncodeIdx']
           timestamps = [i.timestampEof for i in preview_indexes]
+          if not timestamps:
+            assert number == 1
+            assert not any((directory/name).exists() for name in FILES)
+            for filename in ('qlog.zst', 'rlog.zst'):
+              tail = messages(directory/filename)
+              assert tail[0].as_builder().to_bytes() == route_init.as_builder().to_bytes()
+              start = next(e for e in tail if e.which() == 'sentinel')
+              assert start.logMonoTime == route_init.logMonoTime+60_000_000_000
+              assert start.sentinel.type == 'startOfSegment'
+              assert all(e.logMonoTime >= start.logMonoTime for e in tail[1:])
+              assert not any(e.which().endswith('EncodeIdx') or e.which() == 'selfdriveState' for e in tail)
+              assert tail[-1].sentinel.type == 'endOfRoute'
+            continue
           assert timestamps and all(t >= trigger_time-pre_seconds*1_000_000_000 for t in timestamps)
           if number == 0:
             assert timestamps[0] == route_init.logMonoTime, 'Connect must not show an empty interval before playable video'

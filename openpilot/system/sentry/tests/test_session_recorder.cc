@@ -68,15 +68,18 @@ int main(int argc, char **argv) {
   std::map<std::string, std::string> immutable;
   for (const auto &entry : fs::directory_iterator(first)) immutable[entry.path().filename()] = util::read_file(entry.path());
 
-  // Minutes 1 and 2 contain no events or files. The next event starts partway
-  // through minute 3, keeping the real timestamps and exactly the same initData.
+  // There are no gap files until a later event supplies the far side. Minute 2
+  // must still wait until no future 60s pre-roll can add actual footage to it.
+  assert(!fs::exists(fs::path(Path::log_root())/(route+"--1")));
+  assert(!fs::exists(fs::path(Path::log_root())/(route+"--2")));
   feed(180, 200, {{3940, 2}});
   assert(!recorder.recording && recorder.route == route);
   assert(recorder.saved.size() == 1 && recorder.saved.count(3));
+  assert(fs::exists(fs::path(Path::log_root())/(route+"--1")/"qlog.zst"));
+  assert(!fs::exists(fs::path(Path::log_root())/(route+"--2")));
   recorder.tick(deadline, base+300*SECOND, base+300*SECOND, camera);
   assert(recorder.saved.empty() && recorder.route == route);
-  assert(!fs::exists(fs::path(Path::log_root())/(route+"--1")));
-  assert(!fs::exists(fs::path(Path::log_root())/(route+"--2")));
+  assert(fs::exists(fs::path(Path::log_root())/(route+"--2")/"qlog.zst"));
   for (const auto &[name, contents] : immutable) assert(util::read_file(first/name) == contents);
 
   // Disarming ends the grouping, even when no event file remains open.
@@ -87,5 +90,34 @@ int main(int argc, char **argv) {
   std::string next_route = recorder.route;
   assert(next_route != route && !next_route.empty());
   recorder.reset();
-  std::ofstream{fixtures/"routes.txt"} << route << '\n' << next_route << '\n' << base << '\n';
+
+  // A setting change can fill a pending gap with real retained frames. It must
+  // never overwrite a published minimal log or leave a lock on the gap queue.
+  feed(400, 413, {{8200, 2}});
+  const std::string filled_route = recorder.route;
+  feed(480, 540, {{10740, 2}});
+  fs::path filled = fs::path(Path::log_root())/(filled_route+"--1");
+  assert(!fs::exists(filled));
+  assert(!recorder.gaps.empty());
+  Params().put("SentryPreSeconds", "60");
+  feed(540, 548, {{10900, 2}});
+  assert(fs::exists(filled/"qcamera.ts"));
+  assert(recorder.gaps.empty());
+  recorder.reset();
+  Params().put("SentryPreSeconds", "15");
+
+  // Ten quiet hours must not generate files on their own. Once motion resumes,
+  // drain incrementally; disarming also completes any remaining bounded ranges.
+  feed(1000, 1013, {{20200, 2}});
+  const std::string long_route = recorder.route;
+  recorder.tick(deadline, base+36900*SECOND, base+36900*SECOND, camera);
+  assert(recorder.gaps.empty() && recorder.saved.empty());
+  assert(!fs::exists(fs::path(Path::log_root())/(long_route+"--1")));
+  feed(37000, 37020, {{740340, 2}});
+  assert(recorder.route == long_route && !recorder.gaps.empty());
+  auto before_finish = std::chrono::steady_clock::now();
+  recorder.reset();
+  double finish_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-before_finish).count();
+  std::ofstream{fixtures/"gap_finish_ms.txt"} << finish_ms << '\n';
+  std::ofstream{fixtures/"routes.txt"} << route << '\n' << next_route << '\n' << filled_route << '\n' << long_route << '\n' << base << '\n';
 }

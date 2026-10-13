@@ -52,20 +52,32 @@ def test_armed_session_overlaps_gaps_and_rearm(tmp_path, monkeypatch):
 
 
 def validate_session(root, tmp_path):
-  first, second, base = (tmp_path/'routes.txt').read_text().splitlines()
+  first, second, filled, long, base = (tmp_path/'routes.txt').read_text().splitlines()
   base = int(base)
   expected = {
     f'{first}--0': list(range(440))+list(range(600, 940)),
     f'{first}--3': list(range(3640, 3980)),
     f'{second}--0': list(range(6200, 7400)),
     f'{second}--1': list(range(7400, 7640)),
+    f'{filled}--0': list(range(8000, 8240)),
+    f'{filled}--1': list(range(9700, 10400)),
+    f'{filled}--2': list(range(10440, 10940)),
+    f'{long}--0': list(range(20000, 20240)),
+    f'{long}--600': list(range(740040, 740380)),
   }
   orange = {f'{first}--0': [(0, 22), (30, 47)], f'{first}--3': [(182, 199)],
-            f'{second}--0': [(310, 370)], f'{second}--1': [(370, 382)]}
+            f'{second}--0': [(310, 370)], f'{second}--1': [(370, 382)],
+            f'{filled}--0': [(400, 412)], f'{filled}--1': [(485, 520)], f'{filled}--2': [(522, 547)],
+            f'{long}--0': [(1000, 1012)], f'{long}--600': [(37002, 37019)]}
   bookmarks_by_segment = {f'{first}--0': [10, 20, 45], f'{first}--3': [197],
-                          f'{second}--0': [320, 330, 340, 350, 360], f'{second}--1': [370, 380]}
-  assert {d.name for d in root.iterdir()} == set(expected), 'quiet minutes must not create files'
-  init = None
+                          f'{second}--0': [320, 330, 340, 350, 360], f'{second}--1': [370, 380],
+                          f'{filled}--0': [410], f'{filled}--1': [], f'{filled}--2': [537, 545],
+                          f'{long}--0': [1010], f'{long}--600': [37017]}
+  origins = {first: base, second: base+310_000_000_000, filled: base+400_000_000_000, long: base+1_000_000_000_000}
+  gaps = {f'{first}--{n}' for n in (1, 2)} | {f'{long}--{n}' for n in range(1, 600)}
+  assert {d.name for d in root.iterdir()} == set(expected) | gaps, 'only bridge whole minutes between saved events'
+  inits = {}
+  full_inits = {}
   for name, frame_numbers in expected.items():
     directory = root/name
     assert not list(directory.glob('*.lock'))
@@ -76,14 +88,11 @@ def validate_session(root, tmp_path):
       states = [e for e in logged if e.which() == 'selfdriveState']
       spans = [((a.logMonoTime-base)/1e9, (b.logMonoTime-base)/1e9) for a, b in zip(states[::2], states[1::2], strict=True)]
       assert spans == orange[name], 'orange must cover footage, with no filler state messages during quiet gaps'
-    if name.startswith(first):
-      current = events[0].as_builder().to_bytes()
-      if init is None:
-        init = current
-      assert current == init, 'the armed-session time origin must not move'
-      origin = base
-    else:
-      origin = base+310_000_000_000
+    route, number = name.rsplit('--', 1)
+    current = events[0].as_builder().to_bytes()
+    assert current == inits.setdefault(route, current), 'the armed-session time origin must not move'
+    full_inits[route] = events[0].initData
+    origin = origins[route]
     assert events[0].logMonoTime == origin
     number = int(name.rsplit('--', 1)[1])
     for c, filename in enumerate(FILES):
@@ -101,10 +110,36 @@ def validate_session(root, tmp_path):
         for frame, n in zip(decoded, frame_numbers, strict=True):
           # The first event keeps its lens through overlap; a later cabin event
           # takes the previously unsaved pre-roll, while each HEVC keeps its lens.
-          source = 2 if (600 <= n < 940 or n >= 6200) else 1
+          source = 2 if (600 <= n < 940 or route == second) else 1
           assert abs(float(frame.to_ndarray(format='rgb24')[10, 10].mean())-COLORS[source]) < 10
       else:
         assert abs(float(decoded[0].to_ndarray(format='rgb24')[10, 10].mean())-COLORS[c]) < 10
     bookmarks = [(e.logMonoTime-base)/1e9 for e in events if e.which() == 'userBookmark']
     assert bookmarks == bookmarks_by_segment[name]
     assert [e.which() for e in messages(directory/'rlog.zst')] == [e.which() for e in events]
+
+  sizes = []
+  for name in sorted(gaps):
+    directory = root/name
+    assert {f.name for f in directory.iterdir()} == {'.sentry', 'qlog.zst'}, 'gap uploads are qlog only'
+    events = messages(directory/'qlog.zst')
+    assert [e.which() for e in events] == ['initData', 'sentinel', 'selfdriveState', 'sentinel']
+    route, number = name.rsplit('--', 1)
+    origin = origins[route]
+    start = origin+int(number)*60_000_000_000
+    assert [e.logMonoTime for e in events] == [origin, start, start, start+60_000_000_000-1]
+    assert events[1].sentinel.type == 'startOfSegment'
+    assert events[-1].sentinel.type == 'endOfSegment'
+    assert events[2].valid and not events[2].selfdriveState.enabled and not events[2].selfdriveState.active
+    assert events[2].selfdriveState.state == 'disabled' and events[2].selfdriveState.alertStatus == 'normal'
+    full = full_inits[route]
+    compact = events[0].initData
+    for field in ('wallTimeNanos', 'dongleId', 'deviceType', 'version', 'osVersion', 'dirty', 'gitCommit',
+                  'gitCommitDate', 'gitBranch', 'gitRemote', 'gitSrcCommit', 'gitSrcCommitDate'):
+      assert getattr(compact, field) == getattr(full, field)
+    assert not compact.params.entries and not compact.commands.entries and not compact.kernelArgs
+    size = (directory/'qlog.zst').stat().st_size
+    assert 0 < size < 2048, 'one quiet minute must remain a small compressed metadata file'
+    sizes.append(size)
+  print(f'Gap logs: {len(sizes)} files, {sum(sizes)} bytes, max {max(sizes)} bytes/minute; '
+        f'finish backlog: {(tmp_path/"gap_finish_ms.txt").read_text().strip()} ms')

@@ -2,7 +2,7 @@
 
 The existing Sentry feature is integrated into `batmobile` as a single commit.
 This `sentry-session-routes-poc` test branch adds one route per armed session with
-empty quiet gaps: blue means no saved footage, orange marks saved preview intervals,
+minimal logs bridging quiet gaps: blue means no saved footage, orange marks saved preview intervals,
 and yellow marks confirmed motion. It has not been merged back into
 `batmobile` or `sentry-mode-poc`; Connect playback must be verified first.
 
@@ -70,7 +70,8 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   The RAM ring retains native minute boundaries around the selected history; saved footage is
   trimmed to the selected seconds. Actual variable bitrate varies. Encoded payloads have a hard 128 MiB RAM cap; IPC queues,
   camera buffers and private watermark buffers use additional RAM.
-- No route directories or video files are written while merely watching. Runtime control
+- No route directories or video files are written before the first event. After a later
+  event resumes, small logs bridge the intervening whole minutes; no gap video is written. Runtime control
   uses tmpfs. Existing system logs and battery-accounting Params still write normally;
   this is not a promise of zero device-wide NAND writes.
 - Confirmed motion saves up to the selected 15/30/60 seconds of preceding footage (default 60),
@@ -146,7 +147,7 @@ Each event still saves its selected pre-roll and post-motion tail:
   sentry metadata, timestamps, position estimate and segment/route sentinels;
 - an internal `.sentry` marker for uploader identification and lock recovery.
 
-All segments repeat one route-level `initData`, with its UTC wall time and monotonic
+All footage segments repeat one route-level `initData`, with its UTC wall time and monotonic
 timestamp anchored to the first retained, independently decodable preview frame. Segment
 numbers and sentinels use real 60-second intervals from that same origin, even when
 an output minute combines video from two source minutes. Earlier code kept the source-minute
@@ -156,9 +157,26 @@ rebuilds the minute boundaries together. Individual frame and bookmark timestamp
 Timezone offsets apply only to the local display/watermark, never the native route clock.
 The corrected metadata applies to new sessions; already uploaded routes are not rewritten.
 
-Quiet gaps are not filled, time-compressed or recorded. Empty minutes have no directory,
-qlog or video. A route can therefore have segments 0 and 3 with no segments 1 or 2. Events
-inside the same minute append to that minute's open files; overlapping pre-roll is saved
+Quiet gaps retain their real duration. When footage resumes, intervening whole minutes
+receive a minimal `qlog.zst` and the internal `.sentry` marker. For example, footage in
+segments 0 and 3 produces logs-only segments 1 and 2. Each gap log has four messages:
+compact `initData`, start-of-segment, disabled/normal timeline state, and end-of-segment.
+The compact header preserves the original route clock, device and software identity;
+it omits repeated parameter snapshots, hardware command output and car parameters. The
+full snapshots remain in footage segments. There are no camera messages, encode indexes,
+bookmarks, `rlog.zst`, TS or HEVC files in a gap minute. In particular, no empty or
+placeholder video is created. Gap logs use the ordinary qlog uploader, including its
+existing metered-network policy; full camera files still require a Connect request.
+
+An arm without an event still writes no route, and waiting after the last event does not
+keep creating gap logs. Only a later recording supplies the far boundary. Backfilling
+runs one minute per recorder tick; disarming completes the remaining queue. A recent gap
+stays pending until its minute ends at least 60 seconds in the past, or earlier segments
+have already been finalized past it. If newly selected pre-roll fills it meanwhile, the
+real footage takes its place before any minimal log is published. Existing segment
+directories are never replaced by a gap log. Already uploaded routes are not repaired.
+
+Events inside the same minute append to that minute's open files; overlapping pre-roll is saved
 only once. After an unsaved gap, each video resumes on a decodable keyframe. Qcamera PTS,
 camera indexes, log clocks and bookmarks retain the original real-time offsets. The three
 HEVC files remain assigned to their original lenses.
@@ -168,7 +186,14 @@ or the start of a segment minute. Each continuous run ends one frame period afte
 saved frame. Its closing `normal` state is written into the same event log, so it cannot
 carry orange across missing minutes. Overlapping pre-roll that fills a pause stays orange;
 an actual unsaved gap gets a blue interval. There are only two state annotations per saved
-run in each segment, not periodic idle logs, placeholder videos or uploads for quiet minutes.
+run in each footage segment. Each wholly quiet minute between events instead has just one
+normal state in its minimal gap log; there is no periodic idle telemetry stream.
+
+Using metadata from an uploaded comma 3X route, the compact format measured roughly
+330 bytes per minute, or 197 kB of compressed log payload for ten hours. This excludes
+filesystem allocation and HTTP/TLS overhead: 600 gap minutes still mean 600 files and
+their upload requests. The native regression also covers a ten-hour gap, recent gaps
+filled by expanded pre-roll, shared route clocks, decoded footage and unchanged bookmarks.
 
 An incomplete output minute stays locked until its end is at least 60 seconds behind the
 capture clock, covering the maximum selectable pre-roll even if the setting changes. This
@@ -177,10 +202,13 @@ Disarming closes it immediately, and completed continuous-recording minutes can 
 as before. Once unlocked, files are never reopened or rewritten. If all files have already
 closed when disarming, no empty final segment is created merely to add an end-of-route sentinel.
 
-This is a test branch: Connect's deployed playlist handling of missing minutes and gaps
+This is a test branch: Connect's deployed playlist handling of log-only minutes and gaps
 inside a TS file is not yet verified. Its public player uses one route-relative video clock
-and reports missing-file errors; the inspected frontend does not establish that arbitrary
-quiet gaps will automatically skip. Real device uploads must confirm seeking, playback,
+and reports missing-file errors; logs alone do not provide playable video. The inspected
+[event loader](https://github.com/commaai/connect/blob/master/src/actions/cached.js) reads each
+minute's events separately from the [video player](https://github.com/commaai/connect/blob/master/src/components/DriveVideo/index.jsx).
+Minimal logs can populate missing metadata rows but do not establish that quiet gaps will
+automatically skip. Real device uploads must confirm seeking, playback,
 later appended events and manual camera requests. The device cannot change Connect's player
 or server-generated playlist. No filler footage or altered clock is used to hide this limitation.
 
@@ -193,7 +221,7 @@ forces a fresh native recorder build. It then checks `AGNOS_VERSION` from `launc
 against `/VERSION`, uses the stock AGNOS updater if needed, restores the previous Sentry
 enable setting, and reboots. A failed update or build does not reboot; local changes and
 diverged history are never discarded. Re-enable Sentry manually after resolving a failure.
-The next captured route will have the updated availability colors.
+The next captured route will include minimal logs between saved events.
 
 The empty-lead-in regression was reproduced against the old recorder. The correction passed
 12 native recorder cases, including 15/30/60-second trimming, only five seconds of playable
