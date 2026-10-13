@@ -9,7 +9,7 @@ av = pytest.importorskip('av')
 
 from openpilot.cereal import messaging
 from openpilot.common.prefix import OpenpilotPrefix
-from openpilot.system.sentry.tests.test_recorder import COLORS, FIELDS, FILES, ROOT, messages
+from openpilot.system.sentry.tests.test_recorder import COLORS, FIELDS, FILES, ROOT, assert_footage_timeline, messages
 
 BINARY = ROOT/'system/loggerd/test_sentry_recorder'
 
@@ -57,15 +57,25 @@ def validate_session(root, tmp_path):
   expected = {
     f'{first}--0': list(range(440))+list(range(600, 940)),
     f'{first}--3': list(range(3640, 3980)),
-    f'{second}--0': list(range(6200, 6440)),
+    f'{second}--0': list(range(6200, 7400)),
+    f'{second}--1': list(range(7400, 7640)),
   }
+  orange = {f'{first}--0': [(0, 22), (30, 47)], f'{first}--3': [(182, 199)],
+            f'{second}--0': [(310, 370)], f'{second}--1': [(370, 382)]}
+  bookmarks_by_segment = {f'{first}--0': [10, 20, 45], f'{first}--3': [197],
+                          f'{second}--0': [320, 330, 340, 350, 360], f'{second}--1': [370, 380]}
   assert {d.name for d in root.iterdir()} == set(expected), 'quiet minutes must not create files'
   init = None
   for name, frame_numbers in expected.items():
     directory = root/name
     assert not list(directory.glob('*.lock'))
     events = messages(directory/'qlog.zst')
-    assert not any(e.which() == 'selfdriveState' for e in events), 'no orange annotations'
+    for filename in ('qlog.zst', 'rlog.zst'):
+      logged = messages(directory/filename)
+      assert_footage_timeline(logged)
+      states = [e for e in logged if e.which() == 'selfdriveState']
+      spans = [((a.logMonoTime-base)/1e9, (b.logMonoTime-base)/1e9) for a, b in zip(states[::2], states[1::2], strict=True)]
+      assert spans == orange[name], 'orange must cover footage, with no filler state messages during quiet gaps'
     if name.startswith(first):
       current = events[0].as_builder().to_bytes()
       if init is None:
@@ -96,5 +106,5 @@ def validate_session(root, tmp_path):
       else:
         assert abs(float(decoded[0].to_ndarray(format='rgb24')[10, 10].mean())-COLORS[c]) < 10
     bookmarks = [(e.logMonoTime-base)/1e9 for e in events if e.which() == 'userBookmark']
-    assert bookmarks == ({f'{first}--0': [10, 20, 45], f'{first}--3': [197], f'{second}--0': [320]})[name]
+    assert bookmarks == bookmarks_by_segment[name]
     assert [e.which() for e in messages(directory/'rlog.zst')] == [e.which() for e in events]

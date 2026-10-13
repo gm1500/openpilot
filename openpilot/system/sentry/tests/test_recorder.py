@@ -54,6 +54,17 @@ def messages(path):
   return list(log.Event.read_multiple_bytes(data))
 
 
+def assert_footage_timeline(events):
+  frames = [e.qNarrowRoadEncodeIdx.timestampEof for e in events if e.which() == 'qNarrowRoadEncodeIdx']
+  states = [e for e in events if e.which() == 'selfdriveState']
+  assert frames and states
+  assert states[0].logMonoTime == frames[0], 'orange must start at playable footage'
+  assert states[-1].logMonoTime == frames[-1]+50_000_000, 'orange must stop after the last saved frame'
+  assert [str(e.selfdriveState.alertStatus) for e in states] == ['userPrompt', 'normal']*(len(states)//2)
+  assert all(not e.selfdriveState.enabled and not e.selfdriveState.active for e in states)
+  assert all(states[i].logMonoTime < states[i+1].logMonoTime for i in range(len(states)-1))
+
+
 @pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
 def test_recorder_waits_for_publishers_at_startup(tmp_path, monkeypatch):
   monkeypatch.setenv('LOG_ROOT', str(tmp_path/'routes'))
@@ -238,8 +249,7 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
             start = next(e for e in log_events if e.which() == 'sentinel')
             assert start.logMonoTime == timestamps[0]
             assert start.sentinel.type == ('startOfRoute' if number == 0 else 'startOfSegment')
-            # Default blue timeline, with motion bookmarks but no fake alerts.
-            assert not any(e.which() == 'selfdriveState' for e in log_events)
+            assert_footage_timeline(log_events)
           indexes = [getattr(e, e.which()) for e in events if e.which().endswith('EncodeIdx')]
           assert len(indexes) == 4*len(expected_frames)
           assert all(i.segmentNum == number for i in indexes)
@@ -434,7 +444,7 @@ def test_output_minutes_start_at_retained_video_instead_of_source_minutes(tmp_pa
           assert [i.frameId for i in indexes] == [f*20+10000 for f in expected]
           start = next(e for e in events if e.which() == 'sentinel')
           assert start.logMonoTime == origin+number*60_000_000_000
-          assert not any(e.which() == 'selfdriveState' for e in events)
+          assert_footage_timeline(events)
           for c, filename in enumerate(FILES):
             with av.open(str(directory/filename)) as video:
               frames = list(video.decode(video=0))

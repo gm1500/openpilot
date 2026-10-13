@@ -125,6 +125,25 @@ public:
     event.initSentinel().setType(type);
     write(msg.toBytes());
   }
+  void timeline(uint64_t time, bool available) {
+    // Saved-log annotation only, never a live driving alert. Connect paints
+    // userPrompt orange until normal; bookmarks remain yellow above it.
+    MessageBuilder msg;
+    auto event = msg.initEvent(true);
+    event.setLogMonoTime(time);
+    auto state = event.initSelfdriveState();
+    state.setState(cereal::SelfdriveState::OpenpilotState::DISABLED);
+    state.setEnabled(false);
+    state.setActive(false);
+    state.setEngageable(false);
+    state.setAlertStatus(available ? cereal::SelfdriveState::AlertStatus::USER_PROMPT : cereal::SelfdriveState::AlertStatus::NORMAL);
+    state.setAlertSize(available ? cereal::SelfdriveState::AlertSize::SMALL : cereal::SelfdriveState::AlertSize::NONE);
+    if (available) {
+      state.setAlertType("sentryRecording/permanent");
+      state.setAlertText1("Sentry recording");
+    }
+    write(msg.toBytes());
+  }
   void pause() { resume.fill(true); }
   void append(const Packet &packet, const std::vector<PreviewSelection> &previews) {
     capnp::FlatArrayMessageReader reader(packet.words.asPtr());
@@ -179,6 +198,14 @@ public:
     frame_time[c] = packet.frame_time;
     resume[c] = false;
     if (packet.camera >= 3) {
+      // Derive availability from accepted preview frames, not the event timer
+      // or minute boundary. Delay the end marker until the next actual gap or
+      // finalization, since overlapping pre-roll can fill a paused interval.
+      const uint64_t frame_duration = SECOND/info.fps;
+      if (!preview_time || packet.frame_time-preview_time > frame_duration*3/2) {
+        if (preview_time) timeline(preview_time+frame_duration, false);
+        timeline(packet.frame_time, true);
+      }
       preview_encoder = packet.camera;
       preview_time = packet.frame_time;
     }
@@ -200,6 +227,11 @@ public:
     for (auto &v : video) if (v) v->flush();
   }
   void close(bool last) {
+    if (preview_time) {
+      uint64_t end = preview_time+SECOND/sentry_encoders[preview_encoder].fps;
+      timeline(end, false);  // Stop orange here, including before wholly absent minutes.
+      last_time = std::max(last_time, end);
+    }
     sentinel(last ? SentinelType::END_OF_ROUTE : SentinelType::END_OF_SEGMENT, last_time);
     for (auto &v : video) v.reset();
     rlog.reset();

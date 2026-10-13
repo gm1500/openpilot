@@ -82,7 +82,8 @@ int main(int argc, char **argv) {
   // Disarming ends the grouping, even when no event file remains open.
   recorder.reset();
   assert(recorder.route.empty() && recorder.buffered == 0);
-  feed(310, 323, {{6400, 1}});
+  // Overlapping events also cover a complete minute without a blue seam.
+  feed(310, 383, {{6400, 1}, {6600, 1}, {6800, 1}, {7000, 1}, {7200, 1}, {7400, 1}, {7600, 1}});
   std::string next_route = recorder.route;
   assert(next_route != route && !next_route.empty());
   recorder.reset();

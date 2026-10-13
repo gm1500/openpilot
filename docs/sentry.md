@@ -2,7 +2,8 @@
 
 The existing Sentry feature is integrated into `batmobile` as a single commit.
 This `sentry-session-routes-poc` test branch adds one route per armed session with
-empty quiet gaps and normal blue segments. It has not been merged back into
+empty quiet gaps: blue means no saved footage, orange marks saved preview intervals,
+and yellow marks confirmed motion. It has not been merged back into
 `batmobile` or `sentry-mode-poc`; Connect playback must be verified first.
 
 Manage the feature under **Settings → Sentry** in any vehicle state, including onroad.
@@ -91,9 +92,11 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
 - Warmup and arming footage stays in the RAM history. A later event can therefore include
   the initial exposure/IR fade in its pre-roll even though that fade did not trigger a save.
   The motion bookmark identifies the confirmed trigger, rather than the start of pre-roll.
-- Sentry no longer adds synthetic alert states to color the route orange. New sessions use
-  Connect's normal blue timeline with yellow motion bookmarks. Existing uploaded routes
-  are not rewritten or recolored.
+- Connect's timeline is orange only where saved preview footage is available, blue across
+  unsaved gaps, and yellow at confirmed-motion bookmarks. Log-only state annotations mark
+  the first saved frame and the end of its continuous run, including pre-roll and the tail.
+  These annotations never publish live driving alerts. Existing uploaded routes are not
+  rewritten or recolored.
 - On ignition, shutdown, stale controller/health, thermal pause or disable, recording ends
   and the RAM buffer is discarded. This version does not retain the unsaved ring across reboots.
 
@@ -160,6 +163,13 @@ only once. After an unsaved gap, each video resumes on a decodable keyframe. Qca
 camera indexes, log clocks and bookmarks retain the original real-time offsets. The three
 HEVC files remain assigned to their original lenses.
 
+Orange availability follows accepted qcamera frames, not the requested recording deadline
+or the start of a segment minute. Each continuous run ends one frame period after its last
+saved frame. Its closing `normal` state is written into the same event log, so it cannot
+carry orange across missing minutes. Overlapping pre-roll that fills a pause stays orange;
+an actual unsaved gap gets a blue interval. There are only two state annotations per saved
+run in each segment, not periodic idle logs, placeholder videos or uploads for quiet minutes.
+
 An incomplete output minute stays locked until its end is at least 60 seconds behind the
 capture clock, covering the maximum selectable pre-roll even if the setting changes. This
 can delay its automatic qlog/preview upload by up to about two minutes after saving pauses.
@@ -173,6 +183,17 @@ and reports missing-file errors; the inspected frontend does not establish that 
 quiet gaps will automatically skip. Real device uploads must confirm seeking, playback,
 later appended events and manual camera requests. The device cannot change Connect's player
 or server-generated playlist. No filler footage or altered clock is used to hide this limitation.
+
+### Update and rebuild this test branch
+
+With the vehicle parked and offroad, run `bash tools/sentry_update.sh` through a tmux session.
+The script requires `sentry-session-routes-poc`, stops Sentry so saved files can close,
+fast-forwards the installed branch, synchronizes its pinned submodules and LFS files, and
+forces a fresh native recorder build. It then checks `AGNOS_VERSION` from `launch_env.sh`
+against `/VERSION`, uses the stock AGNOS updater if needed, restores the previous Sentry
+enable setting, and reboots. A failed update or build does not reboot; local changes and
+diverged history are never discarded. Re-enable Sentry manually after resolving a failure.
+The next captured route will have the updated availability colors.
 
 The empty-lead-in regression was reproduced against the old recorder. The correction passed
 12 native recorder cases, including 15/30/60-second trimming, only five seconds of playable
