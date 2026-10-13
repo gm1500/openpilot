@@ -6,6 +6,7 @@ from opendbc.car.structs import car
 from openpilot.common.params import Params
 from openpilot.common.hardware import PC, COMMA_HARDWARE
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
+from openpilot.system.sentry.config import sentry_capture_requested, sentry_gps_requested
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 
@@ -29,7 +30,7 @@ def ublox(started: bool, params: Params, CP: car.CarParams) -> bool:
   use_ublox = ublox_available()
   if use_ublox != params.get_bool("UbloxAvailable"):
     params.put_bool("UbloxAvailable", use_ublox, block=True)
-  return started and use_ublox
+  return (started or sentry_gps_requested(started, params, CP)) and use_ublox
 
 def joystick(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and params.get_bool("JoystickDebugMode")
@@ -47,7 +48,15 @@ def not_long_maneuver(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and not params.get_bool("LongitudinalManeuverMode")
 
 def qcomgps(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return started and not ublox_available()
+  return (started or sentry_gps_requested(started, params, CP)) and not ublox_available()
+
+def sentry_encoder(started: bool, params: Params, CP: car.CarParams) -> bool:
+  other = managed_processes['encoderd'].proc
+  return sentry_capture_requested(started, params, CP) and (other is None or not other.is_alive())
+
+def driving_encoder(started: bool, params: Params, CP: car.CarParams) -> bool:
+  other = managed_processes['sentry_encoderd'].proc
+  return started and (other is None or not other.is_alive())
 
 def always_run(started: bool, params: Params, CP: car.CarParams) -> bool:
   return True
@@ -71,11 +80,14 @@ procs = [
   DaemonProcess("manage_athenad", "openpilot.system.athena.manage_athenad", "AthenadPid"),
 
   NativeProcess("loggerd", "openpilot/system/loggerd", ["./loggerd"], logging),
-  NativeProcess("encoderd", "openpilot/system/loggerd", ["./encoderd"], only_onroad),
+  NativeProcess("encoderd", "openpilot/system/loggerd", ["./encoderd"], driving_encoder),
+  PythonProcess("sentryd", "openpilot.system.sentry.sentryd", always_run, enabled=COMMA_HARDWARE),
+  NativeProcess("sentry_loggerd", "openpilot/system/loggerd", ["./sentry_loggerd"], sentry_capture_requested, enabled=COMMA_HARDWARE),
+  NativeProcess("sentry_encoderd", "openpilot/system/loggerd", ["./encoderd", "--sentry"], sentry_encoder, enabled=COMMA_HARDWARE),
   NativeProcess("stream_encoderd", "openpilot/system/loggerd", ["./encoderd", "--stream"], or_(livestream, notcar)),
   PythonProcess("logmessaged", "openpilot.system.logmessaged", always_run),
 
-  NativeProcess("camerad", "openpilot/system/camerad", ["./camerad"], or_(driverview, livestream), enabled=not WEBCAM),
+  NativeProcess("camerad", "openpilot/system/camerad", ["./camerad"], or_(or_(driverview, livestream), sentry_capture_requested), enabled=not WEBCAM),
   PythonProcess("webcamerad", "openpilot.system.camerad.webcam.camerad", driverview, enabled=WEBCAM),
   PythonProcess("proclogd", "openpilot.system.proclogd", only_onroad, enabled=platform.system() != "Darwin"),
   PythonProcess("journald", "openpilot.system.journald", only_onroad, platform.system() != "Darwin"),

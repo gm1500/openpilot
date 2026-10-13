@@ -69,6 +69,7 @@ class UIState:
         "radarState",
         "deviceState",
         "pandaStates",
+        "peripheralState",
         "carParams",
         "driverMonitoringState",
         "carState",
@@ -85,6 +86,8 @@ class UIState:
         "vehicleParameters",
         "testJoystick",
         "rawAudioData",
+        "sentryState",
+        "sentryRecorderState",
       ]
     )
 
@@ -147,6 +150,11 @@ class UIState:
 
   def add_on_body_changed_callbacks(self, callback: Callable[[], None]):
     self._on_body_changed_callbacks.append(callback)
+
+  @property
+  def sentry_active(self) -> bool:
+    return (self.params.get_bool('SentryEnabled') and not self.ignition and not self.started and self.sm.valid['sentryState'] and
+            0 <= time.monotonic()-self.sm.recv_time['sentryState'] < 2. and self.sm['sentryState'].capture)
 
   @property
   def engaged(self) -> bool:
@@ -355,6 +363,7 @@ class Device:
     self._interactive_timeout_callbacks: list[Callable] = []
     self._prev_timed_out = False
     self._awake: bool = True
+    self.sentry_motion_until = 0.
 
     self._offroad_brightness: int = BACKLIGHT_OFFROAD
     self._last_brightness: int = 0
@@ -362,6 +371,14 @@ class Device:
     self._brightness_thread: threading.Thread | None = None
     self._brightness_event = threading.Event()
     self._brightness_target: int = 0
+
+  @property
+  def sentry_screen(self) -> bool:
+    return ui_state.sentry_active and time.monotonic() > self._interaction_time
+
+  @property
+  def sentry_eye_visible(self) -> bool:
+    return self.sentry_screen and ui_state.sm['sentryState'].eyeEnabled and time.monotonic() < self.sentry_motion_until
 
   @property
   def awake(self) -> bool:
@@ -393,8 +410,8 @@ class Device:
     if self._interaction_time <= 0:
       self._reset_interactive_timeout()
 
-    self._update_brightness()
     self._update_wakefulness()
+    self._update_brightness()
 
   def _start_brightness_thread(self):
     if self._brightness_thread is None or not self._brightness_thread.is_alive():
@@ -428,6 +445,8 @@ class Device:
       clipped_brightness = float(np.interp(clipped_brightness, [0, 1], [30, 100]))
 
     brightness = round(self._brightness_filter.update(clipped_brightness))
+    if self.sentry_screen:
+      brightness = 100 if self.sentry_eye_visible else 0
     if not self._awake:
       brightness = 0
 
@@ -450,7 +469,12 @@ class Device:
         callback()
     self._prev_timed_out = interaction_timeout
 
-    self._set_awake(ui_state.ignition or not interaction_timeout or PC)
+    # A touch immediately suppresses motion wakeups for the whole interactive period.
+    if not interaction_timeout or not ui_state.sentry_active:
+      self.sentry_motion_until = 0.
+    elif ui_state.sm['sentryState'].motion and ui_state.sm['sentryState'].motionCamera in (1, 2):
+      self.sentry_motion_until = time.monotonic()+1.
+    self._set_awake(ui_state.ignition or not interaction_timeout or self.sentry_eye_visible or PC)
 
   def _set_awake(self, on: bool):
     if on != self._awake:

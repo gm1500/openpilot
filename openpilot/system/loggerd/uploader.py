@@ -11,6 +11,7 @@ from collections.abc import Iterator
 
 from openpilot.cereal import log
 import openpilot.cereal.messaging as messaging
+from openpilot.system.sentry.storage import live_sentry_lock, remove_legacy_upload_authorization
 from openpilot.common.api import Api
 from openpilot.common.utils import get_upload_stream
 from openpilot.common.params import Params
@@ -45,6 +46,10 @@ class FakeResponse:
     self.request = FakeRequest()
 
 
+def is_sentry_file(filename: str) -> bool:
+  return os.path.isfile(os.path.join(os.path.dirname(filename), '.sentry'))
+
+
 def get_directory_sort(d: str) -> list[str]:
   return [s.rjust(10, '0') for s in d.rsplit('--', 1)]
 
@@ -63,6 +68,8 @@ def listdir_by_creation(d: str) -> list[str]:
 def clear_locks(root: str) -> None:
   for logdir in os.listdir(root):
     path = os.path.join(root, logdir)
+    if live_sentry_lock(path):
+      continue
     try:
       for fname in os.listdir(path):
         if fname.endswith(".lock"):
@@ -73,6 +80,7 @@ def clear_locks(root: str) -> None:
 
 class Uploader:
   def __init__(self, dongle_id: str, root: str):
+    remove_legacy_upload_authorization()
     self.dongle_id = dongle_id
     self.api = Api(dongle_id)
     self.root = root
@@ -84,6 +92,7 @@ class Uploader:
 
     self.immediate_folders = ["crash/", "boot/"]
     self.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
+    self.sentry_failed: dict[str, float] = {}
 
   def list_upload_files(self, metered: bool) -> Iterator[tuple[str, str, str]]:
     r = self.params.get("AthenadRecentlyViewedRoutes")
@@ -126,6 +135,11 @@ class Uploader:
 
   def next_file_to_upload(self, metered: bool) -> tuple[str, str, str] | None:
     upload_files = list(self.list_upload_files(metered))
+    # A denied or repeatedly failing Sentry file must not monopolize its
+    # priority tier. Try untouched files first, then retry failures oldest
+    # first. The main loop still applies the normal network backoff.
+    self.sentry_failed = {fn: failed_at for fn, failed_at in self.sentry_failed.items() if os.path.isfile(fn)}
+    upload_files.sort(key=lambda candidate: self.sentry_failed.get(candidate[2], 0.))
 
     for name, key, fn in upload_files:
       if any(f in fn for f in self.immediate_folders):
@@ -135,17 +149,22 @@ class Uploader:
       if name in self.immediate_priority:
         return name, key, fn
 
+    # Full Sentry logs and HEVC videos stay local for manual Connect requests,
+    # handled by Athena. Only the ordinary qlog/preview policy applies here.
     return None
 
   def do_upload(self, key: str, fn: str):
+    sentry = is_sentry_file(fn)
     url_resp = self.api.get("v1.4/" + self.dongle_id + "/upload_url/", timeout=10, path=key, access_token=self.api.get_token())
-    if url_resp.status_code == 412:
+    if url_resp.status_code == 412 or (sentry and url_resp.status_code != 200):
+      if sentry:
+        cloudlog.event("sentry.upload_url_failed", key=key, status_code=url_resp.status_code)
       return url_resp
 
     url_resp_json = json.loads(url_resp.text)
-    url = url_resp_json['url']
-    headers = url_resp_json['headers']
-    cloudlog.debug("upload_url v1.4 %s %s", url, str(headers))
+    url, headers = url_resp_json['url'], url_resp_json['headers']
+    if not sentry:
+      cloudlog.debug("upload_url v1.4 %s %s", url, str(headers))
 
     if fake_upload:
       return FakeResponse()
@@ -155,6 +174,8 @@ class Uploader:
       compress = key.endswith('.zst') and not fn.endswith('.zst')
       stream, _ = get_upload_stream(fn, compress)
       response = requests.put(url, data=stream, headers=headers, timeout=10)
+      if sentry and response.status_code not in (200, 201):
+        cloudlog.event("sentry.upload_put_failed", key=key, status_code=response.status_code)
       return response
     finally:
       if stream:
@@ -185,7 +206,10 @@ class Uploader:
       except Exception as e:
         last_exc = (e, traceback.format_exc())
 
-      if stat is not None and stat.status_code in (200, 201, 401, 403, 412):
+      # A refused Sentry upload is still pending, not successfully backed up.
+      # Keep the local file eligible for retry through the normal backoff.
+      accepted = (200, 201) if is_sentry_file(fn) else (200, 201, 401, 403, 412)
+      if stat is not None and stat.status_code in accepted:
         self.last_filename = fn
         dt = time.monotonic() - start_time
         if stat.status_code == 412:
@@ -198,7 +222,8 @@ class Uploader:
         success = True
       else:
         success = False
-        cloudlog.event("upload_failed", stat=stat, exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
+        cloudlog.event("upload_failed", stat=stat, status_code=stat.status_code if stat is not None else None,
+                       exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
 
     if success:
       # tag file as uploaded
@@ -221,7 +246,12 @@ class Uploader:
     if key.endswith(('qlog', 'rlog')) or (key.startswith('boot/') and not key.endswith('.zst')):
       key += ".zst"
 
-    return self.upload(name, key, fn, network_type, metered)
+    success = self.upload(name, key, fn, network_type, metered)
+    if success:
+      self.sentry_failed.pop(fn, None)
+    elif is_sentry_file(fn):
+      self.sentry_failed[fn] = time.monotonic()
+    return success
 
 
 def main(exit_event: threading.Event | None = None) -> None:

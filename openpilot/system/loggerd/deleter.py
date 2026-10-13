@@ -19,6 +19,10 @@ PRESERVE_COUNT = 5
 
 
 def has_preserve_xattr(d: str) -> bool:
+  # Older Sentry builds set this attribute on every segment. Sentry events now
+  # follow ordinary route cleanup, including events written by those builds.
+  if os.path.exists(os.path.join(Paths.log_root(), d, '.sentry')):
+    return False
   return getxattr(os.path.join(Paths.log_root(), d), PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
 
 
