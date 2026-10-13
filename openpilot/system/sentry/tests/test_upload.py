@@ -76,6 +76,27 @@ def test_old_pending_full_files_do_not_block_new_event_previews(uploader, monkey
   assert all((old/name).exists() for name in FULL_FILES)
 
 
+@pytest.mark.parametrize('metered', [False, True])
+def test_gap_minute_uploads_only_its_qlog_once(uploader, monkeypatch, metered):
+  directory = Path(uploader.root)/'00000001--0123456789--1'
+  directory.mkdir()
+  (directory/'.sentry').write_text('1')
+  (directory/'qlog.zst').write_bytes(b'gap metadata')
+  lock = directory/'sentry.lock'
+  lock.touch()
+  assert uploader.next_file_to_upload(metered) is None
+  lock.unlink()
+  uploaded = []
+  monkeypatch.setattr(uploader, 'do_upload', lambda key, fn: (
+    uploaded.append(key) or SimpleNamespace(status_code=200, request=SimpleNamespace(headers={'Content-Length': '12'}))))
+  assert uploader.step(upload.NetworkType.wifi, metered)
+  assert uploaded == [directory.name+'/qlog.zst']
+  assert uploader.next_file_to_upload(metered) is None
+  restarted = upload.Uploader('test-device', uploader.root)
+  assert restarted.next_file_to_upload(False) is None, 'absent video must not cause upload attempts'
+  assert {f.name for f in directory.iterdir()} == {'.sentry', 'qlog.zst'}
+
+
 @pytest.mark.parametrize('status', [401, 403, 412, 429, 500])
 def test_sentry_preview_url_refusal_retains_http_status(uploader, monkeypatch, status):
   directory = event_files(uploader)

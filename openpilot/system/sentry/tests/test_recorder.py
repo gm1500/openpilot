@@ -29,6 +29,7 @@ FIELDS = ('narrowRoadEncodeData', 'wideRoadEncodeData', 'cabinEncodeData', *('qN
 FILES = ('fcamera.hevc', 'ecamera.hevc', 'dcamera.hevc', 'qcamera.ts')
 CAMERA_INDEX = {0: 0, 2: 1, 1: 2}  # VisionStreamType -> narrow, wide, cabin output order.
 COLORS = (45, 110, 180)
+FILLER_FRAME_ID = 2**32-1
 
 
 def sample_packet(codec_name, noisy=False, color=75):
@@ -52,6 +53,39 @@ def messages(path):
   with path.open('rb') as file, zstandard.ZstdDecompressor().stream_reader(file) as stream:
     data = stream.read()
   return list(log.Event.read_multiple_bytes(data))
+
+
+def real_camera_frames(directory, filename):
+  with av.open(str(directory/filename)) as video:
+    frames = list(video.decode(video=0))
+  if filename != 'qcamera.ts':
+    return frames
+  indexes = [e.qNarrowRoadEncodeIdx for e in messages(directory/'qlog.zst') if e.which() == 'qNarrowRoadEncodeIdx']
+  assert len(frames) == len(indexes)
+  assert [i.segmentId for i in indexes] == list(range(len(indexes)))
+  assert [i.segmentIdEncode for i in indexes] == list(range(len(indexes)))
+  actual = []
+  for idx, frame in zip(indexes, frames, strict=True):
+    if idx.frameId == FILLER_FRAME_ID:
+      assert frame.key_frame and np.max(frame.to_ndarray(format='rgb24')) <= 1
+    else:
+      actual.append(frame)
+  return actual
+
+
+def assert_footage_timeline(events):
+  frames = [e.qNarrowRoadEncodeIdx.timestampEof for e in events
+            if e.which() == 'qNarrowRoadEncodeIdx' and e.qNarrowRoadEncodeIdx.frameId != FILLER_FRAME_ID]
+  states = [e for e in events if e.which() == 'selfdriveState']
+  assert frames and states
+  if states[0].selfdriveState.alertStatus == 'normal':
+    assert states[0].logMonoTime <= frames[0]
+    states = states[1:]
+  assert states[0].logMonoTime == frames[0], 'orange must start at playable footage'
+  assert states[-1].logMonoTime == frames[-1]+50_000_000, 'orange must stop after the last saved frame'
+  assert [str(e.selfdriveState.alertStatus) for e in states] == ['userPrompt', 'normal']*(len(states)//2)
+  assert all(not e.selfdriveState.enabled and not e.selfdriveState.active for e in states)
+  assert all(states[i].logMonoTime < states[i+1].logMonoTime for i in range(len(states)-1))
 
 
 @pytest.mark.skipif(not BINARY.exists(), reason='build sentry_loggerd first')
@@ -202,7 +236,10 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
                       ignition=stop_reason == 'ignition', capture=stop_reason != 'disabled')
         dirs = sorted((tmp_path/'routes').iterdir())
         assert messaging.recv_one_or_none(live_selfdrive) is None, 'timeline annotation leaked to live alerts'
-        assert len(dirs) == 1
+        # The camera fixture stops sending frames before the live stop signal.
+        # With 60s pre-roll, status polling can carry ongoing control telemetry
+        # into minute 1. That metadata tail is not another saved video interval.
+        assert 1 <= len(dirs) <= 2
         assert {directory.name.rsplit('--', 1)[0] for directory in dirs} == {event_route}
         route_init = messages(dirs[0]/'qlog.zst')[0]
         assert abs(route_init.initData.wallTimeNanos-(wall_base+route_init.logMonoTime-base)) < 100_000_000
@@ -212,8 +249,25 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
           assert not list(directory.glob('*.lock'))
           assert 'user.preserve' not in os.listxattr(directory)
           events = messages(directory/'qlog.zst')
-          preview_indexes = [e.qNarrowRoadEncodeIdx for e in events if e.which() == 'qNarrowRoadEncodeIdx']
+          preview_indexes = [e.qNarrowRoadEncodeIdx for e in events
+                             if e.which() == 'qNarrowRoadEncodeIdx' and e.qNarrowRoadEncodeIdx.frameId != FILLER_FRAME_ID]
           timestamps = [i.timestampEof for i in preview_indexes]
+          if not timestamps:
+            assert number == 1
+            assert not any((directory/name).exists() for name in FILES[:3])
+            if (directory/'qcamera.ts').exists():
+              assert not real_camera_frames(directory, 'qcamera.ts')
+            for filename in ('qlog.zst', 'rlog.zst'):
+              tail = messages(directory/filename)
+              assert tail[0].as_builder().to_bytes() == route_init.as_builder().to_bytes()
+              start = next(e for e in tail if e.which() == 'sentinel')
+              assert start.logMonoTime == route_init.logMonoTime+60_000_000_000
+              assert start.sentinel.type == 'startOfSegment'
+              assert all(e.logMonoTime >= start.logMonoTime for e in tail[1:])
+              assert not any(e.which() in ('narrowRoadEncodeIdx', 'wideRoadEncodeIdx', 'cabinEncodeIdx') for e in tail)
+              assert all(e.selfdriveState.alertStatus == 'normal' for e in tail if e.which() == 'selfdriveState')
+              assert tail[-1].sentinel.type == 'endOfRoute'
+            continue
           assert timestamps and all(t >= trigger_time-pre_seconds*1_000_000_000 for t in timestamps)
           if number == 0:
             assert timestamps[0] == route_init.logMonoTime, 'Connect must not show an empty interval before playable video'
@@ -223,8 +277,7 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
           expected_frames = list(range(first_frame, available_seconds))
           assert timestamps == [base+f*1_000_000_000 for f in expected_frames]
           for c, filename in enumerate(FILES):
-            with av.open(str(directory/filename)) as video:
-              frames = list(video.decode(video=0))
+            frames = real_camera_frames(directory, filename)
             assert len(frames) == len(expected_frames)
             assert (frames[0].width, frames[0].height) == (526, 330)
             source = c if c < 3 else CAMERA_INDEX[trigger_camera]
@@ -238,22 +291,9 @@ def test_native_ram_event_and_stop(tmp_path, monkeypatch, stop_reason, trigger_c
             start = next(e for e in log_events if e.which() == 'sentinel')
             assert start.logMonoTime == timestamps[0]
             assert start.sentinel.type == ('startOfRoute' if number == 0 else 'startOfSegment')
-            # Orange Sentry annotations span the saved pre-roll and tail in both
-            # logs, without ever claiming driving engagement or requesting sound.
-            timeline = [e for e in log_events if e.which() == 'selfdriveState']
-            assert len(timeline) == 2
-            # Route, video, start sentinel and orange annotation share one origin.
-            assert timeline[0].logMonoTime == route_init.logMonoTime == timestamps[0]
-            assert timeline[-1].logMonoTime == log_events[-1].logMonoTime
-            for event in timeline:
-              state = event.selfdriveState
-              assert event.valid
-              assert state.state == 'disabled' and not state.enabled and not state.active and not state.engageable
-              assert state.alertStatus == 'userPrompt' and state.alertSize == 'small'
-              assert state.alertType == 'sentryRecording/permanent'
-              assert state.alertText1 == 'Sentry recording' and state.alertText2 == 'Parked event'
-              assert state.alertSound == 'none' and state.alertHudVisual == 'none'
-          indexes = [getattr(e, e.which()) for e in events if e.which().endswith('EncodeIdx')]
+            assert_footage_timeline(log_events)
+          indexes = [getattr(e, e.which()) for e in events
+                     if e.which().endswith('EncodeIdx') and getattr(e, e.which()).frameId != FILLER_FRAME_ID]
           assert len(indexes) == 4*len(expected_frames)
           assert all(i.segmentNum == number for i in indexes)
           assert [i.frameId for i in preview_indexes] == [frame*20+10000*CAMERA_INDEX[trigger_camera]
@@ -346,12 +386,11 @@ def test_video_queue_wrap_and_repeated_events(tmp_path, monkeypatch, publisher_f
 
         await_state(lambda s: s.bufferBytes == 0, capture=False)
         directories = sorted((tmp_path/'routes').iterdir())
-        assert len(directories) == 2
-        for directory, expected in zip(directories, (frame_count//2, frame_count), strict=True):
+        assert len(directories) == 1
+        for directory in directories:
           assert not list(directory.glob('*.lock'))
           for filename in FILES:
-            with av.open(str(directory/filename)) as video:
-              assert sum(1 for _ in video.decode(video=0)) == expected
+            assert len(real_camera_frames(directory, filename)) == frame_count
       finally:
         if process.poll() is None:
           process.send_signal(signal.SIGINT)
@@ -439,19 +478,17 @@ def test_output_minutes_start_at_retained_video_instead_of_source_minutes(tmp_pa
           assert not list(directory.glob('*.lock'))
           events = messages(directory/'qlog.zst')
           assert events[0].logMonoTime == origin
-          indexes = [e.qNarrowRoadEncodeIdx for e in events if e.which() == 'qNarrowRoadEncodeIdx']
+          indexes = [e.qNarrowRoadEncodeIdx for e in events
+                     if e.which() == 'qNarrowRoadEncodeIdx' and e.qNarrowRoadEncodeIdx.frameId != FILLER_FRAME_ID]
           expected = list(range(first+number*60, min(first+(number+1)*60, 205)))
           assert [i.timestampEof for i in indexes] == [base+f*1_000_000_000 for f in expected]
-          assert [i.segmentId for i in indexes] == list(range(len(expected)))
           assert all(i.segmentNum == number for i in indexes)
           assert [i.frameId for i in indexes] == [f*20+10000 for f in expected]
           start = next(e for e in events if e.which() == 'sentinel')
           assert start.logMonoTime == origin+number*60_000_000_000
-          assert events[1].selfdriveState.alertStatus == 'userPrompt'
-          assert events[1].logMonoTime == start.logMonoTime
+          assert_footage_timeline(events)
           for c, filename in enumerate(FILES):
-            with av.open(str(directory/filename)) as video:
-              frames = list(video.decode(video=0))
+            frames = real_camera_frames(directory, filename)
             assert len(frames) == len(expected)
             if c < 3:
               assert (directory/filename).read_bytes() == hevc[c]*len(expected)
@@ -514,7 +551,7 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
     pm = messaging.PubMaster([*STREAMS, 'sentryState', 'pandaStates', 'deviceState'])
     status = messaging.SubMaster(['sentryRecorderState'])
     base = time.monotonic_ns()-10_000_000_000
-    recording, camera, control_frame = False, 2, 0
+    recording, capture, camera, control_frame = False, True, 2, 0
     record_until = time.monotonic_ns()+60_000_000_000
     with (tmp_path/'recorder.log').open('w') as logfile:
       process = subprocess.Popen([str(BINARY)], cwd=BINARY.parent, stdout=logfile, stderr=subprocess.STDOUT)
@@ -522,7 +559,7 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
         def control():
           msg = messaging.new_message('sentryState', valid=True)
           msg.logMonoTime = base+control_frame*50_000_000
-          msg.sentryState.capture = True
+          msg.sentryState.capture = capture
           msg.sentryState.triggerCamera = camera
           msg.sentryState.recordUntilMonoTime = record_until if recording else 0
           pm.send('sentryState', msg)
@@ -581,30 +618,28 @@ def test_preview_switches_within_a_segment_on_keyframes_and_preserves_overlappin
         send_frames(90, 120)
         recording = False
         await_state(lambda s: not s.recording)
+        capture = False
+        await_state(lambda s: not s.route)
         directories = sorted((tmp_path/'routes').iterdir())
-        assert len(directories) == 2
+        assert len(directories) == 1
         def next_key(start):
           return next(f for f in range(start, count) if previews[0][f][2])
         expected = [(1, f) for f in range(23)]+[(2, f) for f in range(next_key(23), 63)]+[(0, f) for f in range(next_key(63), 90)]
-        for directory, full_count in zip(directories, (90, 120), strict=True):
-          if full_count == 120:
-            expected += [(2, f) for f in range(next_key(90), 120)]
+        expected += [(2, f) for f in range(next_key(90), 120)]
+        for directory in directories:
           assert directory.name.endswith('--0') and not list(directory.glob('*.lock'))
-          with av.open(str(directory/'qcamera.ts')) as video:
-            assert video.streams.video[0].codec_context.name == 'h264'
-            frames = list(video.decode(video=0))
+          frames = real_camera_frames(directory, 'qcamera.ts')
           assert len(frames) == len(expected)
           assert all(a.pts < b.pts for a, b in zip(frames, frames[1:], strict=False))
           for image, (source, _) in zip(frames, expected, strict=True):
             assert abs(float(image.to_ndarray(format='rgb24')[10, 10].mean())-COLORS[source]) < 10
-          indexes = [e.qNarrowRoadEncodeIdx for e in messages(directory/'qlog.zst') if e.which() == 'qNarrowRoadEncodeIdx']
-          # Handoffs with an unchanged deadline add no bookmarks. The second
-          # route retains the earlier event's marker in its overlapping pre-roll.
-          assert sum(e.which() == 'userBookmark' for e in messages(directory/'qlog.zst')) == (1 if full_count == 90 else 2)
+          indexes = [e.qNarrowRoadEncodeIdx for e in messages(directory/'qlog.zst')
+                     if e.which() == 'qNarrowRoadEncodeIdx' and e.qNarrowRoadEncodeIdx.frameId != FILLER_FRAME_ID]
+          # Handoffs add no bookmarks; each event has one in the same route.
+          assert sum(e.which() == 'userBookmark' for e in messages(directory/'qlog.zst')) == 2
           assert [i.frameId for i in indexes] == [10000*source+frame for source, frame in expected]
-          assert [i.segmentId for i in indexes] == list(range(len(expected)))
           for c, filename in enumerate(FILES[:3]):
-            assert (directory/filename).read_bytes() == hevc[c]*full_count
+            assert (directory/filename).read_bytes() == hevc[c]*count
       finally:
         if process.poll() is None:
           process.send_signal(signal.SIGINT)

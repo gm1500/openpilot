@@ -1,7 +1,9 @@
 # Sentry mode — comma 3X
 
-Integrated into `batmobile` as a single feature commit, including the camera
-calibration, recording/upload fixes and motion eye refinements.
+Sentry is integrated into `batmobile`. The changes developed on `sentry-session-routes-poc`
+are included as one additional squashed commit: one route per armed session, with small
+logs and black preview video bridging quiet gaps. Blue means no saved camera footage,
+orange marks saved preview intervals, and yellow marks confirmed motion.
 
 Manage the feature under **Settings → Sentry** in any vehicle state, including onroad.
 All configuration controls remain editable; enabling Sentry onroad takes effect when parked.
@@ -67,7 +69,8 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   The RAM ring retains native minute boundaries around the selected history; saved footage is
   trimmed to the selected seconds. Actual variable bitrate varies. Encoded payloads have a hard 128 MiB RAM cap; IPC queues,
   camera buffers and private watermark buffers use additional RAM.
-- No route directories or video files are written while merely watching. Runtime control
+- No route directories or video files are written before the first event. After a later
+  event resumes, small logs and black previews bridge the intervening whole minutes. Runtime control
   uses tmpfs. Existing system logs and battery-accounting Params still write normally;
   this is not a promise of zero device-wide NAND writes.
 - Confirmed motion saves up to the selected 15/30/60 seconds of preceding footage (default 60),
@@ -82,23 +85,18 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   does not. Each confirmation renews the selected post-motion interval from that trigger.
   Further confirmations before that deadline remain on the same route,
   including when someone moves between lenses. Quiet periods turn off the eye without
-  disarming capture. The route closes after the tail expires; the next event can start immediately
-  without another arming delay. There is no fixed 15-minute split; parking, battery, thermal
-  and storage limits still apply, and completed minute segments upload normally.
+  disarming capture. After the tail expires, saving pauses and the controller returns to
+  Watching; the armed session keeps its route identifier. Subsequent events, even after
+  long quiet gaps, append to that route without another arming delay. There is no fixed
+  15-minute split; parking, battery, thermal and storage limits still apply.
 - Warmup and arming footage stays in the RAM history. A later event can therefore include
   the initial exposure/IR fade in its pre-roll even though that fade did not trigger a save.
   The motion bookmark identifies the confirmed trigger, rather than the start of pre-roll.
-- Saved Sentry segments carry a log-only `selfdriveState` annotation labeled **Sentry recording**,
-  with `alertStatus=userPrompt`, at their start and end. The first annotation uses the route's
-  `initData` time origin, aligned with the first playable preview frame, so the timeline is
-  orange from its actual beginning. Video and bookmark timestamps stay unchanged.
-  Connect's existing timeline draws that
-  alert interval orange; motion bookmarks remain yellow above it in both the route list and
-  playback timeline. The annotation includes saved pre-roll and the post-motion tail, with
-  driving state disabled and no audible alert. It is written directly to qlog/rlog, never
-  published to live driving/UI processes. Existing uploaded routes are not recolored.
-  Connect's server must index these states into route events; its deployed indexing and
-  final appearance still require a newly uploaded event to verify.
+- Connect's timeline is orange only where saved preview footage is available, blue across
+  unsaved gaps, and yellow at confirmed-motion bookmarks. Log-only state annotations mark
+  the first saved frame and the end of its continuous run, including pre-roll and the tail.
+  These annotations never publish live driving alerts. Existing uploaded routes are not
+  rewritten or recolored.
 - On ignition, shutdown, stale controller/health, thermal pause or disable, recording ends
   and the RAM buffer is discarded. This version does not retain the unsaved ring across reboots.
 
@@ -137,33 +135,136 @@ request just to keep the clock running.
 
 ## Saved events and upload
 
-Each event gets its own native route identifier and rebased segment/encode indexes:
+Sentry groups events from one uninterrupted armed capture
+session under one native route identifier. No route is allocated until the first saved
+event, so an arm with no detections creates no empty route. Disarming/capture shutdown or
+a recorder/encoder restart ends the grouping; the next armed capture creates a new route.
+Each event still saves its selected pre-roll and post-motion tail:
 
 - `fcamera.hevc`, `ecamera.hevc`, `dcamera.hevc`, `qcamera.ts` for all three cameras;
 - native `rlog.zst` / `qlog.zst`, init data, saved car parameters, camera states,
   sentry metadata, timestamps, position estimate and segment/route sentinels;
 - an internal `.sentry` marker for uploader identification and lock recovery.
 
-All segments repeat one route-level `initData`, with its UTC wall time and monotonic
+All footage segments repeat one route-level `initData`, with its UTC wall time and monotonic
 timestamp anchored to the first retained, independently decodable preview frame. Segment
-numbers and sentinels use successive 60-second intervals from that same origin, even when
+numbers and sentinels use real 60-second intervals from that same origin, even when
 an output minute combines video from two source minutes. Earlier code kept the source-minute
 origin after trimming, leaving an empty leading timeline interval; simply coloring that
 interval orange did not make footage exist there. The recorder now trims the origin and
 rebuilds the minute boundaries together. Individual frame and bookmark timestamps do not shift.
 Timezone offsets apply only to the local display/watermark, never the native route clock.
-The corrected metadata applies to new events; already uploaded routes are not rewritten.
+The corrected metadata applies to new sessions; already uploaded routes are not rewritten.
+
+Quiet gaps retain their real duration. When footage resumes, intervening whole minutes
+receive a small `qlog.zst`, a valid black `qcamera.ts` and the internal `.sentry` marker.
+For example, footage in segments 0 and 3 produces black-preview segments 1 and 2.
+Each gap log has compact `initData`, start-of-segment, disabled/normal timeline state,
+preview encode indexes, and end-of-segment.
+The compact header preserves the original route clock, device and software identity;
+it omits repeated parameter snapshots, hardware command output and car parameters. The
+full snapshots remain in footage segments. There are no sensor-camera messages,
+bookmarks, `rlog.zst` or HEVC files in a gap minute. Gap logs and previews use the ordinary
+uploader, including its existing metered-network policy; full camera files still require
+a Connect request. No account token or forced full-video upload is added.
+
+The filler is an embedded 114-byte black H.264 IDR with its SPS/PPS, matching the
+526×330 resolution, High profile/level 2.1 and nominal 20 Hz clock of the device's Sentry
+preview. No software encoder runs on the device. The recorder remuxes one independently
+decodable frame per second at the original route timestamps. Two final frames at 59.90
+and 59.95 seconds give hls.js its expected last-sample duration, producing a complete
+60-second minute. Empty files and three-frame minimal files are not used: an empty file
+cannot decode, and the 1,692-byte three-frame experiment was misidentified as MPEG-PS by
+automatic probing. Very long still-frame holds also make seeking less predictable.
+
+Partial-minute gaps are filled too: before resumed footage, after an immutable event
+tail, and between non-overlapping events in the same minute. A brief lens-handoff wait
+retains the existing last-frame hold. Real video rejoins after filler only on an IDR with
+its own SPS/PPS restored. The three HEVC streams are never padded or relabeled. Preview
+indexes include filler so in-file indexes stay correct; filler uses `frameId = UINT32_MAX`
+to distinguish it from sensor frames. Blue/orange availability is derived exclusively from
+accepted real preview frames, not these synthetic indexes. Bookmarks retain their actual
+motion times. A final open partial minute is only filled through its logged end on disarm;
+already finalized minutes are not rewritten.
+
+An arm without an event still writes no route, and waiting after the last event does not
+keep creating gap logs. Only a later recording supplies the far boundary. Backfilling
+runs one minute per recorder tick; disarming completes the remaining queue. A recent gap
+stays pending until its minute ends at least 60 seconds in the past, or earlier segments
+have already been finalized past it. If newly selected pre-roll fills it meanwhile, the
+real footage takes its place before any minimal log is published. Existing segment
+directories are never replaced by filler. Already uploaded routes are not repaired.
+
+Events inside the same minute append to that minute's open files; overlapping pre-roll is saved
+only once. After an unsaved gap, each video resumes on a decodable keyframe. Qcamera PTS,
+camera indexes, log clocks and bookmarks retain the original real-time offsets. The three
+HEVC files remain assigned to their original lenses.
+
+Orange availability follows accepted qcamera frames, not the requested recording deadline
+or the start of a segment minute. Each continuous run ends one frame period after its last
+saved frame. Its closing `normal` state is written into the same event log, so it cannot
+carry orange across missing minutes. Overlapping pre-roll that fills a pause stays orange;
+an actual unsaved gap gets a blue interval. There are only two state annotations per saved
+run in each footage segment. Each wholly quiet minute between events instead has just one
+normal state in its minimal gap log; there is no periodic idle telemetry stream.
+
+The complete black TS measured **46,060 bytes per minute** using the native VideoWriter;
+the compact native-test log with all 62 preview indexes stayed below 1 kB. Ten hours is
+about **28 MB of video plus logs**, excluding filesystem allocation and HTTP/TLS overhead.
+That is about one tenth of the measured 20 fps black-video payload (474,512 bytes/minute).
+It still means two uploads per quiet minute, or 1,200 files for ten hours; small payloads
+do not remove per-request latency or server work. Quiet minutes are generated only once
+another event resumes, not continuously during idle parking. The native regression covers
+a ten-hour gap, recent gaps filled by expanded pre-roll, shared route clocks, decoded
+footage and unchanged bookmarks.
+
+An incomplete output minute stays locked until its end is at least 60 seconds behind the
+capture clock, covering the maximum selectable pre-roll even if the setting changes. This
+can delay its automatic qlog/preview upload by up to about two minutes after saving pauses.
+Disarming closes it immediately, and completed continuous-recording minutes can upload
+as before. Once unlocked, files are never reopened or rewritten. If all files have already
+closed when disarming, no empty final segment is created merely to add an end-of-route sentinel.
+
+Connect compatibility was reviewed at
+[`d6d8ab03f67d78d028f58adef2e12cb9a8c9cbb0`](https://github.com/commaai/connect/commit/d6d8ab03f67d78d028f58adef2e12cb9a8c9cbb0):
+its [player](https://github.com/commaai/connect/blob/d6d8ab03f67d78d028f58adef2e12cb9a8c9cbb0/src/components/DriveVideo/index.jsx)
+selects hls.js **1.4.8** with a 40-second target buffer, while iPhones use native HLS.
+It uses one route-relative video clock, and reports missing-TS HTTP 404 errors. Its
+[event loader](https://github.com/commaai/connect/blob/d6d8ab03f67d78d028f58adef2e12cb9a8c9cbb0/src/actions/cached.js)
+loads timeline colors separately from video. Filler therefore keeps the normal qcamera
+format and real elapsed time; it does not require player changes or a new playlist type.
+
+`system/sentry/tests/test_connect_preview.cjs` exercises the exact hls.js 1.4.8 transmuxer
+with native recorder output, both sequentially and after forward/backward seeks. It
+checks fragment timing, dropped samples and parser errors, and exports MP4s for decoding.
+This does not emulate native iPhone playback or the private server that builds playlists.
+New device uploads must confirm seeking, playback, later appended events and manual
+camera requests. The filler removes missing video locally; it cannot eliminate network
+delays, backend processing delays or gaps while uploads are still pending. It does not
+automatically skip quiet time; the timeline remains a real-time view of the armed session.
+
+### Update and rebuild
+
+With the vehicle parked and offroad, run `bash tools/sentry_update.sh` through a tmux session.
+The script supports `batmobile` and `sentry-session-routes-poc`, keeps the installed branch,
+and stops Sentry so saved files can close. It
+fast-forwards the installed branch, synchronizes its pinned submodules and LFS files, and
+forces a fresh native recorder build. It then checks `AGNOS_VERSION` from `launch_env.sh`
+against `/VERSION`, uses the stock AGNOS updater if needed, restores the previous Sentry
+enable setting, and reboots. A failed update or build does not reboot; local changes and
+diverged history are never discarded. Re-enable Sentry manually after resolving a failure.
+The next captured route will include minimal logs and black preview video between saved events.
 
 The empty-lead-in regression was reproduced against the old recorder. The correction passed
 12 native recorder cases, including 15/30/60-second trimming, only five seconds of playable
 preview history, three output minutes crossing different source-minute boundaries, and
 unchanged-deadline camera handoffs. Tests decode the saved streams and check the route/video
-origin, real frame times, shared initData, segment numbers, bookmarks and orange annotations.
+origin, real frame times, shared initData, segment numbers and bookmarks.
 Connect's deployed backend still needs a fresh device event to verify its rendered timeline.
 
 The recorder writes standard `userBookmark` events into both logs at the confirmed trigger,
 and again when a new confirmed burst follows at least five seconds without confirmation.
-Manual saves and new split routes also get a marker. Continuous movement does not create
+Manual saves and resumed event windows also get a marker. Continuous movement does not create
 a bookmark on every sample, and immediate eye-only movement does not create bookmarks.
 These are written directly to the saved route; the UI retains ownership of the live bookmark
 publisher. Log contents are tested locally; bookmark appearance in Connect still needs
@@ -328,6 +429,18 @@ power telemetry alone can miss upstream losses. Choose the voltage threshold for
 battery and verify with a meter before unattended operation.
 
 ## Validation
+
+The armed-session route change passes 98 checks: 12 native IPC recorder cases,
+one deterministic native session replay, and 85 controller/upload checks. The replay
+uses real H264/HEVC keyframes and dependent frames, decodes all four saved outputs,
+checks overlapping events and an unsaved gap within a minute, skips two whole quiet
+minutes, resumes partway through a later minute, verifies byte-for-byte immutable
+finalized files, and starts a new route after disarming. Real timestamps, shared
+initData, sequential in-file indexes and motion bookmarks are checked, with no
+synthetic alert states. The recorder and native test executable compile on the PC.
+This change needs the native recorder rebuilt after switching branches; a Python
+restart alone cannot load it. Hardware encoding and Connect's sparse playback,
+route growth and manual camera requests still need the parked-device test.
 
 The dusk crossing in `000003c2--4b23da1686` runs the preceding build at sensitivity 50.
 The controller is already Watching throughout the front approach: it reports small wide-camera
