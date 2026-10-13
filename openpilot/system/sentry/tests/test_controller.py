@@ -164,6 +164,37 @@ def test_camera_recovery_learns_exposure_without_replaying_arm_delay(monkeypatch
   assert result.active and result.triggered  # No extra 15/30/60-second user delay.
 
 
+@pytest.mark.parametrize('stream', [1, 2])
+@pytest.mark.parametrize('size', [(1928, 1208), (1344, 760)])
+def test_live_sampling_keeps_thin_dim_subjects_with_padded_stride(monkeypatch, stream, size):
+  width, height = size
+  image = np.full((height, width+64), 255, dtype=np.uint8)
+  image[:, :width] = 21
+  client = SimpleNamespace(width=width, height=height, stride=width+64, frame_id=0, timestamp_eof=0,
+                           is_connected=lambda: True, recv=lambda timeout: SimpleNamespace(data=image.tobytes()))
+  monkeypatch.setattr(sentryd, 'VisionIpcClient', lambda *args: client)
+  camera = sentryd.CameraMotion(stream)
+  results = []
+  for i in range(74):
+    now = 100.+i*.2
+    client.frame_id, client.timestamp_eof = i, int(now*1e9)
+    image[:, :width] = 21
+    if i >= 65:
+      x = 30+(i-65)*2
+      # Only two luma levels of contrast, with a narrow connected silhouette.
+      # Smooth within sensor cells without washing this outline into its backdrop.
+      # Above both sensor families' lens-scaled area floors at sensitivity 50.
+      image[30*height//80:50*height//80, x*width//128:(x+6)*width//128] = 23
+    result = camera.sample(now, 50, armed=i >= 65)
+    if i < 65:
+      assert not result.active
+    else:
+      results.append(result)
+  assert results[0].active and not results[0].triggered
+  assert any(m.triggered for m in results[3:6])
+  assert results[-1].x > results[0].x
+
+
 @pytest.mark.parametrize('post_seconds', [15, 30, 60])
 def test_quiet_eye_and_later_lens_extend_event_without_rearming(monkeypatch, tmp_path, post_seconds):
   class Params(dict):

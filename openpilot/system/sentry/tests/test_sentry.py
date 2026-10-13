@@ -250,6 +250,25 @@ def test_small_motion_moves_eye_without_saving(stream):
     assert not result.triggered
 
 
+@pytest.mark.parametrize('stream', [1, 2])
+@pytest.mark.parametrize('noise', [.5, 2.])
+def test_dark_sensor_noise_cannot_keep_a_departed_subject_recording(stream, noise):
+  detector = MotionDetector.for_camera(stream, 1928, 1208)
+  base = np.full((80, 128), 21, dtype=np.float32)
+  warm(detector, base)
+  occupied = base.copy()
+  occupied[20:45, 50:75] += 40
+  for i in range(15):
+    detector.update(occupied, 3.+i*.2, 50)
+  # The departed subject leaves a broad background residual. Scattered fresh
+  # pixel changes inside it must not be mistaken for the subject moving again.
+  detector.update(base, 6., 50)
+  rng = np.random.default_rng(19)
+  for i in range(60):
+    result = detector.update(base+rng.normal(0, noise, base.shape), 6.2+i*.2, 50)
+    assert not result.triggered
+
+
 @pytest.mark.parametrize('stream', [0, 1, 2])
 @pytest.mark.parametrize('sensitivity', [50, 100])
 def test_scattered_snow_cannot_combine_area_into_a_trigger(stream, sensitivity):

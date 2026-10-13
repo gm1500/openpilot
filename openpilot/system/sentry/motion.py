@@ -103,11 +103,6 @@ class Region:
             self.top <= other.bottom+4 and other.top <= self.bottom+4)
 
 
-def box_mean(values):
-  padded = np.pad(values, 1, mode='edge')
-  return sum(padded[y:y+values.shape[0], x:x+values.shape[1]] for y in range(3) for x in range(3))/9.
-
-
 def regions(mask, changed):
   """Eight-connected regions, using row runs to avoid a per-pixel Python flood fill."""
   edges = np.diff(np.pad(mask.astype(np.int8), ((0, 0), (1, 1))), axis=1)
@@ -209,19 +204,23 @@ class MotionDetector:
     movement = current-self.previous
     movement -= np.median(movement)
     movement_threshold = max(6., threshold*.6)
-    # In a dark garage the subject can differ by just 3-5 luma levels. Use a
-    # lower contrast threshold only in low light, with spatial averaging and
-    # a measured temporal-noise floor. Daylight thresholds stay unchanged.
+    # CameraMotion averages sensor pixels within each sample cell. Do not blur
+    # across cells here: a dim head/shoulder outline may be only a few cells
+    # wide. Lower contrast thresholds retain it, with a measured temporal-noise
+    # floor protecting high-gain scenes. Daylight thresholds stay unchanged.
     light = float(np.clip((np.percentile(self.background, 80)-28.)/36., 0., 1.))
     if light < 1.:
-      difference = light*difference+(1.-light)*box_mean(difference)
-      movement = light*movement+(1.-light)*box_mean(movement)
       noise = float(np.median(np.abs(movement)))
-      dark_threshold = float(np.interp(sensitivity, (.01, .5, 1.), (6., 2.5, 1.75)))
+      dark_threshold = float(np.interp(sensitivity, (.01, .5, 1.), (6., 1.5, 1.)))
       dark_movement = float(np.interp(sensitivity, (.01, .5, 1.), (3., 1., .75)))
       threshold = max(light*threshold+(1.-light)*dark_threshold, 4.*noise)
       movement_threshold = max(light*movement_threshold+(1.-light)*dark_movement, 3.*noise)
     changed = np.abs(movement) > movement_threshold
+    # A residual background silhouette must not turn scattered sensor noise
+    # into motion. Require neighboring fresh changes as well as a supported
+    # background difference; a one-cell-wide moving edge still qualifies.
+    fresh_support = sum(np.roll(np.roll(changed, dy, 0), dx, 1) for dy in (-1, 0, 1) for dx in (-1, 0, 1))
+    changed &= fresh_support >= 3
     self.previous = current.copy()
     mask = np.abs(difference) > threshold
     # Require local support; isolate hot pixels, sensor noise and rain speckles.

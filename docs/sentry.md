@@ -44,9 +44,13 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
   The cabin slider curve retains the same least/most-sensitive endpoints as the forward
   cameras; its middle is calibrated separately. The sensitivity slider changes pixel-change
   thresholds and minimum saving area. In low light, thresholds smoothly decrease with background
-  brightness, reaching 2.5 luma levels at sensitivity 50 in a very dark scene. Spatial averaging
-  and a measured frame-difference noise floor suppress sensor noise; connected area and the
-  0.6-second confirmation still apply. Normal-light thresholds are unchanged.
+  brightness, reaching 1.5 luma levels at sensitivity 50 in a very dark scene. Each cell in the
+  128×80 detection image averages a 4×4 grid of sensor samples, reducing isolated-pixel noise
+  without blurring a dim outline across neighboring cells. A measured frame-difference noise
+  floor raises thresholds in noisy scenes. Fresh changes also need local spatial support,
+  preventing scattered noise inside a departed subject's background footprint from sustaining
+  an event. Connected area and the 0.6-second confirmation still apply. Normal-light contrast
+  thresholds are unchanged.
   This is motion detection, not object identification;
   large nearby droplets, heavy snow, shadows, reflections and passing traffic can still
   trigger it. Small/distant objects or brief movement may not save an event. There are no
@@ -318,23 +322,34 @@ battery and verify with a meter before unattended operation.
 
 ## Validation
 
-The dark-garage approach supplied on October 12 was replayed at the recorded 50% setting.
-The revised wide detector confirms motion at 11.40 seconds, compared with 15.00 seconds
-previously; the flashlight first appears at about 13.6 seconds. There are no triggers in
-the preceding quiet portion. Replay samples decoded Y planes at 5 Hz with watermark rows
-excluded, so compression and downsampling make it an approximation of live raw-camera detection.
-Daylight cabin replay retains its earlier trigger timing. The walk-around preview only
+The later dark crossing in route `000003b9--0145a7f041` exposed another missed approach at
+the recorded 50% setting: the person is visible in the front-wide footage around 22–24.6
+seconds while the preview remains on the empty cabin. The old sampling and low-light blur
+leave disconnected pieces smaller than the required area. Averaging within sample cells,
+preserving outlines and lowering the dark-scene contrast threshold confirm the crossing at
+22.81 seconds in replay. Comparing the revised wide score against the original recorded
+cabin scores switches the preview wide at 23.01 seconds and retains it through the crossing.
+This is a partial-input comparison, not a simultaneous replay of both raw cameras. There
+are no confirmed events in the tested quiet portions before 9 seconds or after 35 seconds.
+
+The earlier dark-garage approach was replayed at the recorded 50% setting as well. The revised
+wide detector confirms motion at 11.20 seconds (11.40 with the preceding low-light fix and
+15.00 before that); the flashlight first appears at about 13.6 seconds. There are no triggers
+in the preceding quiet portion. Replays sample decoded Y planes at 5 Hz with watermark rows
+excluded, so compression and downsampling make them an approximation of live raw-camera detection.
+Daylight cabin replay still confirms the approach (14.79 seconds, previously 14.99). The walk-around preview only
 contains the camera selected at each instant; it cannot reconstruct both simultaneous
 camera inputs. A regression using its observed winning scores, without spatial weighting,
 verifies a handoff at 38.178 seconds and no rapid return to the cabin during that crossing,
 including real 5 Hz scheduling jitter. Swapping the lens identities gives the same behavior.
 Full simultaneous-camera behavior still needs a new parked walk-around test. Synthetic
-checks cover dim moving subjects, dark sensor noise, brightness changes, scattered specks,
+checks cover dim moving subjects through the real sampling path with padded image strides
+and both sensor resolutions, noise inside a departed subject's footprint, brightness changes, scattered specks,
 near-ties, pauses, large new motion, and returning to the previous lens. Translated and
 rotated subjects receive equal priority, and dim-approach checks include +/-12 degree
 tilts at different image heights. Other vehicles and mounting angles still need real footage
 validation; those checks do not establish performance for every installation.
-The update passed 135 detector/controller/settings-data checks and lint. Fourteen UI-dependent
+The update passed 143 detector/controller/settings-data checks and lint. Fourteen UI-dependent
 cases were excluded because this environment lacks `pyray`; this change does not edit the UI.
 
 The 50% calibration was replayed against the supplied two consecutive one-minute segments

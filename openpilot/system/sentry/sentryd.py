@@ -43,6 +43,7 @@ class CameraMotion:
   def __init__(self, stream):
     self.stream = stream
     self.size = None
+    self.sample_indices = None
     self.client = VisionIpcClient('camerad', stream, True)
     self.detector = MotionDetector()
     self.last_frame = -1
@@ -60,15 +61,19 @@ class CameraMotion:
     size = self.client.width, self.client.height
     if size != self.size or self.client.frame_id < self.last_frame:
       self.detector = MotionDetector.for_camera(self.stream, *size)
+      # Average a 4x4 grid inside each output cell. Isolated raw pixels alias
+      # high-gain IR noise; blurring the resulting 128x80 image instead erases
+      # small, low-contrast subjects. Keep the work bounded for both sensors.
+      self.sample_indices = np.ix_(((np.arange(80*4)+.5)*size[1]/(80*4)).astype(int),
+                                   ((np.arange(128*4)+.5)*size[0]/(128*4)).astype(int))
       self.size = size
       self.warm_until = now+CAMERA_WARMUP_SECONDS
     self.last_frame = self.client.frame_id
     self.last_received = now
     image = np.frombuffer(buf.data, dtype=np.uint8, count=self.client.stride*self.client.height)
     image = image.reshape(self.client.height, self.client.stride)[:, :self.client.width]
-    rows = np.linspace(0, image.shape[0]-1, 80, dtype=int)
-    cols = np.linspace(0, image.shape[1]-1, 128, dtype=int)
-    return self.detector.update(image[np.ix_(rows, cols)], now, sensitivity, armed=armed and now >= self.warm_until)
+    sample = image[self.sample_indices].reshape(80, 4, 128, 4).mean(axis=(1, 3), dtype=np.float32)
+    return self.detector.update(sample, now, sensitivity, armed=armed and now >= self.warm_until)
 
 
 def main():
