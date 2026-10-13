@@ -168,9 +168,14 @@ bookmarks, `rlog.zst` or HEVC files in a gap minute. Gap logs and previews use t
 uploader, including its existing metered-network policy; full camera files still require
 a Connect request. No account token or forced full-video upload is added.
 
-The filler is an embedded 114-byte black H.264 IDR with its SPS/PPS, matching the
-526×330 resolution, High profile/level 2.1 and nominal 20 Hz clock of the device's Sentry
-preview. No software encoder runs on the device. The recorder remuxes one independently
+The filler is an embedded 104-byte black H.264 IDR with the exact SPS/PPS used by the
+comma 3X hardware preview: 526×330, High profile/level 2.1. Matching the full decoder
+configuration matters; matching only resolution/profile does not suffice. The first
+filler version used x264's different reference, prediction, quantizer, deblocking and
+VUI settings. It could decode with a decoder accepting parameter-set changes while
+failing when the initial configuration remained in use. The current asset keeps the
+hardware parameter sets unchanged through black-to-camera transitions. No software
+encoder runs on the device. The recorder remuxes one independently
 decodable frame per second at the original route timestamps. Two final frames at 59.90
 and 59.95 seconds give hls.js its expected last-sample duration, producing a complete
 60-second minute. Empty files and three-frame minimal files are not used: an empty file
@@ -237,6 +242,11 @@ format and real elapsed time; it does not require player changes or a new playli
 `system/sentry/tests/test_connect_preview.cjs` exercises the exact hls.js 1.4.8 transmuxer
 with native recorder output, both sequentially and after forward/backward seeks. It
 checks fragment timing, dropped samples and parser errors, and exports MP4s for decoding.
+`system/sentry/tests/test_filler.py` also validates the filler against the original
+comma 3X decoder configuration. Set `SENTRY_PREVIEW_SAMPLE` to a local device
+`qcamera.ts` to check decoded camera pixels across repeated filler transitions,
+with decoder parameters held fixed. The development generator refuses unexpected
+encoder headers instead of silently emitting an incompatible filler asset.
 This does not emulate native iPhone playback or the private server that builds playlists.
 New device uploads must confirm seeking, playback, later appended events and manual
 camera requests. The filler removes missing video locally; it cannot eliminate network
