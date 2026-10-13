@@ -27,12 +27,13 @@ if [[ -f .venv/bin/activate ]]; then
   source .venv/bin/activate
 fi
 
-# A missing offroad state is not sufficient to authorize an update while driving.
+# Manager maintains IsOffroad as the inverse of deviceState.started. This branch
+# has no IsOnroad parameter. A missing IsOffroad value must also stop the update.
 sentry_enabled="$(python - <<'PY'
 from openpilot.common.params import Params
 
 p = Params()
-if not p.get_bool('IsOffroad') or p.get_bool('IsOnroad'):
+if not p.get_bool('IsOffroad'):
   raise SystemExit('[ERROR] Park the vehicle and wait for offroad mode before updating.')
 print(int(p.get_bool('SentryEnabled')))
 p.put_bool('SentryEnabled', False)

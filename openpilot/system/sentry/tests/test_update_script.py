@@ -64,8 +64,8 @@ elif name == 'sudo':
 import json, os
 class Params:
   def get_bool(self, key):
-    return {'IsOffroad': os.environ.get('FAIL_STAGE') != 'onroad',
-            'IsOnroad': os.environ.get('FAIL_STAGE') == 'onroad',
+    # Only model the branch's registered keys; unknown names must fail.
+    return {'IsOffroad': os.environ.get('FAIL_STAGE') not in ('onroad', 'missing_offroad'),
             'SentryEnabled': os.environ.get('PREVIOUS_SENTRY', '1') == '1'}[key]
   def put_bool(self, key, value):
     with open(os.environ['UPDATE_CALLS'], 'a') as log:
@@ -87,7 +87,7 @@ class Params:
   return run, tmp_path
 
 
-@pytest.mark.parametrize('stage', ['branch', 'dirty', 'onroad', 'fetch', 'merge', 'submodules', 'lfs', 'build', 'agnos'])
+@pytest.mark.parametrize('stage', ['branch', 'dirty', 'onroad', 'missing_offroad', 'fetch', 'merge', 'submodules', 'lfs', 'build', 'agnos'])
 def test_update_failure_never_reboots(updater, stage):
   run, _ = updater
   result, calls = run(FAIL_STAGE=stage)
@@ -96,7 +96,7 @@ def test_update_failure_never_reboots(updater, stage):
   assert ['param', 'SentryEnabled', True] not in calls
   if stage != 'agnos':
     assert not any(c[0] == 'python' and c[1].endswith('/agnos.py') for c in calls)
-  if stage in ('branch', 'dirty', 'onroad'):
+  if stage in ('branch', 'dirty', 'onroad', 'missing_offroad'):
     assert not any(c[0] in ('scons', 'param') for c in calls)
 
 
