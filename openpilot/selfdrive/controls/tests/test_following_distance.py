@@ -35,7 +35,7 @@ def run_following_distance_simulation(v_lead, t_end=100.0, e2e=False, personalit
                       [log.LongitudinalPersonality.relaxed, # personality
                        log.LongitudinalPersonality.standard,
                        log.LongitudinalPersonality.aggressive],
-                      [0,10,35])) # speed
+                      [0,10,100 / 3.6,35])) # speed
 class TestFollowingDistance(OpenpilotTestCase):
   def test_following_distance(self):
     v_lead = float(self.speed)

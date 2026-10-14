@@ -4,7 +4,7 @@ from types import SimpleNamespace as NS
 import numpy as np
 from openpilot.cereal import log
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
-  LongitudinalMpc, STOP_DISTANCE, LEAD_DANGER_FACTOR, T_IDXS, get_lead_stop_distance,
+  LongitudinalMpc, COMFORT_BRAKE, STOP_DISTANCE, LEAD_DANGER_FACTOR, T_IDXS, get_lead_stop_distance,
 )
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan
 from openpilot.selfdrive.controls.lib.e2e_stop import E2EStopTarget
@@ -22,12 +22,12 @@ class TestStopTargetMpc(unittest.TestCase):
     self.assertIsNone(get_lead_stop_distance(radar()))
     for second in (False, True):
       state = radar(20., second)
-      self.assertEqual(get_lead_stop_distance(state), 14.)
+      self.assertEqual(get_lead_stop_distance(state), 20. - STOP_DISTANCE)
       lead = state.leadTwo if second else state.leadOne
       lead.vLead = 5.
-      self.assertEqual(get_lead_stop_distance(state), 19.)
+      self.assertAlmostEqual(get_lead_stop_distance(state), 20. + 5.**2 / (2 * COMFORT_BRAKE) - STOP_DISTANCE)
     state.leadOne = radar(8.).leadOne
-    self.assertEqual(get_lead_stop_distance(state), 2.)
+    self.assertEqual(get_lead_stop_distance(state), 8. - STOP_DISTANCE)
 
   def test_gap_conversion_and_stop_constraint(self):
     mpc = LongitudinalMpc()

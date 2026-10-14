@@ -1,8 +1,9 @@
 """Shared lead stopping positions and virtual-stop overlap policy for control/UI."""
 import math
 
-COMFORT_BRAKE = 2.5
-STOP_DISTANCE = 6.0
+# Start slowing earlier while retaining extra clearance at a stopped lead.
+COMFORT_BRAKE = 2.0
+STOP_DISTANCE = 6.5
 LEAD_STOP_SEPARATION = 6.0  # re-entry requires an extra metre outside the overlap band
 LEAD_STOP_SEPARATION_RELEASE = 5.0  # car-length overlap band; real lead gets priority
 

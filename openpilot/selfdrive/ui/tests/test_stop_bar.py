@@ -6,6 +6,7 @@ from unittest.mock import patch
 import numpy as np
 import pyray as rl
 
+from openpilot.selfdrive.controls.lib.lead_stop import STOP_DISTANCE
 from openpilot.selfdrive.ui.onroad.lead_geometry import lead_fill_alpha, rounded_polygon
 from openpilot.selfdrive.ui.onroad.model_stop import ModelStop, StopMarker
 from openpilot.selfdrive.ui.onroad.stop_bar import draw_stop_bar, stop_bar_geometry
@@ -80,11 +81,11 @@ class TestStopBar(unittest.TestCase):
     self.sm['modelV2'] = prediction
     self.sm['longitudinalPlan'].stopTarget.distance = 10.
     self.sm['longitudinalPlan'].e2eStopDistance = 20.
-    self.set_lead(40.)  # real-lead ego stop at 34 m; model target is separate
+    self.set_lead(STOP_DISTANCE + 34.)  # real-lead ego stop at 34 m; model target is separate
     self.stop.update(self.sm, 1, 100.02)
     self.assertIsNotNone(self.stop.marker)
     self.assertEqual(self.stop.marker.distance, 10.)
-    self.set_lead(31.)  # real-lead ego stop at 25 m overlaps the raw 20 m target
+    self.set_lead(STOP_DISTANCE + 25.)  # real-lead ego stop at 25 m overlaps the raw 20 m target
     self.stop.update(self.sm, 1, 100.02)
     self.assertIsNone(self.stop.marker)
 
@@ -243,7 +244,7 @@ class TestStopBar(unittest.TestCase):
             self.release_target()
             self.stop.update(self.sm, 1, 100.01)
             self.assertTrue(self.stop.marker.held)
-          self.set_lead(11., second)  # 5 m ego stop after the ordinary 6 m gap
+          self.set_lead(STOP_DISTANCE + 5., second)  # 5 m ego stop after the ordinary gap
           self.stop.update(self.sm, 1, 100.02)
           self.assertIsNone(self.stop.marker)
           # Lead loss alone cannot resurrect the old brake-held bar.
@@ -261,25 +262,25 @@ class TestStopBar(unittest.TestCase):
         self.sm['selfdriveState'].enabled = experimental
         self.sm['selfdriveState'].experimentalMode = experimental
         self.stop.reset()
-        self.set_lead(11.)
+        self.set_lead(STOP_DISTANCE + 5.)
         self.stop.update(self.sm, 1, 100.02)
         self.assertIsNone(self.stop.marker)
-        self.set_lead(12.)  # exactly 6 m is still inside the re-entry guard
+        self.set_lead(STOP_DISTANCE + 6.)  # exactly 6 m is still inside the re-entry guard
         self.stop.update(self.sm, 1, 100.02)
         self.assertIsNone(self.stop.marker)
-        self.set_lead(12.1)
+        self.set_lead(STOP_DISTANCE + 6.1)
         self.stop.update(self.sm, 1, 100.02)
         self.assertEqual(self.stop.marker.label, 'MODEL STOP')
 
   def test_held_position_is_checked_after_model_withdraws_its_stop(self):
     self.release_target()
     self.sm['modelV2'] = model(decel=0.)
-    self.set_lead(11.)  # held position 0 m; real-lead stop 5 m: 5 m overlap
+    self.set_lead(STOP_DISTANCE + 5.)  # held position 0 m; real-lead stop 5 m: 5 m overlap
     self.stop.update(self.sm, 1, 100.02)
     self.assertIsNone(self.stop.marker)
 
   def test_stale_lead_does_not_suppress_a_current_target(self):
-    self.set_lead(11.)
+    self.set_lead(STOP_DISTANCE + 5.)
     self.sm.valid['radarState'] = False
     self.stop.update(self.sm, 1, 100.02)
     self.assertIsNotNone(self.stop.marker)

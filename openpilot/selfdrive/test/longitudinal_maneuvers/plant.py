@@ -46,7 +46,8 @@ class Plant:
     self.rk = Ratekeeper(self.rate, print_delay_threshold=100.0)
     self.ts = 1. / self.rate
     time.sleep(0.1)
-    self.sm = messaging.SubMaster(['longitudinalPlan'])
+    services = ['radarState', 'controlsState', 'selfdriveState', 'carState', 'vehicleParameters', 'carControl', 'modelV2']
+    self.sm = messaging.SubMaster(services, ignore_avg_freq=services)
 
     from opendbc.car.honda.values import CAR
     from opendbc.car.honda.interface import CarInterface
@@ -120,21 +121,21 @@ class Plant:
     control.controlsState.longControlState = LongCtrlState.pid if self.enabled else LongCtrlState.off
     ss.selfdriveState.experimentalMode = self.e2e
     ss.selfdriveState.personality = self.personality
+    ss.selfdriveState.enabled = self.enabled
     control.controlsState.forceDecel = self.force_decel
     car_state.carState.vEgo = float(self.speed)
     car_state.carState.standstill = bool(self.speed < 0.01)
+    car_state.carState.gearShifter = 'drive'
     car_state.carState.vCruise = float(v_cruise * 3.6)
     car_control.carControl.orientationNED = [0., float(pitch), 0.]
+    car_control.carControl.longActive = self.enabled
 
     # ******** get controlsState messages for plotting ***
-    sm = {'radarState': radar.radarState,
-          'carState': car_state.carState,
-          'carControl': car_control.carControl,
-          'controlsState': control.controlsState,
-          'selfdriveState': ss.selfdriveState,
-          'vehicleParameters': lp.vehicleParameters,
-          'modelV2': model.modelV2}
-    self.planner.update(sm)
+    messages = [radar, car_state, car_control, control, ss, lp, model]
+    for msg in messages:
+      msg.valid = True
+    self.sm.update_msgs(time.monotonic(), [msg.as_reader() for msg in messages])
+    self.planner.update(self.sm)
     self.acceleration = self.planner.output_a_target
     if self.planner.output_should_stop:
       self.acceleration = min(-0.5, self.acceleration)

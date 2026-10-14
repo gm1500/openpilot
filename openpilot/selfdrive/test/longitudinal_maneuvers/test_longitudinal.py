@@ -10,6 +10,16 @@ from openpilot.selfdrive.test.longitudinal_maneuvers.maneuver import Maneuver
 def create_maneuvers(kwargs):
   maneuvers = [
     Maneuver(
+      'approach stopped car at 100kph, initial distance: 200m',
+      duration=40.,
+      initial_speed=100 / 3.6,
+      lead_relevancy=True,
+      initial_distance_lead=200.,
+      speed_lead_values=[0.],
+      breakpoints=[0.],
+      **kwargs,
+    ),
+    Maneuver(
       'approach stopped car at 25m/s, initial distance: 120m',
       duration=20.,
       initial_speed=25.,
