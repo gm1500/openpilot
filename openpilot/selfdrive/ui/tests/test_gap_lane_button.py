@@ -140,13 +140,26 @@ class TestGapLaneButton(unittest.TestCase):
     self.ui.set_lane_policy_enabled.assert_not_called()
     self.ui.params.put.assert_not_called()
 
-  def test_bar_count_lane_colour_and_thicker_geometry(self):
+  def test_bar_count_lane_colour_and_parallel_trapezoid_sides(self):
     for personality in (0, 1, 2, None):
       for lane in (False, True):
         with patch.object(rl, 'draw_circle'), patch.object(rl, 'draw_line_ex') as lines, \
-             patch.object(rl, 'draw_rectangle_rounded') as bars:
+             patch.object(rl, 'draw_triangle_strip') as bars:
           button.draw_gap_lane_icon(self.widget.rect, personality, lane)
         self.assertEqual(len(lines.call_args_list), 2)
         self.assertTrue(all(c.args[-1].g == (248 if lane else 110) for c in lines.call_args_list))
         self.assertEqual(sum(c.args[-1].g == 248 for c in bars.call_args_list), 0 if personality is None else personality + 1)
-        self.assertTrue(all(c.args[0].height > 192 * .065 for c in bars.call_args_list))
+        for bar in bars.call_args_list:
+          top_left, bottom_left, top_right, bottom_right = bar.args[0]
+          self.assertGreater(bottom_left.y - top_left.y, 192 * .065)
+          self.assertGreater(bottom_right.x - bottom_left.x, top_right.x - top_left.x)
+          insets = []
+          for (top, bottom), line in zip(((top_left, bottom_left), (top_right, bottom_right)), lines.call_args_list, strict=True):
+            lane_top, lane_bottom, thickness, _ = line.args
+            slope = (lane_bottom.x - lane_top.x) / (lane_bottom.y - lane_top.y)
+            self.assertAlmostEqual((bottom.x - top.x) / (bottom.y - top.y), slope, places=5)
+            for point in (top, bottom):
+              inset = abs(point.x - (lane_top.x + (point.y - lane_top.y) * slope))
+              self.assertGreater(inset, thickness / 2)
+              insets.append(inset)
+          self.assertAlmostEqual(min(insets), max(insets), places=4)

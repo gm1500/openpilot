@@ -565,8 +565,11 @@ class SelfdriveD:
   def step(self):
     CS = self.data_sample()
     if self.CP.brand == 'gm' and not self.CP.passive:
+      previous_lka_state = self.lane_policy_button.last_state
       lka_state = self.lane_policy_button.update(CS, self.params)
-      if lka_state is not None:
+      if previous_lka_state is None and self.lane_policy_button.last_state is not None:
+        cloudlog.event('gm_lka_button_baseline', rawState=self.lane_policy_button.last_state, policyApplied=False)
+      elif lka_state is not None:
         cloudlog.event('gm_lka_button_state', rawState=lka_state, lanePolicyEnabled=lka_state)
     self.update_events(CS)
     if not self.CP.passive and self.initialized:

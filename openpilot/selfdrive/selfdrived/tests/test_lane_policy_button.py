@@ -17,8 +17,22 @@ class TestLanePolicyButton(unittest.TestCase):
       setattr(self.cs, name, value)
     return self.button.update(self.cs, self.params)
 
-  def test_first_valid_state_and_both_transitions_select_policy(self):
-    for state in (False, True, False, True):
+  def test_first_valid_observation_only_establishes_baseline(self):
+    for state in (False, True):
+      with self.subTest(state=state):
+        self.button = LanePolicyButton()
+        self.assertIsNone(self.update(state))
+        self.params.put_bool.assert_not_called()
+
+  def test_constant_zero_does_not_turn_off_the_policy(self):
+    # The 34-second Sierra recording contains fresh frames but no bit change.
+    for _ in range(3500):
+      self.assertIsNone(self.update(False))
+    self.params.put_bool.assert_not_called()
+
+  def test_both_transitions_after_baseline_select_policy(self):
+    self.update(False)
+    for state in (True, False, True):
       self.assertEqual(self.update(state), state)
       self.params.put_bool.assert_called_with('LanePolicyEnabled', state)
 

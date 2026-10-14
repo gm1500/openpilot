@@ -10,6 +10,12 @@ from openpilot.system.ui.widgets import Widget, device
 LANE_GREEN = rl.Color(13, 248, 122, 255)
 ICON_GREY = rl.Color(110, 110, 110, 255)
 ICON_BACKGROUND = rl.Color(0, 0, 0, 166)
+LANE_TOP = .23
+LANE_BOTTOM = .77
+
+
+def _lane_half_width(y):
+  return .28 + (y - LANE_TOP) * (.34 - .28) / (LANE_BOTTOM - LANE_TOP)
 
 
 def draw_gap_lane_icon(rect, personality, lane_enabled, pressed=False):
@@ -19,16 +25,23 @@ def draw_gap_lane_icon(rect, personality, lane_enabled, pressed=False):
   center_x, center_y = rect.x + rect.width / 2, rect.y + rect.height / 2
   rl.draw_circle(int(center_x), int(center_y), rect.width / 2, ICON_BACKGROUND)
   for side in (-1, 1):
-    rl.draw_line_ex(rl.Vector2(center_x + side * rect.width * .28, center_y - rect.height * .27),
-                    rl.Vector2(center_x + side * rect.width * .34, center_y + rect.height * .27),
+    rl.draw_line_ex(rl.Vector2(center_x + side * rect.width * _lane_half_width(LANE_TOP), rect.y + rect.height * LANE_TOP),
+                    rl.Vector2(center_x + side * rect.width * _lane_half_width(LANE_BOTTOM), rect.y + rect.height * LANE_BOTTOM),
                     rect.width * .035, green if lane_enabled else grey)
 
   # Bottom-up: aggressive=1, standard=2, relaxed=3. Lane state is independent.
   bars = personality + 1 if personality in (0, 1, 2) else 0
-  for index, width in enumerate((.36, .42, .48)):
-    bar = rl.Rectangle(rect.x + rect.width * (1 - width) / 2,
-                       rect.y + rect.height * (.28 + .17 * index), rect.width * width, rect.height * .095)
-    rl.draw_rectangle_rounded(bar, .6, 8, green if index >= 3 - bars else grey)
+  for index in range(3):
+    top, bottom = .28 + .17 * index, .375 + .17 * index
+    # Evaluate the same lane profile at BOTH edges of each bar. A constant
+    # inset makes each trapezoid's sides parallel to the adjacent lane lines.
+    top_half_width = rect.width * (_lane_half_width(top) - .055)
+    bottom_half_width = rect.width * (_lane_half_width(bottom) - .055)
+    points = [rl.Vector2(center_x - top_half_width, rect.y + rect.height * top),
+              rl.Vector2(center_x - bottom_half_width, rect.y + rect.height * bottom),
+              rl.Vector2(center_x + top_half_width, rect.y + rect.height * top),
+              rl.Vector2(center_x + bottom_half_width, rect.y + rect.height * bottom)]
+    rl.draw_triangle_strip(points, len(points), green if index >= 3 - bars else grey)
 
 
 class GapLaneButton(Widget):
