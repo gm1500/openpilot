@@ -159,6 +159,7 @@ class MouseState:
     self._scale = scale
     self._events: deque[MouseEvent] = deque(maxlen=MOUSE_THREAD_RATE)  # bound event list
     self._prev_mouse_event: list[MouseEvent | None] = [None] * MAX_TOUCH_SLOTS
+    self._hold_snapshot = (0., (False,) * MAX_TOUCH_SLOTS)
 
     self._rk = Ratekeeper(MOUSE_THREAD_RATE, print_delay_threshold=None)
     self._lock = threading.Lock()
@@ -170,6 +171,11 @@ class MouseState:
       events = list(self._events)
       self._events.clear()
     return events
+
+  def get_hold_snapshot(self) -> tuple[float, tuple[bool, ...]]:
+    """Input-thread heartbeat and current down state, including stationary touches."""
+    with self._lock:
+      return self._hold_snapshot
 
   def start(self):
     self._exit_event.clear()
@@ -193,6 +199,7 @@ class MouseState:
     #  Polling at 140Hz with time.monotonic() causes timing jitter that makes scroll
     #  velocity oscillate (alternating high/low). Real timestamps would also let us
     #  detect swipe-stop-lift via event gaps instead of the fragile decel heuristic.
+    held = []
     for slot in range(MAX_TOUCH_SLOTS):
       mouse_pos = rl.get_touch_position(slot)
       x = mouse_pos.x / self._scale if self._scale != 1.0 else mouse_pos.x
@@ -205,12 +212,15 @@ class MouseState:
         rl.is_mouse_button_down(slot),
         time.monotonic(),
       )
+      held.append(ev.left_down)
       # Only add changes
       prev = self._prev_mouse_event[slot]
       if prev is None or ev[:-1] != prev[:-1]:
         with self._lock:
           self._events.append(ev)
         self._prev_mouse_event[slot] = ev
+    with self._lock:
+      self._hold_snapshot = (time.monotonic(), tuple(held))
 
 
 class GuiApplication:
@@ -266,6 +276,9 @@ class GuiApplication:
   @property
   def frame(self):
     return self._frame
+
+  def touch_hold_snapshot(self) -> tuple[float, tuple[bool, ...]]:
+    return self._mouse.get_hold_snapshot()
 
   def set_show_touches(self, show: bool):
     self._show_touches = show

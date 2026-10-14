@@ -4,6 +4,7 @@ from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
 from openpilot.selfdrive.ui.onroad.lane_policy_icon import LanePolicyIcon
 from openpilot.selfdrive.ui.onroad.speed_limit import SpeedLimitButton
+from openpilot.selfdrive.ui.onroad.resume_set_buttons import ResumeSetButtons
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -61,6 +62,7 @@ class HudRenderer(Widget):
     self._exp_button: ExpButton = ExpButton(UI_CONFIG.button_size, UI_CONFIG.wheel_icon_size)
     self._speed_limit_button = self._child(SpeedLimitButton())
     self._lane_policy_icon: LanePolicyIcon = self._child(LanePolicyIcon(92))
+    self._resume_set_buttons = self._child(ResumeSetButtons())
 
   def _update_state(self) -> None:
     """Update HUD state based on car state and controls state."""
@@ -112,9 +114,13 @@ class HudRenderer(Widget):
     lane_icon_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
     lane_icon_y = rect.y + rect.height - UI_CONFIG.border_size - UI_CONFIG.button_size
     self._lane_policy_icon.render(rl.Rectangle(lane_icon_x, lane_icon_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
+    test_width = min(820., rect.width * .52)
+    self._resume_set_buttons.render(rl.Rectangle(rect.x + (rect.width - test_width) / 2,
+                                                rect.y + rect.height - 240., test_width, 210.))
 
   def user_interacting(self) -> bool:
-    return self._exp_button.is_pressed or self._lane_policy_icon.is_pressed or self._speed_limit_button.is_pressed
+    return (self._exp_button.is_pressed or self._lane_policy_icon.is_pressed or self._speed_limit_button.is_pressed or
+            self._resume_set_buttons.is_pressed or bool(self._resume_set_buttons.gesture.button))
 
   def _draw_set_speed(self, rect: rl.Rectangle) -> None:
     set_color = COLORS.GREY

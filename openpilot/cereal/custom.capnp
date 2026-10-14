@@ -150,7 +150,26 @@ struct SentryRecorderState @0x80ae746ee2596b11 {
   previewCamera @5 :UInt8;
 }
 
-struct CustomReserved5 @0xa5cd762cd951a455 {
+struct ResumeSetTestRequest @0xa5cd762cd951a455 {
+  requestId @0 :UInt64; # initial monotonic press time, ns
+  held @1 :Bool;
+  button @2 :UInt8; # 2 Resume or 3 Set; mutually exclusive
+}
+
+struct ResumeSetTestState {
+  supported @0 :Bool;
+  ready @1 :Bool;
+  active @2 :Bool;
+  holding @3 :Bool;
+  requestId @4 :UInt64;
+  button @5 :UInt8;
+  remaining @6 :Float32;
+  distance @7 :Float32;
+  reason @8 :Text;
+  cruiseState @9 :UInt8;
+  cruiseRecovered @10 :Bool;
+  brakeHeld @11 :Bool; # measured stationary plus fresh positive brake command, not pressure feedback
+  buttonCount @12 :UInt32; # attempted outgoing CAN frames; see Panda logs for acceptance
 }
 
 struct CustomReserved6 @0xf98d843bfd7004a3 {

@@ -881,6 +881,7 @@ struct ControlsState @0x97ff69c53601abf1 {
   curvature @37 :Float32;  # path curvature from vehicle model
   desiredCurvature @61 :Float32;  # lag adjusted curvatures used by lateral controllers
   forceDecel @51 :Bool;
+  resumeSetTest @67 :Custom.ResumeSetTestState;
 
   lateralControlState :union {
     pidState @53 :LateralPIDState;
@@ -2652,7 +2653,7 @@ struct Event {
     mapTrafficControl @109 :Custom.MapTrafficControl;
     sentryState @110 :Custom.SentryState;
     sentryRecorderState @111 :Custom.SentryRecorderState;
-    customReserved5 @112 :Custom.CustomReserved5;
+    resumeSetTestRequest @112 :Custom.ResumeSetTestRequest;
     customReserved6 @113 :Custom.CustomReserved6;
     customReserved7 @114 :Custom.CustomReserved7;
     customReserved8 @115 :Custom.CustomReserved8;
