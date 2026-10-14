@@ -10,10 +10,11 @@ from openpilot.common.hardware import HARDWARE
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
-from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH, CAMERA_WARMUP_SECONDS, RECORDING_CAMERA_MASK, MOTION_CAMERAS
+from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH, CAMERA_WARMUP_SECONDS, RECORDING_CAMERA_MASK, MOTION_CAMERAS, HIGH_RISK
 from openpilot.system.sentry.clock import SentryClock
 from openpilot.system.sentry.location import vehicle_identity, parked_location, gps_location
 from openpilot.system.sentry.motion import MotionDetector, Motion, PreviewSelector
+from openpilot.system.sentry.sensors import SensorActivity
 
 
 def recent(sm, service, now, timeout=2.):
@@ -23,6 +24,8 @@ def recent(sm, service, now, timeout=2.):
 def inactive_reason(params, sm, now, device_type):
   if not setting(params, 'SentryEnabled'):
     return 'Off'
+  if params.get_bool('SentryOffThisDrive'):
+    return 'Off for this drive'
   if device_type != 'tizi':
     return 'Requires comma 3X'
   if any(params.get_bool(k) for k in ('DoShutdown', 'DoReboot', 'DoUninstall')):
@@ -50,7 +53,7 @@ class CameraMotion:
     self.last_received = 0.
     self.warm_until = 0.
 
-  def sample(self, now, sensitivity, armed):
+  def sample(self, now, sensitivity, armed, detect=True):
     if not self.client.is_connected():
       if not self.client.connect(False):
         return Motion()
@@ -70,6 +73,8 @@ class CameraMotion:
       self.warm_until = now+CAMERA_WARMUP_SECONDS
     self.last_frame = self.client.frame_id
     self.last_received = now
+    if not detect:
+      return Motion()
     image = np.frombuffer(buf.data, dtype=np.uint8, count=self.client.stride*self.client.height)
     image = image.reshape(self.client.height, self.client.stride)[:, :self.client.width]
     sample = image[self.sample_indices].reshape(80, 4, 128, 4).mean(axis=(1, 3), dtype=np.float32)
@@ -88,6 +93,8 @@ def main():
   arm_complete = False
   location = None
   cameras = {}
+  sensors = None
+  previous_risk = None
   cooldown = False
   record_until = 0.
   trigger_camera = 2
@@ -113,6 +120,7 @@ def main():
       best, motion_camera = Motion(), 2
       triggered = False
       if not session:
+        sensors = None
         preview.reset()
         off_since, location, cameras = None, None, {}
         ready_since = None
@@ -179,17 +187,29 @@ def main():
             gps_finished = location is not None or elapsed >= 90.
             gps_request = not gps_finished
         if capture:
+          risk = setting(params, 'SentryRiskMode')
+          if risk != previous_risk:
+            cameras.clear()
+            preview.reset()
+            previous_risk = risk
+          if sensors is None:
+            sensors = SensorActivity()
           arm_delay = setting(params, 'SentryArmDelay')
           armed = arm_complete or ready_since is not None and now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
           results = {}
           for stream in MOTION_CAMERAS:
             if stream not in cameras:
               cameras[stream] = CameraMotion(stream)
-            result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'), armed)
+            if risk == HIGH_RISK:
+              result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'), armed)
+            else:
+              result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'), armed, detect=False)
             results[stream] = result
             triggered |= result.triggered
             if result.active and (not best.active or result.score > best.score):
               best, motion_camera = result, stream
+          sensor_trigger = sensors.sample(now, armed)
+          sensors_ready = sensors.ready(now)
           ready = sum(0 <= now-camera.last_received < 1. for camera in cameras.values())
           recorder_fresh = recent(sm, 'sentryRecorderState', now)
           recorder_ready = recorder_fresh and sm['sentryRecorderState'].bufferBytes > 0
@@ -197,6 +217,8 @@ def main():
             phase = f'Waiting for cameras ({ready}/{len(cameras)})'
             if not arm_complete:
               ready_since = None
+          elif not sensors_ready and risk != HIGH_RISK:
+            phase = 'Waiting for sound / motion sensors'
           elif not recorder_fresh:
             phase = 'Starting recorder'
           elif not recorder_ready:
@@ -226,6 +248,7 @@ def main():
           if not armed:
             best = Motion()  # Exposure ramp cannot trigger an event or the eye.
           can_trigger = armed and (recorder_ready or record_until > now)
+          triggered |= sensor_trigger
           if not can_trigger:
             triggered = False
           manual = params.get_bool('SentryManualTrigger')
@@ -239,6 +262,7 @@ def main():
             phase = 'Recording'
         else:
           cameras.clear()
+          sensors = None
           preview.reset()
           ready_since = None
           arm_complete = False
@@ -258,7 +282,8 @@ def main():
       clock.update(time_location, now)
       zone_name, utc_offset = clock.snapshot(wall)
       write_runtime({'monoTime': now, 'session': bool(session), 'capture': capture, 'gps': gps_request,
-                     'location': location, 'phase': phase, 'parkingStartedAt': parking_since, 'parkingLimitReached': parking_expired})
+                     'location': location, 'phase': phase, 'riskMode': setting(params, 'SentryRiskMode'),
+                     'parkingStartedAt': parking_since, 'parkingLimitReached': parking_expired})
       msg = messaging.new_message('sentryState', valid=True)
       state = msg.sentryState
       state.sessionActive, state.capture, state.phase = bool(session), capture, phase

@@ -6,9 +6,14 @@ import pytest
 from opendbc.car.structs import car
 from openpilot.cereal import log
 from openpilot.system.sentry import sentryd
-from openpilot.system.sentry.config import DEFAULTS, CAMERA_WARMUP_SECONDS
+from openpilot.system.sentry.config import DEFAULTS, CAMERA_WARMUP_SECONDS, HIGH_RISK
 from openpilot.system.sentry.location import vehicle_identity
 from openpilot.system.sentry.motion import Motion, PreviewSelector
+
+
+@pytest.fixture(autouse=True)
+def quiet_sensors(monkeypatch):
+  monkeypatch.setattr(sentryd, 'SensorActivity', lambda: SimpleNamespace(sample=lambda *args: False, ready=lambda now: True))
 
 
 @pytest.mark.parametrize('first,second', [(1, 2), (2, 1)])
@@ -202,7 +207,7 @@ def test_quiet_eye_and_later_lens_extend_event_without_rearming(monkeypatch, tmp
     def remove(self, key):
       self.pop(key, None)
 
-  params = Params(DEFAULTS | {'IsOffroad': True, 'SentryArmDelay': 30, 'SentryPostSeconds': post_seconds})
+  params = Params(DEFAULTS | {'SentryRiskMode': HIGH_RISK, 'IsOffroad': True, 'SentryArmDelay': 30, 'SentryPostSeconds': post_seconds})
   clock, sent, samples = [100.], {}, []
   first, second = 145., 145.+post_seconds-3.
   end = second+1.+post_seconds
@@ -297,7 +302,7 @@ def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp
     def remove(self, key):
       self.pop(key, None)
 
-  params = Params(DEFAULTS | {'SentryEnabled': False, 'IsOffroad': True, 'CarParamsPersistent': CP.to_bytes(),
+  params = Params(DEFAULTS | {'SentryRiskMode': HIGH_RISK, 'SentryEnabled': False, 'IsOffroad': True, 'CarParamsPersistent': CP.to_bytes(),
                             'MapParkedPosition': checkpoint if cached else None})
   runtime = []
   sent = []
@@ -392,7 +397,7 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
     def remove(self, key):
       self.pop(key, None)
 
-  params = Params(DEFAULTS | {'IsOffroad': True, 'SentryArmDelay': arm_delay, 'SentryPostSeconds': 15})
+  params = Params(DEFAULTS | {'SentryRiskMode': HIGH_RISK, 'IsOffroad': True, 'SentryArmDelay': arm_delay, 'SentryPostSeconds': 15})
   clock = [100.]
   ready_at = 145.
   arm_at = ready_at+CAMERA_WARMUP_SECONDS
@@ -510,7 +515,7 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
 
 
 @pytest.mark.parametrize('blocker,expected', [
-  ('disabled', 'Off'), ('hardware', 'Requires comma 3X'), ('shutdown', 'Shutting down'),
+  ('disabled', 'Off'), ('drive_off', 'Off for this drive'), ('hardware', 'Requires comma 3X'), ('shutdown', 'Shutting down'),
   ('panda', 'Waiting for panda'), ('unknown', 'Waiting for panda'),
   ('ignition', 'Waiting for ignition off'), ('device', 'Waiting for device state'),
   ('started', 'Waiting for offroad'), ('offroad', 'Waiting for offroad'), ('none', ''),
@@ -523,7 +528,8 @@ def test_activation_blockers_are_visible(blocker, expected):
   class Params(dict):
     get_bool = dict.get
 
-  params = Params(SentryEnabled=blocker != 'disabled', IsOffroad=blocker != 'offroad', DoShutdown=blocker == 'shutdown')
+  params = Params(SentryEnabled=blocker != 'disabled', SentryOffThisDrive=blocker == 'drive_off',
+                  IsOffroad=blocker != 'offroad', DoShutdown=blocker == 'shutdown')
   sm = State(deviceState=SimpleNamespace(started=blocker == 'started'),
              pandaStates=[SimpleNamespace(pandaType=log.PandaState.PandaType.unknown if blocker == 'unknown' else log.PandaState.PandaType.tres,
                                           ignitionLine=blocker == 'ignition', ignitionCan=False)])
@@ -539,7 +545,7 @@ def test_cooling_resumes_only_before_parking_expiry_and_detection_uses_wide_came
     def remove(self, key):
       self.pop(key, None)
 
-  params = Params(DEFAULTS | {'IsOffroad': True, 'SentryMaxHours': 1,
+  params = Params(DEFAULTS | {'SentryRiskMode': HIGH_RISK, 'IsOffroad': True, 'SentryMaxHours': 1,
                             'SentryShutdownOnTimeLimit': shutdown, 'SentryShutdownOnOverheat': shutdown})
   # Capture, heat pause, a bad reading, recovery, then another pause extending
   # through the parking limit. Neither cooling nor a health/enable gap renews it.
@@ -622,3 +628,67 @@ def test_cooling_resumes_only_before_parking_expiry_and_detection_uses_wide_came
   assert runtime[3713]['capture']
   assert set(opened) == {1, 2}  # Narrow is recorded, never opened by the detector.
   assert all(state['cameraMask'] == 0b111 for state in sent.values())
+
+
+@pytest.mark.parametrize('risk,sound,camera,expected', [(0, False, True, False), (0, True, False, True),
+                                                      (1, False, True, True), (1, True, False, True)])
+def test_risk_mode_trigger_sources_and_prebuffer(monkeypatch, tmp_path, risk, sound, camera, expected):
+  class Params(dict):
+    get_bool = dict.get
+    def remove(self, key):
+      self.pop(key, None)
+
+  params = Params(DEFAULTS | {'IsOffroad': True, 'SentryRiskMode': risk, 'SentryArmDelay': 15})
+  clock, sent, detects = [100.], {}, []
+
+  class SubMaster(dict):
+    def __init__(self, services):
+      super().__init__(deviceState=SimpleNamespace(started=False, maxTempC=50.),
+                       pandaStates=[SimpleNamespace(pandaType=log.PandaState.PandaType.tres, ignitionLine=False, ignitionCan=False)],
+                       peripheralState=SimpleNamespace(voltage=12000),
+                       sentryRecorderState=SimpleNamespace(recording=False, error='', bufferBytes=1000),
+                       gpsLocation=SimpleNamespace(hasFix=False), gpsLocationExternal=SimpleNamespace(hasFix=False))
+      self.valid = {s: not s.startswith('gps') for s in services}
+      self.recv_time, self.logMonoTime = {}, {}
+    def update(self, timeout):
+      self.recv_time = dict.fromkeys(self, clock[0])
+      self.logMonoTime = dict.fromkeys(self, int(clock[0]*1e9))
+
+  class Camera:
+    warm_until = 0.
+    last_received = 0.
+    def sample(self, now, sensitivity, armed, detect=True):
+      self.last_received = now
+      detects.append(detect)
+      return Motion(active=detect and camera, triggered=armed and detect and camera)
+
+  class Finished(Exception):
+    pass
+
+  class Ratekeeper:
+    def __init__(self, *args, **kwargs):
+      pass
+    def keep_time(self):
+      clock[0] = round(clock[0]+.2, 1)
+      if clock[0] > 132.:
+        raise Finished
+
+  monkeypatch.setattr(sentryd.time, 'monotonic', lambda: clock[0])
+  monkeypatch.setattr(sentryd, 'Params', lambda: params)
+  monkeypatch.setattr(sentryd, 'SentryClock', lambda p: SimpleNamespace(update=lambda *args: None, snapshot=lambda wall: ('', 0)))
+  monkeypatch.setattr(sentryd, 'HARDWARE', SimpleNamespace(get_device_type=lambda: 'tizi'))
+  monkeypatch.setattr(sentryd.messaging, 'SubMaster', SubMaster)
+  monkeypatch.setattr(sentryd.messaging, 'PubMaster',
+                      lambda services: SimpleNamespace(send=lambda service, msg: sent.update({clock[0]: msg.to_dict()['sentryState']})))
+  monkeypatch.setattr(sentryd, 'CameraMotion', lambda stream: Camera())
+  monkeypatch.setattr(sentryd, 'SensorActivity',
+                      lambda: SimpleNamespace(sample=lambda now, armed: armed and sound, ready=lambda now: True))
+  monkeypatch.setattr(sentryd, 'Ratekeeper', Ratekeeper)
+  monkeypatch.setattr(sentryd, 'write_runtime', lambda state: None)
+  monkeypatch.setattr(sentryd, 'RUNTIME_PATH', tmp_path/'runtime.json')
+  with pytest.raises(Finished):
+    sentryd.main()
+  assert sent[105.]['capture']  # Buffer runs before arming in either mode.
+  assert sent[110.]['recordUntilMonoTime'] == 0
+  assert (sent[130.]['recordUntilMonoTime'] > 130e9) == expected
+  assert all(d == bool(risk) for d in detects)

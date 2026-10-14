@@ -7,6 +7,9 @@
 
 inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SentryEnabled", {PERSISTENT, BOOL, "1"}},
+    {"SentryRiskMode", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION | CLEAR_ON_OFFROAD_TRANSITION, INT, "0"}},
+    {"SentryOffThisDrive", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
+    {"SentryModePrompted", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
     {"SentrySensitivity", {PERSISTENT, INT, "75"}},
     {"SentryArmDelay", {PERSISTENT, INT, "30"}},
     {"SentryPreSeconds", {PERSISTENT, INT, "60"}},

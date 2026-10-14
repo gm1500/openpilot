@@ -92,6 +92,20 @@ class SentryDurationButtons(MultipleButtonAction):
       self.params.put(self.key, DURATION_PRESETS[index], block=True)
 
 
+class SentryModeButtons(MultipleButtonAction):
+  def __init__(self, params):
+    super().__init__(['Low Risk', 'High Risk'], button_width=260)
+    self.params = params
+
+  def is_button_selected(self, index):
+    return setting(self.params, 'SentryRiskMode') == index
+
+  def select_button(self, index):
+    if self.enabled:
+      self.params.put('SentryRiskMode', index, block=True)
+      self.params.put_bool('SentryOffThisDrive', False, block=True)
+
+
 class SentryLayout(Widget):
   def __init__(self):
     super().__init__()
@@ -109,6 +123,9 @@ class SentryLayout(Widget):
     items = [
       self._stop_button,
       self._enable_toggle,
+      ListItem('Risk mode', description='Low: sound and physical movement. High: also camera motion. ' +
+               'Both keep the pre-event video buffer. Defaults to Low Risk after each drive.',
+               action_item=SentryModeButtons(self.params)),
       ListItem('Arming delay', description=f'Starts after {CAMERA_WARMUP_SECONDS:g} seconds of camera warmup. ' +
                'Footage buffers throughout; motion saves and the eye wait until both stages finish.',
                action_item=SentryDurationButtons(self.params, 'SentryArmDelay')),
@@ -137,6 +154,8 @@ class SentryLayout(Widget):
     # Settings persist in any vehicle state; sentryd gates parked capture.
     # Persist the command before refreshing the switch or evaluating process gates.
     self.params.put_bool('SentryEnabled', enabled, block=True)
+    if enabled:
+      self.params.put_bool('SentryOffThisDrive', False, block=True)
     if not enabled:
       self.params.remove('SentryManualTrigger')
       device.sentry_motion_until = 0.

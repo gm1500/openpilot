@@ -153,7 +153,8 @@ class UIState:
 
   @property
   def sentry_active(self) -> bool:
-    return (self.params.get_bool('SentryEnabled') and not self.ignition and not self.started and self.sm.valid['sentryState'] and
+    return (self.params.get_bool('SentryEnabled') and not self.params.get_bool('SentryOffThisDrive') and
+            not self.ignition and not self.started and self.sm.valid['sentryState'] and
             0 <= time.monotonic()-self.sm.recv_time['sentryState'] < 2. and self.sm['sentryState'].capture)
 
   @property
@@ -364,6 +365,7 @@ class Device:
     self._prev_timed_out = False
     self._awake: bool = True
     self.sentry_motion_until = 0.
+    self.sentry_prompt_visible = False
 
     self._offroad_brightness: int = BACKLIGHT_OFFROAD
     self._last_brightness: int = 0
@@ -374,7 +376,7 @@ class Device:
 
   @property
   def sentry_screen(self) -> bool:
-    return ui_state.sentry_active and time.monotonic() > self._interaction_time
+    return not self.sentry_prompt_visible and ui_state.sentry_active and time.monotonic() > self._interaction_time
 
   @property
   def sentry_eye_visible(self) -> bool:
@@ -474,7 +476,7 @@ class Device:
       self.sentry_motion_until = 0.
     elif ui_state.sm['sentryState'].motion and ui_state.sm['sentryState'].motionCamera in (1, 2):
       self.sentry_motion_until = time.monotonic()+1.
-    self._set_awake(ui_state.ignition or not interaction_timeout or self.sentry_eye_visible or PC)
+    self._set_awake(ui_state.ignition or not interaction_timeout or self.sentry_eye_visible or self.sentry_prompt_visible or PC)
 
   def _set_awake(self, on: bool):
     if on != self._awake:

@@ -61,9 +61,10 @@ git lfs pull
 rm -f .overlay_init
 git log -1 --oneline
 
-echo "[BUILD] Rebuilding the Sentry recorder..."
+echo "[BUILD] Rebuilding the Sentry recorder and parameter library..."
 rm -f openpilot/system/loggerd/sentry_loggerd openpilot/system/loggerd/sentry_loggerd.o
-CCACHE_DISABLE=1 scons --cache-disable -j2 openpilot/system/loggerd/sentry_loggerd
+CCACHE_DISABLE=1 scons --cache-disable -j2 openpilot/common/libparams_c.so openpilot/system/loggerd/sentry_loggerd
+test -s openpilot/common/libparams_c.so
 test -x openpilot/system/loggerd/sentry_loggerd
 
 # Use the branch's launch requirement, not a nonexistent manifest version field.

@@ -12,7 +12,9 @@ RECORDING_CAMERA_MASK = 0b111
 MOTION_CAMERAS = (2, 1)  # Front wide, cabin wide (VisionStreamType).
 DURATION_PRESETS = (15, 30, 60)
 DURATION_KEYS = ('SentryArmDelay', 'SentryPreSeconds', 'SentryPostSeconds')
+LOW_RISK, HIGH_RISK = 0, 1
 DEFAULTS = {
+  'SentryRiskMode': LOW_RISK,
   'SentryEnabled': True, 'SentrySensitivity': 75, 'SentryArmDelay': 30,
   'SentryPreSeconds': 60, 'SentryPostSeconds': 60,
   'SentryCutoffVoltage': 11.8, 'SentryMaxHours': 4, 'SentryShutdownOnTimeLimit': True,
@@ -20,6 +22,7 @@ DEFAULTS = {
   'SentryWatermark': True,
 }
 RANGES = {
+  'SentryRiskMode': (LOW_RISK, HIGH_RISK),
   'SentrySensitivity': (1, 100), 'SentryCutoffVoltage': (11.0, 11.8),
   'SentryMaxHours': (1, 12), 'SentryMaxTemp': (55, 75),
 }
@@ -63,8 +66,8 @@ def write_runtime(state):
 
 
 def sentry_capture_requested(started, params, CP):
-  return not started and setting(params, 'SentryEnabled') and bool(read_runtime().get('capture'))
+  return not started and setting(params, 'SentryEnabled') and not params.get_bool('SentryOffThisDrive') and bool(read_runtime().get('capture'))
 
 
 def sentry_gps_requested(started, params, CP):
-  return not started and setting(params, 'SentryEnabled') and bool(read_runtime().get('gps'))
+  return not started and setting(params, 'SentryEnabled') and not params.get_bool('SentryOffThisDrive') and bool(read_runtime().get('gps'))

@@ -15,6 +15,40 @@ buffer counter confirms capture. The voltage row shows the current vehicle suppl
 This implementation is ready for parked hardware evaluation; comma 3X encoding,
 thermal behavior, battery draw, and Connect indexing/playback still require device validation.
 
+## Parking risk choice
+
+Each drive ends with a full-screen parking overlay on comma 3X. The top left shows
+the controller's camera warmup/arming countdown; the top right X dismisses it without
+changing the default Low Risk choice. Low Risk (yellow) and High Risk (red) split the
+upper selection area. The green lower third turns Sentry off for this drive only.
+Every choice returns to the regular offroad UI. The prompt also closes when arming
+finishes, stays awake while visible, and cannot intercept the driving screen.
+An explicit global Enable Sentry/STOP setting is still respected.
+
+- Low Risk saves events from sudden sound changes or accelerometer/gyroscope activity.
+  Camera motion analysis is skipped, but all three camera buffers remain active so
+  pre-event footage is preserved. The preview defaults to the front wide camera.
+- High Risk adds the existing two-wide-camera motion detector and preview handoffs.
+  The red eye continues to follow wide-camera motion; Low Risk has no visual tracking.
+- Sound is compared with a learned ambient level (12 dB rise, using micd's uncalibrated
+  readings); IMU changes are compared with a learned gravity/bias vector (0.6 m/s² or
+  0.08 rad/s). Moderate hits need short confirmation, stronger hits can trigger immediately,
+  and bursts are debounced for two seconds. Each input settles for three seconds and
+  relearns after missing data. These initial thresholds require parked-device tuning.
+- The existing micd and sensord processes run during parked capture; no new microphone
+  recorder is added. Sentry consumes sound levels, not raw audio. It drains queued IMU
+  samples to avoid missing a short impact between controller ticks.
+- Both modes use the same camera warmup, arming delay, pre/post-event buffer, route,
+  bookmark, thermal, battery and parking-time rules. Mode selection does not restart
+  arming or extend the parking budget. Risk mode is also available immediately below
+  Enable Sentry in settings. Choosing a mode there clears the temporary off override.
+- Low Risk, the temporary off override and the prompt acknowledgment reset for the
+  next drive; manager startup also resets them. Permanent disabling stays permanent.
+
+The native parameter table changed: update and rebuild before restarting UI/manager.
+The standard Sentry updater explicitly rebuilds both the recorder and Python parameter library,
+then reboots after success. No panda changes are needed.
+
 ## Behavior
 
 - Requires a comma 3X, a recent valid panda/device state, ignition off and `IsOffroad`.
@@ -365,7 +399,7 @@ through instantaneous power loss.
 | Red eye | On |
 | Video watermark | On: local timestamp with UTC offset, camera name and known parking coordinates |
 
-The row order is Sentry status/STOP, Enable Sentry, Arming delay, Pre-event buffer,
+The row order is Sentry status/STOP, Enable Sentry, Risk mode, Arming delay, Pre-event buffer,
 Record after motion stops, Motion sensitivity, Battery cutoff, Maximum parked time,
 Pause capture above, Red eye, Video watermark, then Buffered footage and Current time.
 Sensitivity is the first slider. Battery cutoff includes the current voltage inline; stale

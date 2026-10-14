@@ -42,10 +42,13 @@ elif name == 'pgrep':
 elif name == 'scons':
   if stage == 'build':
     sys.exit(1)
-  target = pathlib.Path(args[-1])
-  target.parent.mkdir(parents=True, exist_ok=True)
-  target.write_text('rebuilt')
-  target.chmod(0o755)
+  for arg in args:
+    if not arg.startswith('openpilot/') or (stage == 'params_build' and arg.endswith('libparams_c.so')):
+      continue
+    target = pathlib.Path(arg)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('rebuilt')
+    target.chmod(0o755)
 elif name == 'python':
   if args[0] == '-':
     os.execv(sys.executable, [sys.executable, *args])
@@ -87,7 +90,7 @@ class Params:
   return run, tmp_path
 
 
-@pytest.mark.parametrize('stage', ['branch', 'dirty', 'onroad', 'missing_offroad', 'fetch', 'merge', 'submodules', 'lfs', 'build', 'agnos'])
+@pytest.mark.parametrize('stage', ['branch', 'dirty', 'onroad', 'missing_offroad', 'fetch', 'merge', 'submodules', 'lfs', 'build', 'params_build', 'agnos'])
 def test_update_failure_never_reboots(updater, stage):
   run, _ = updater
   result, calls = run(FAIL_STAGE=stage)
@@ -110,6 +113,8 @@ def test_success_builds_before_os_swap_and_reboot(updater, current_os, enabled, 
   assert ['git', 'fetch', '--no-tags', 'origin', f'refs/heads/{branch}:refs/remotes/origin/{branch}'] in calls
   assert ['git', 'merge', '--ff-only', f'refs/remotes/origin/{branch}'] in calls
   build = next(i for i, c in enumerate(calls) if c[0] == 'scons')
+  assert 'openpilot/common/libparams_c.so' in calls[build]
+  assert 'openpilot/system/loggerd/sentry_loggerd' in calls[build]
   restore = max(i for i, c in enumerate(calls) if c[0] == 'param')
   assert calls[restore] == ['param', 'SentryEnabled', enabled == '1']
   assert build < restore < calls.index(['sudo', 'reboot'])

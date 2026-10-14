@@ -583,7 +583,7 @@ def test_settings_remain_editable_in_all_vehicle_states(monkeypatch, tmp_path, s
   monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*20, 40))
   layout = ui.SentryLayout()
   assert [row.title for row in layout.scroller._items] == [
-    'Sentry', 'Enable Sentry', 'Arming delay', 'Pre-event buffer', 'Record after motion stops',
+    'Sentry', 'Enable Sentry', 'Risk mode', 'Arming delay', 'Pre-event buffer', 'Record after motion stops',
     'Motion sensitivity', 'Battery cutoff', 'Maximum parked time', 'Pause capture above',
     'Red eye', 'Video watermark', 'Buffered footage', 'Current time',
   ]
@@ -689,6 +689,14 @@ def test_process_gates_do_not_start_driving_controls(monkeypatch):
   assert config.sentry_capture_requested(False, params, None)
   assert not config.sentry_capture_requested(True, params, None)
   assert config.sentry_gps_requested(False, params, None)
+  for name in ('micd', 'sensord'):
+    assert processes.managed_processes[name].should_run(False, params, SimpleNamespace(notCar=False))
+  params['SentryOffThisDrive'] = True
+  assert not config.sentry_capture_requested(False, params, None)
+  assert not config.sentry_gps_requested(False, params, None)
+  for name in ('micd', 'sensord'):
+    assert not processes.managed_processes[name].should_run(False, params, SimpleNamespace(notCar=False))
+  params['SentryOffThisDrive'] = False
   params['SentryEnabled'] = False
   # The master switch overrides a capture/GPS lease even before sentryd updates it.
   assert not config.sentry_capture_requested(False, params, None)
