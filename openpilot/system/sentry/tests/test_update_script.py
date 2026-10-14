@@ -65,32 +65,53 @@ elif name == 'sudo':
   params.parent.mkdir(parents=True)
   params.write_text('''
 import json, os
+from pathlib import Path
+class UnknownKeyName(Exception):
+  pass
 class Params:
+  def __init__(self):
+    self.state = Path(os.environ['UPDATE_STATE'])
   def get_bool(self, key):
-    # Only model the branch's registered keys; unknown names must fail.
-    return {'IsOffroad': os.environ.get('FAIL_STAGE') not in ('onroad', 'missing_offroad'),
-            'SentryEnabled': os.environ.get('PREVIOUS_SENTRY', '1') == '1'}[key]
-  def put_bool(self, key, value):
+    if key == 'IsOffroad':
+      return os.environ.get('FAIL_STAGE') not in ('onroad', 'missing_offroad')
+    return json.loads(self.state.read_text())[key]
+  def put_bool(self, key, value, block=False):
+    assert block, 'Updater writes must be persisted before the Python process exits'
     with open(os.environ['UPDATE_CALLS'], 'a') as log:
       log.write(json.dumps(['param', key, value])+'\\n')
+    stage = os.environ.get('FAIL_STAGE')
+    if ((stage == 'disable_write' and key == 'SentryEnabled' and not value) or
+        (stage == 'restore_write' and key == 'SentryEnabled' and value) or
+        (stage == 'override_write' and key == 'SentryOffThisDrive')):
+      return  # Simulate a write returning without persisting the intended value.
+    state = json.loads(self.state.read_text())
+    if key not in state:
+      raise UnknownKeyName(key)
+    state[key] = value
+    self.state.write_text(json.dumps(state))
 ''')
   (tmp_path/'launch_env.sh').write_text('export AGNOS_VERSION="19.9"\n')
   (tmp_path/'AGNOS').touch()
   (tmp_path/'VERSION').write_text('19.8\n')
   script = SCRIPT.read_text().replace('cd /data/openpilot', f'cd {shlex.quote(str(tmp_path))}')
-  for path in ('/tmp/sentry-update.lock', '/AGNOS', '/VERSION'):
+  for path in ('/tmp/sentry-update.lock', '/AGNOS', '/VERSION', '/data/sentry-update.log'):
     script = script.replace(path, str(tmp_path/Path(path).name))
   local = tmp_path/'update.sh'
   local.write_text(script)
 
-  def run(**variables):
-    env = dict(os.environ, PATH=str(commands)+':'+os.environ['PATH'], UPDATE_CALLS=str(calls), **variables)
-    result = subprocess.run(['bash', str(local)], env=env, capture_output=True, text=True, timeout=10)
+  def run(*args, **variables):
+    state = tmp_path/'state.json'
+    if not state.exists():
+      state.write_text(json.dumps({'SentryEnabled': variables.get('PREVIOUS_SENTRY', '1') == '1', 'SentryOffThisDrive': True}))
+    calls.write_text('')
+    env = dict(os.environ, PATH=str(commands)+':'+os.environ['PATH'], UPDATE_CALLS=str(calls), UPDATE_STATE=str(state), **variables)
+    result = subprocess.run(['bash', str(local), *args], env=env, capture_output=True, text=True, timeout=10)
     return result, [json.loads(line) for line in calls.read_text().splitlines()]
   return run, tmp_path
 
 
-@pytest.mark.parametrize('stage', ['branch', 'dirty', 'onroad', 'missing_offroad', 'fetch', 'merge', 'submodules', 'lfs', 'build', 'params_build', 'agnos'])
+@pytest.mark.parametrize('stage', ['branch', 'dirty', 'onroad', 'missing_offroad', 'disable_write', 'fetch', 'merge', 'submodules', 'lfs',
+                                 'build', 'params_build', 'agnos'])
 def test_update_failure_never_reboots(updater, stage):
   run, _ = updater
   result, calls = run(FAIL_STAGE=stage)
@@ -124,3 +145,46 @@ def test_success_builds_before_os_swap_and_reboot(updater, current_os, enabled, 
     assert len(agnos) == 1 and build < agnos[0] < restore
   else:
     assert not agnos
+
+
+@pytest.mark.parametrize('enable_after', [False, True])
+def test_retry_after_failed_build_requires_explicit_enable(updater, enable_after):
+  run, root = updater
+  result, calls = run(FAIL_STAGE='build')
+  assert result.returncode != 0
+  assert not json.loads((root/'state.json').read_text())['SentryEnabled']
+  result, calls = run(*(['--enable-sentry'] if enable_after else []))
+  assert result.returncode == 0, result.stderr
+  state = json.loads((root/'state.json').read_text())
+  assert state['SentryEnabled'] == enable_after
+  assert state['SentryOffThisDrive'] == (not enable_after)
+  restore = calls.index(['param', 'SentryEnabled', enable_after], calls.index(next(c for c in calls if c[0] == 'scons')))
+  assert restore < calls.index(['sudo', 'reboot'])
+  output = (root/'sentry-update.log').read_text()
+  assert '[ERROR]' in output  # Prior failure remains available after retry/reboot.
+  assert f'Verified saved enable setting: {"ON" if enable_after else "OFF"}' in output
+
+
+@pytest.mark.parametrize('stage', ['restore_write', 'override_write'])
+def test_enable_verification_failure_prevents_reboot(updater, stage):
+  run, root = updater
+  result, calls = run('--enable-sentry', PREVIOUS_SENTRY='0', FAIL_STAGE=stage)
+  assert result.returncode != 0
+  assert ['sudo', 'reboot'] not in calls
+  assert '[SUCCESS]' not in result.stdout
+
+
+def test_explicit_enable_supports_old_branch_without_temporary_override(updater):
+  run, root = updater
+  (root/'state.json').write_text(json.dumps({'SentryEnabled': False}))
+  result, calls = run('--enable-sentry')
+  assert result.returncode == 0, result.stderr
+  assert json.loads((root/'state.json').read_text())['SentryEnabled']
+  assert ['sudo', 'reboot'] in calls
+
+
+def test_invalid_arguments_do_not_disable_sentry(updater):
+  run, _ = updater
+  result, calls = run('--enable-sentri')
+  assert result.returncode == 2
+  assert not calls

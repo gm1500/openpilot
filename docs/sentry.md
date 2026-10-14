@@ -297,6 +297,13 @@ forces a fresh native recorder build. It then checks `AGNOS_VERSION` from `launc
 against `/VERSION`, uses the stock AGNOS updater if needed, restores the previous Sentry
 enable setting, and reboots. A failed update or build does not reboot; local changes and
 diverged history are never discarded. Re-enable Sentry manually after resolving a failure.
+For an update that must finish with Sentry enabled, run `bash tools/sentry_update.sh --enable-sentry`.
+This also clears the temporary "off for this drive" choice after a successful build. Without
+that option, a retry after an earlier failed update can preserve the disabled state left by
+that failure. The updater uses blocking parameter writes and verifies the saved value before
+rebooting. Its output is retained in `/data/sentry-update.log`, including the starting and
+restored enable settings. Failures still leave capture paused until the build is repaired;
+the option does not bypass battery, temperature or parking limits.
 The next captured route will include minimal logs and black preview video between saved events.
 
 The empty-lead-in regression was reproduced against the old recorder. The correction passed

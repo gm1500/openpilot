@@ -3,12 +3,23 @@
 set -eEo pipefail
 trap 'echo "[ERROR] Update stopped at line $LINENO. Not rebooting; Sentry may remain off." >&2; exit 1' ERR
 
+enable_sentry=0
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--enable-sentry" ) ]]; then
+  echo "Usage: bash tools/sentry_update.sh [--enable-sentry]" >&2
+  exit 2
+fi
+if [[ "${1:-}" == "--enable-sentry" ]]; then
+  enable_sentry=1
+fi
+
 cd /data/openpilot
 exec 9>/tmp/sentry-update.lock
 if ! flock -n 9; then
   echo "[ERROR] Another Sentry update is already running." >&2
   exit 1
 fi
+exec > >(tee -a /data/sentry-update.log) 2>&1
+echo "[START] $(date -Is) — update log: /data/sentry-update.log"
 
 branch="$(git symbolic-ref --quiet --short HEAD)"
 if [[ "$branch" != "batmobile" && "$branch" != "sentry-session-routes-poc" ]]; then
@@ -35,10 +46,18 @@ from openpilot.common.params import Params
 p = Params()
 if not p.get_bool('IsOffroad'):
   raise SystemExit('[ERROR] Park the vehicle and wait for offroad mode before updating.')
-print(int(p.get_bool('SentryEnabled')))
-p.put_bool('SentryEnabled', False)
+previous = p.get_bool('SentryEnabled')
+p.put_bool('SentryEnabled', False, block=True)
+if p.get_bool('SentryEnabled'):
+  raise SystemExit('[ERROR] Could not persist Sentry pause. Not updating.')
+print(int(previous))
 PY
 )"
+target_sentry="$sentry_enabled"
+if [[ "$enable_sentry" == "1" ]]; then
+  target_sentry=1
+fi
+echo "[SENTRY] Enable setting before update: $sentry_enabled; after success: $target_sentry (0=off, 1=on)."
 echo "[SENTRY] Waiting for the recorder to close its files..."
 for attempt in {1..30}; do
   if ! pgrep -f '(^|/)sentry_loggerd([[:space:]]|$)' >/dev/null; then
@@ -81,11 +100,23 @@ if [[ -f /AGNOS ]]; then
   fi
 fi
 
-python - "$sentry_enabled" <<'PY'
+python - "$target_sentry" "$enable_sentry" <<'PY'
 import sys
-from openpilot.common.params import Params
+from openpilot.common.params import Params, UnknownKeyName
 
-Params().put_bool('SentryEnabled', sys.argv[1] == '1')
+p = Params()
+enabled = sys.argv[1] == '1'
+if sys.argv[2] == '1':
+  try:
+    p.put_bool('SentryOffThisDrive', False, block=True)
+    if p.get_bool('SentryOffThisDrive'):
+      raise SystemExit('[ERROR] Could not clear the temporary Sentry off setting. Not rebooting.')
+  except UnknownKeyName:
+    pass  # Older supported branches do not have this temporary override.
+p.put_bool('SentryEnabled', enabled, block=True)
+if p.get_bool('SentryEnabled') != enabled:
+  raise SystemExit('[ERROR] Sentry enable setting did not persist. Not rebooting.')
+print('[SENTRY] Verified saved enable setting:', 'ON' if enabled else 'OFF')
 PY
 echo "[SUCCESS] Updated and rebuilt. Rebooting now..."
 sync
