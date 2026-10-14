@@ -96,6 +96,59 @@ switch-state report. In all 342 original bus-0 frames in this recording,
 The original bus-0 data, rather than our rewritten camera-bound copy, was
 used for this check. The existing alert-suppression implementation is unchanged.
 
+### Paired gap/LKAS recording, 2026-10-14
+
+The follow-up recording `000003f8--0a58494c17--0`, running `c10fea4`, is
+61.72 seconds long and remains stationary in Park. The driver reports
+pressing gap and the dash LKAS switch together with a small delay. It
+contains 39 native bus-0 gap presses and 39 releases; the presses occur
+between 12.277 and 54.938 seconds. Gap holds last 89–180 ms. The corresponding CarState
+events arrive within 1.8 ms of the raw frames, providing clear timing
+markers without relying on UI touches.
+
+- Bus 0 contains 2,056 `0x1E1` frames. The third byte is `0x04` in 1,886
+  frames and `0x44` in 170; the gap bit changes, but `LKAButton` remains
+  zero throughout. The 254 bus-2 copies also have `LKAButton=0`; none of
+  those copies occurs during the paired press interval.
+- Another bit, byte 3 mask `0x02` (zero-based indexing), exactly mirrors
+  the gap bit in every received `0x1E1` frame in both recordings. It
+  provides no independently observed LKAS event. The checksum also changes
+  with the gap presses. Neither is a confirmed replacement LKAS mapping.
+- All 618 original bus-0 `PSCMStatus` frames retain hands-off detection
+  mode 1, hands-on status 1, and torque-delivered status 0. Driver-applied
+  torque varies near many gap presses, as does its checksum; those torque
+  measurements must not be treated as a switch input. The earlier
+  recording's torque-delivered status was 2 throughout, so this field
+  differs between recordings but does not follow the presses within either.
+- From 10 to 58 seconds, camera-side `0x180`, `0x2CB`, `0x2CD`, `0x315`,
+  and `0x320` each have exactly one complete payload for each of their
+  four counter values. Other continuously received camera messages
+  (`0x365`, `0x370`, `0x409`, `0x40A`, `0x510`, and `0x78A`) have constant
+  payloads. They contain no additional change at the paired press times.
+- Raw bit-transition comparisons across the recorded native buses did
+  not identify a separate repeatable press pulse or alternating on/off
+  state. The apparent candidates outside `0x1E1` and steering torque
+  continue varying outside the press sequence or fail to follow it.
+- Unlike the earlier capture, this one contains 17 extended-ID frames,
+  all during startup at 2.325–3.026 seconds. These are diagnostic requests,
+  not the low-speed switch/lane-status messages in the bundled DBC. None
+  of those low-speed message IDs appears.
+
+This capture confirms that the current bit does not report the tested
+dash switch. It does not establish that no usable message exists in other
+vehicle states or on another network. No replacement mapping or transmit
+change is justified by these samples. The startup baseline fix is active:
+the log records `gm_lka_button_baseline` with `policyApplied=false`, and
+there are no subsequent LKAS state applications.
+
+More repetitions of the same paired sequence are unlikely to resolve the
+remaining ambiguity. A discriminating follow-up would separate gap-only
+presses from LKAS-only presses, with labelled switch-indicator state and
+longer holds. If the LKAS-only phase still produces no native CAN change,
+the next investigation is read access to the camera's discrete switch/
+indicator signals or its separate low-speed network, not a new high-speed
+CAN bit assignment.
+
 For further signal identification, capture a parked run after startup has
 settled: leave the switch off for 10 seconds, on for 10, off for 10, on for
 10, then off for 10. Record the actual press times and indicator state, and
