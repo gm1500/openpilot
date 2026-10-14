@@ -5,6 +5,7 @@ from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.mici.onroad.torque_bar import TorqueBar
 from openpilot.selfdrive.ui.onroad.lane_policy_icon import LanePolicyIcon
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
+from openpilot.selfdrive.ui.onroad.gap_button import GapButton
 from openpilot.selfdrive.ui.onroad.speed_limit import SpeedLimitButton
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus, ChestnutState
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -117,6 +118,7 @@ class HudRenderer(Widget):
     self._torque_bar = TorqueBar()
     self._speed_limit_button = self._child(SpeedLimitButton())
     self._lane_policy_icon = self._child(LanePolicyIcon(46))
+    self._gap_button = self._child(GapButton())
     self._exp_button = self._child(ExpButton(82, 61))
 
     self._txt_wheel: rl.Texture = gui_app.texture('icons_mici/wheel.png', 50, 50)
@@ -186,9 +188,10 @@ class HudRenderer(Widget):
     if self._can_draw_top_icons:
       self._exp_button.render(rl.Rectangle(rect.x + rect.width - 94, rect.y + 12, 82, 82))
     self._lane_policy_icon.render(rl.Rectangle(rect.x + rect.width - 94, rect.y + rect.height - 174, 82, 82))
+    self._gap_button.render(rl.Rectangle(rect.x + rect.width - 186, rect.y + rect.height - 174, 82, 82))
 
   def user_interacting(self) -> bool:
-    return self._lane_policy_icon.is_pressed or self._speed_limit_button.is_pressed or self._exp_button.is_pressed
+    return any(button.is_pressed for button in (self._lane_policy_icon, self._gap_button, self._speed_limit_button, self._exp_button))
 
   def _draw_model_source(self, rect: rl.Rectangle) -> None:
     loading = ui_state.chestnut_state == ChestnutState.LOADING
