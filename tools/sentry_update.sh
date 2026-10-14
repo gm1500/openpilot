@@ -41,11 +41,20 @@ fi
 # Manager maintains IsOffroad as the inverse of deviceState.started. This branch
 # has no IsOnroad parameter. A missing IsOffroad value must also stop the update.
 sentry_enabled="$(python - <<'PY'
+import sys
 from openpilot.common.params import Params
 
 p = Params()
 if not p.get_bool('IsOffroad'):
   raise SystemExit('[ERROR] Park the vehicle and wait for offroad mode before updating.')
+for key in ('ForcePowerDown', 'DoShutdown', 'DoReboot', 'DoUninstall'):
+  if p.get_bool(key):
+    raise SystemExit(f'[ERROR] {key} is set. Not changing Sentry or starting an update; inspect the shutdown reason first.')
+capacity = p.get('CarBatteryCapacity')
+print(f'[POWER] Saved parked-energy estimate: {capacity} uWh; DisablePowerDown={p.get_bool("DisablePowerDown")}', file=sys.stderr)
+if capacity is not None and capacity <= 0 and not p.get_bool('DisablePowerDown'):
+  raise SystemExit('[ERROR] The parked-energy estimate is exhausted. Disabling Sentry could immediately power off the device. '
+                   'Not updating; inspect with tools/sentry_power_check.py first.')
 previous = p.get_bool('SentryEnabled')
 p.put_bool('SentryEnabled', False, block=True)
 if p.get_bool('SentryEnabled'):

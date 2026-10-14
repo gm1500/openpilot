@@ -304,7 +304,39 @@ that failure. The updater uses blocking parameter writes and verifies the saved 
 rebooting. Its output is retained in `/data/sentry-update.log`, including the starting and
 restored enable settings. Failures still leave capture paused until the build is repaired;
 the option does not bypass battery, temperature or parking limits.
+The updater also stops before disabling Sentry if a shutdown/reboot/uninstall request is
+pending, `ForcePowerDown` is set, or the saved parked-energy estimate is already exhausted
+while stock power-down is enabled. This last case can otherwise make the running hardware
+daemon shut down as soon as Sentry is disabled, even with a healthy measured battery voltage.
+The check does not disable protections or guarantee the battery/energy estimate will remain
+sufficient throughout a long build.
 The next captured route will include minimal logs and black preview video between saved events.
+
+### Investigating a complete power-off
+
+`python tools/sentry_power_check.py` is read-only and prints only an allowlist of power
+settings, the Sentry phase, and matching parameters from the latest three saved bootlogs.
+The current-settings portion reads files directly, so it also works when native Params
+cannot load. Manager copies parameters into a bootlog before clearing transient keys;
+these snapshots can retain the previous `DoShutdown`, `LastManagerExitReason`, AGNOS
+watchdog and power-drop records after those values have disappeared from current settings.
+Account tokens and location are excluded from the report.
+
+The shutdown paths differ:
+
+- `DoShutdown` clears on manager startup; `ForcePowerDown` is persistent and is not written
+  by the Sentry updater. With a live Sentry session, a set force flag can shut down immediately.
+- A Sentry `Battery cutoff` phase also requests immediate shutdown. The controller reaches
+  that phase after ten seconds of valid low readings. This path bypasses the stock first-boot
+  minimum-on-time gate; increasing arming delay does not defer battery protection.
+- `SentryShutdownOnOverheat` persists (default off), so an enabled temperature shutdown can
+  operate on a hot first boot. `SentryShutdownOnTimeLimit` defaults on, but its parking clock
+  and expiry latch live in RAM and restart after a real reboot.
+- While Sentry is active, the estimated `CarBatteryCapacity` is not a shutdown condition.
+  Disabling Sentry restores stock policy, including that estimate. A reproduction at 12.5 V,
+  a zero estimate and an elapsed stock offroad delay changes from no shutdown to shutdown
+  on that enable-switch transition. This establishes a possible updater failure, not proof
+  that it caused a particular device's power-off.
 
 The empty-lead-in regression was reproduced against the old recorder. The correction passed
 12 native recorder cases, including 15/30/60-second trimming, only five seconds of playable

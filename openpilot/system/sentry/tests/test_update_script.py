@@ -74,7 +74,14 @@ class Params:
   def get_bool(self, key):
     if key == 'IsOffroad':
       return os.environ.get('FAIL_STAGE') not in ('onroad', 'missing_offroad')
+    if key in ('ForcePowerDown', 'DoShutdown', 'DoReboot', 'DoUninstall'):
+      return os.environ.get('PENDING_POWER_FLAG') == key
+    if key == 'DisablePowerDown':
+      return False
     return json.loads(self.state.read_text())[key]
+  def get(self, key):
+    assert key == 'CarBatteryCapacity'
+    return int(os.environ.get('BATTERY_ESTIMATE', '20000000'))
   def put_bool(self, key, value, block=False):
     assert block, 'Updater writes must be persisted before the Python process exits'
     with open(os.environ['UPDATE_CALLS'], 'a') as log:
@@ -188,3 +195,23 @@ def test_invalid_arguments_do_not_disable_sentry(updater):
   result, calls = run('--enable-sentri')
   assert result.returncode == 2
   assert not calls
+
+
+@pytest.mark.parametrize('flag', ['ForcePowerDown', 'DoShutdown', 'DoReboot', 'DoUninstall'])
+def test_pending_power_request_stops_before_touching_sentry(updater, flag):
+  run, root = updater
+  result, calls = run('--enable-sentry', PENDING_POWER_FLAG=flag)
+  assert result.returncode != 0
+  assert flag in result.stdout
+  assert not any(c[0] in ('param', 'scons', 'sudo') for c in calls)
+  assert json.loads((root/'state.json').read_text())['SentryEnabled']
+
+
+@pytest.mark.parametrize('capacity', ['0', '-100'])
+def test_depleted_estimate_does_not_disable_sentry_or_start_build(updater, capacity):
+  run, root = updater
+  result, calls = run('--enable-sentry', BATTERY_ESTIMATE=capacity)
+  assert result.returncode != 0
+  assert 'Disabling Sentry could immediately power off' in result.stdout
+  assert not any(c[0] in ('param', 'scons', 'sudo') for c in calls)
+  assert json.loads((root/'state.json').read_text())['SentryEnabled']
