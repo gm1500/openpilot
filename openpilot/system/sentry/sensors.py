@@ -4,6 +4,7 @@ import math
 SENSOR_SERVICES = ('soundPressure', 'accelerometer', 'gyroscope')
 SETTLE_SECONDS = 3.
 FRESH_SECONDS = .5
+GYRO_THRESHOLD_RAD_S = .004
 
 
 class ActivityDetector:
@@ -37,7 +38,10 @@ class ActivityDetector:
       confirm = .08
     else:
       # Subtract gravity/bias as a vector; no fixed mount axes or car model.
-      threshold = .6 if service == 'accelerometer' else .08  # m/s², rad/s
+      # Stopped-car qlog samples around the reported wind shake reached
+      # ~0.0047 rad/s above bias. Keep 80 ms confirmation for the lower floor;
+      # the decimated log cannot establish how long individual peaks lasted.
+      threshold = .6 if service == 'accelerometer' else GYRO_THRESHOLD_RAD_S  # m/s², rad/s
       strength = math.dist(values, baseline)/threshold
       confirm = .04 if service == 'accelerometer' else .08
 

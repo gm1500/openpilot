@@ -26,15 +26,26 @@ finishes, stays awake while visible, and cannot intercept the driving screen.
 An explicit global Enable Sentry/STOP setting is still respected.
 
 - Low Risk saves events from sudden sound changes or accelerometer/gyroscope activity.
-  Camera motion analysis is skipped, but all three camera buffers remain active so
-  pre-event footage is preserved. The preview defaults to the front wide camera.
+  While idle, camera region analysis is skipped; a small live background is kept so
+  tracking can start on the sensor-triggered frame. All three camera buffers remain
+  active so pre-event footage is preserved. After a sensor hit, the preview and eye
+  follow the strongest motion in the two wide cameras with the existing handoff
+  smoothing. Visual motion alone cannot start or extend a Low Risk event. With no
+  visible motion, the preview holds its last view (initially front wide).
 - High Risk adds the existing two-wide-camera motion detector and preview handoffs.
-  The red eye continues to follow wide-camera motion; Low Risk has no visual tracking.
+  Its red eye follows wide-camera motion while watching as well as recording.
 - Sound is compared with a learned ambient level (12 dB rise, using micd's uncalibrated
   readings); IMU changes are compared with a learned gravity/bias vector (0.6 m/s² or
-  0.08 rad/s). Moderate hits need short confirmation, stronger hits can trigger immediately,
+  0.004 rad/s). Moderate gyro hits still require 80 ms confirmation; stronger hits can trigger immediately,
   and bursts are debounced for two seconds. Each input settles for three seconds and
-  relearns after missing data. These initial thresholds require parked-device tuning.
+  relearns after missing data. The gyro floor is based on stationary samples from
+  `000003ef--91bc370306/5`: after excluding stopping/pull-away transitions, deviation
+  from the median bias was about 0.0047 rad/s near the bookmark and peaked near
+  0.0057 rad/s. The new floor is about 15% below the bookmarked amplitude. This qlog
+  retains only ~1 Hz IMU samples, so it cannot verify the native 104 Hz confirmation
+  timing or distinguish wind from engine vibration. Tests use that measured amplitude
+  in a synthetic sustained pulse; actual parked-device false-trigger behavior still
+  needs validation. Audio and acceleration thresholds were deliberately left unchanged.
 - The existing micd and sensord processes run during parked capture; no new microphone
   recorder is added. Sentry consumes sound levels, not raw audio. It drains queued IMU
   samples to avoid missing a short impact between controller ticks.

@@ -42,7 +42,7 @@ def test_ambient_noise_warmup_small_vibration_and_stale_restart():
     t = i*.01
     assert not detector.update('soundPressure', 40.+2*math.sin(t), t, True)
     assert not detector.update('accelerometer', (.05*math.sin(t), 0., 9.81), t, True)
-    assert not detector.update('gyroscope', (0., .005*math.sin(t), 0.), t, True)
+    assert not detector.update('gyroscope', (0., .001*math.sin(t), 0.), t, True)
   assert not detector.ready(11.)
   assert not detector.update('soundPressure', 80., 11., True)  # Relearn after gap.
   assert not detector.update('accelerometer', (math.nan, 0., 0.), 11., True)
@@ -67,6 +67,36 @@ def test_gradual_sound_level_changes_do_not_trigger():
   settle(detector)
   for i in range(1, 601):
     assert not detector.update('soundPressure', 40.+i*.02, 4.+i*.1, True)
+
+
+@pytest.mark.parametrize('rotate', [False, True])
+@pytest.mark.parametrize('scale,expected', [(0.6, False), (0.9, True), (1., True)])
+def test_bookmarked_gyro_amplitude_when_sustained(rotate, scale, expected):
+  # Bias and bookmarked sample from stationary 000003ef--91bc370306/5.
+  # qlog is ~1 Hz: repeat the measured amplitude for a synthetic 125 ms pulse,
+  # not a claim that the original peak lasted this long at the native 104 Hz.
+  baseline = (-.035048, -.016875, -.027565)
+  peak = (-.036346, -.012370, -.028100)
+  if rotate:
+    baseline = (-baseline[1], baseline[0], baseline[2])
+    peak = (-peak[1], peak[0], peak[2])
+  detector = ActivityDetector()
+  settle(detector, {'gyroscope': baseline})
+  value = tuple(b+scale*(p-b) for b, p in zip(baseline, peak, strict=True))
+  hits = [detector.update('gyroscope', value, 4.+i/104., True) for i in range(1, 14)]
+  assert not any(hits[:8])  # Moderate movement still needs 80 ms confirmation.
+  assert any(hits) == expected
+
+
+def test_isolated_small_gyro_spike_and_slow_bias_drift_do_not_trigger():
+  detector = ActivityDetector()
+  bias = (-.035, -.017, -.028)
+  settle(detector, {'gyroscope': bias})
+  assert not detector.update('gyroscope', (bias[0], bias[1]+.006, bias[2]), 4.01, True)
+  assert not detector.update('gyroscope', bias, 4.02, True)
+  for i in range(1, 2001):
+    value = (bias[0]+i*.000001, bias[1], bias[2])
+    assert not detector.update('gyroscope', value, 4.02+i*.01, True)
 
 
 @pytest.mark.parametrize('service,value', [

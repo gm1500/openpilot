@@ -73,12 +73,13 @@ class CameraMotion:
       self.warm_until = now+CAMERA_WARMUP_SECONDS
     self.last_frame = self.client.frame_id
     self.last_received = now
-    if not detect:
-      return Motion()
     image = np.frombuffer(buf.data, dtype=np.uint8, count=self.client.stride*self.client.height)
     image = image.reshape(self.client.height, self.client.stride)[:, :self.client.width]
     sample = image[self.sample_indices].reshape(80, 4, 128, 4).mean(axis=(1, 3), dtype=np.float32)
-    return self.detector.update(sample, now, sensitivity, armed=armed and now >= self.warm_until)
+    # Low Risk keeps a small current background while idle, skipping region
+    # analysis. A sensor hit can then start tracking on this frame rather than
+    # spending another two seconds learning the scene after the event begins.
+    return self.detector.update(sample, now, sensitivity, armed=detect and armed and now >= self.warm_until)
 
 
 def main():
@@ -196,20 +197,27 @@ def main():
             sensors = SensorActivity()
           arm_delay = setting(params, 'SentryArmDelay')
           armed = arm_complete or ready_since is not None and now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
+          sensor_trigger = sensors.sample(now, armed)
+          sensors_ready = sensors.ready(now)
+          manual = params.get_bool('SentryManualTrigger')
+          if manual:
+            params.remove('SentryManualTrigger')
+          # Sensors start/extend Low Risk events. During those events, camera
+          # motion steers the preview and eye but cannot extend the recording.
+          track_motion = risk == HIGH_RISK or manual or armed and (sensor_trigger or record_until > now)
           results = {}
           for stream in MOTION_CAMERAS:
             if stream not in cameras:
               cameras[stream] = CameraMotion(stream)
-            if risk == HIGH_RISK:
+            if track_motion:
               result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'), armed)
             else:
               result = cameras[stream].sample(now, setting(params, 'SentrySensitivity'), armed, detect=False)
             results[stream] = result
-            triggered |= result.triggered
+            if risk == HIGH_RISK:
+              triggered |= result.triggered
             if result.active and (not best.active or result.score > best.score):
               best, motion_camera = result, stream
-          sensor_trigger = sensors.sample(now, armed)
-          sensors_ready = sensors.ready(now)
           ready = sum(0 <= now-camera.last_received < 1. for camera in cameras.values())
           recorder_fresh = recent(sm, 'sentryRecorderState', now)
           recorder_ready = recorder_fresh and sm['sentryRecorderState'].bufferBytes > 0
@@ -251,11 +259,8 @@ def main():
           triggered |= sensor_trigger
           if not can_trigger:
             triggered = False
-          manual = params.get_bool('SentryManualTrigger')
-          if manual:
-            params.remove('SentryManualTrigger')
           if manual or can_trigger:
-            trigger_camera = preview.update(results, now, recording=record_until > now, manual=manual)
+            trigger_camera = preview.update(results, now, recording=record_until > now, manual=manual, sensor_trigger=sensor_trigger)
           if manual or triggered:
             record_until = now+setting(params, 'SentryPostSeconds')
           if recorder_fresh and sm['sentryRecorderState'].recording:

@@ -57,12 +57,14 @@ class PreviewSelector:
     self.pending = None
     self.pending_since = 0.
 
-  def update(self, results, now, recording=False, manual=False):
+  def update(self, results, now, recording=False, manual=False, sensor_trigger=False):
     fresh = {stream: m.score for stream, m in results.items() if stream in MOTION_CAMERAS and m.active}
     dt = now-self.last_time if self.last_time is not None else 0.
     self.last_time = now
     if not recording or manual:
-      candidates = {s: score for s, score in fresh.items() if manual or results[s].triggered}
+      # Sound/IMU confirms an event without identifying a lens. Choose the
+      # strongest visible motion immediately, even before visual confirmation.
+      candidates = {s: score for s, score in fresh.items() if manual or sensor_trigger or results[s].triggered}
       if candidates:
         self.camera = max(candidates, key=lambda s: (candidates[s], s == self.camera))
       elif manual:

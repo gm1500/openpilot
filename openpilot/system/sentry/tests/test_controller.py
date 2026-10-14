@@ -44,6 +44,14 @@ def test_new_event_preview_uses_confirmed_source_even_with_larger_eye_only_motio
   assert preview.update(results, 10.2, recording=True) == 1
 
 
+def test_sensor_trigger_chooses_strongest_wide_motion_before_visual_confirmation():
+  preview = PreviewSelector()
+  results = {0: Motion(True, 1., triggered=True), 1: Motion(True, .02), 2: Motion(True, .005)}
+  assert preview.update(results, 10., sensor_trigger=True) == 1
+  # Lack of a visible subject keeps the last view; sound alone has no bearing.
+  assert preview.update({}, 12., sensor_trigger=True) == 1
+
+
 @pytest.mark.parametrize('enabled,expected', [((1, 2), 2), ((1,), 1), ((2,), 2)])
 def test_manual_preview_uses_a_wide_camera_and_eye_only_motion_waits_for_recording(enabled, expected):
   preview = PreviewSelector()
@@ -198,6 +206,26 @@ def test_live_sampling_keeps_thin_dim_subjects_with_padded_stride(monkeypatch, s
   assert results[0].active and not results[0].triggered
   assert any(m.triggered for m in results[3:6])
   assert results[-1].x > results[0].x
+
+
+def test_low_risk_idle_keeps_background_for_immediate_sensor_event_tracking(monkeypatch):
+  image = np.full((400, 640), 70, dtype=np.uint8)
+  client = SimpleNamespace(width=640, height=400, stride=640, frame_id=0, timestamp_eof=0,
+                           is_connected=lambda: True, recv=lambda timeout: SimpleNamespace(data=image.tobytes()))
+  monkeypatch.setattr(sentryd, 'VisionIpcClient', lambda *args: client)
+  camera = sentryd.CameraMotion(1)
+  for i in range(76):
+    now = 100.+i*.2
+    client.frame_id, client.timestamp_eof = i, int(now*1e9)
+    result = camera.sample(now, 50, armed=True, detect=False)
+    assert not result.active and not result.triggered
+  image[150:250, 250:350] = 170
+  client.frame_id, client.timestamp_eof = 76, int(115.2e9)
+  result = camera.sample(115.2, 50, armed=True)
+  assert result.active and not result.triggered  # First frame, no extra detector warmup.
+  # A new camera/gap still takes its normal exposure recovery path.
+  client.frame_id, client.timestamp_eof = 77, int(120e9)
+  assert not camera.sample(120., 50, armed=True).active
 
 
 @pytest.mark.parametrize('post_seconds', [15, 30, 60])
@@ -630,7 +658,7 @@ def test_cooling_resumes_only_before_parking_expiry_and_detection_uses_wide_came
   assert all(state['cameraMask'] == 0b111 for state in sent.values())
 
 
-@pytest.mark.parametrize('risk,sound,camera,expected', [(0, False, True, False), (0, True, False, True),
+@pytest.mark.parametrize('risk,sound,camera,expected', [(0, False, True, False), (0, True, False, True), (0, True, True, True),
                                                       (1, False, True, True), (1, True, False, True)])
 def test_risk_mode_trigger_sources_and_prebuffer(monkeypatch, tmp_path, risk, sound, camera, expected):
   class Params(dict):
@@ -659,7 +687,7 @@ def test_risk_mode_trigger_sources_and_prebuffer(monkeypatch, tmp_path, risk, so
     last_received = 0.
     def sample(self, now, sensitivity, armed, detect=True):
       self.last_received = now
-      detects.append(detect)
+      detects.append((now, detect))
       return Motion(active=detect and camera, triggered=armed and detect and camera)
 
   class Finished(Exception):
@@ -691,4 +719,80 @@ def test_risk_mode_trigger_sources_and_prebuffer(monkeypatch, tmp_path, risk, so
   assert sent[105.]['capture']  # Buffer runs before arming in either mode.
   assert sent[110.]['recordUntilMonoTime'] == 0
   assert (sent[130.]['recordUntilMonoTime'] > 130e9) == expected
-  assert all(d == bool(risk) for d in detects)
+  assert all(d == bool(risk) for now, d in detects if now < 127.)
+  assert all(d == bool(risk or sound) for now, d in detects if now >= 130.)
+
+
+def test_low_risk_sensor_event_tracks_subject_without_visual_extension_or_rearming(monkeypatch, tmp_path):
+  class Params(dict):
+    get_bool = dict.get
+    def remove(self, key):
+      self.pop(key, None)
+
+  params = Params(DEFAULTS | {'IsOffroad': True, 'SentryArmDelay': 15, 'SentryPostSeconds': 15})
+  clock, sent, samples = [100.], {}, []
+
+  class SubMaster(dict):
+    def __init__(self, services):
+      super().__init__(deviceState=SimpleNamespace(started=False, maxTempC=50.),
+                       pandaStates=[SimpleNamespace(pandaType=log.PandaState.PandaType.tres, ignitionLine=False, ignitionCan=False)],
+                       peripheralState=SimpleNamespace(voltage=12000),
+                       sentryRecorderState=SimpleNamespace(recording=False, error='', bufferBytes=1000),
+                       gpsLocation=SimpleNamespace(hasFix=False), gpsLocationExternal=SimpleNamespace(hasFix=False))
+      self.valid = {s: not s.startswith('gps') for s in services}
+      self.recv_time, self.logMonoTime = {}, {}
+
+    def update(self, timeout):
+      self.recv_time = dict.fromkeys(self, clock[0])
+      self.logMonoTime = dict.fromkeys(self, int(clock[0]*1e9))
+      self['sentryRecorderState'].recording = 130. < clock[0] < 145.
+
+  class Camera:
+    warm_until = 0.
+    last_received = 0.
+    def __init__(self, stream):
+      self.stream = stream
+    def sample(self, now, sensitivity, armed, detect=True):
+      self.last_received = now
+      samples.append((now, detect, armed))
+      if not detect:
+        return Motion()
+      # Sensor-triggered cabin subject immediately walks around to the front.
+      score = (.02 if self.stream == 1 else .005) if now == 130. else (.001 if self.stream == 1 else .03)
+      if now == 130.4 and self.stream == 1:
+        score = .031  # Brief near-tie must not flip back to cabin.
+      return Motion(True, score, triggered=now >= 131.)
+
+  class Finished(Exception):
+    pass
+
+  class Ratekeeper:
+    def __init__(self, *args, **kwargs):
+      pass
+    def keep_time(self):
+      clock[0] = round(clock[0]+.2, 1)
+      if clock[0] > 147.:
+        raise Finished
+
+  monkeypatch.setattr(sentryd.time, 'monotonic', lambda: clock[0])
+  monkeypatch.setattr(sentryd, 'Params', lambda: params)
+  monkeypatch.setattr(sentryd, 'SentryClock', lambda p: SimpleNamespace(update=lambda *args: None, snapshot=lambda wall: ('', 0)))
+  monkeypatch.setattr(sentryd, 'HARDWARE', SimpleNamespace(get_device_type=lambda: 'tizi'))
+  monkeypatch.setattr(sentryd.messaging, 'SubMaster', SubMaster)
+  monkeypatch.setattr(sentryd.messaging, 'PubMaster',
+                      lambda services: SimpleNamespace(send=lambda service, msg: sent.update({clock[0]: msg.to_dict()['sentryState']})))
+  monkeypatch.setattr(sentryd, 'CameraMotion', Camera)
+  monkeypatch.setattr(sentryd, 'SensorActivity',
+                      lambda: SimpleNamespace(sample=lambda now, armed: armed and now == 130., ready=lambda now: True))
+  monkeypatch.setattr(sentryd, 'Ratekeeper', Ratekeeper)
+  monkeypatch.setattr(sentryd, 'write_runtime', lambda state: None)
+  monkeypatch.setattr(sentryd, 'RUNTIME_PATH', tmp_path/'runtime.json')
+  with pytest.raises(Finished):
+    sentryd.main()
+  assert not any(detect for now, detect, armed in samples if now < 130. or now >= 145.)
+  assert all(detect and armed for now, detect, armed in samples if 130. <= now < 145.)
+  assert sent[129.8]['recordUntilMonoTime'] == 0
+  assert sent[130.]['triggerCamera'] == 1 and sent[130.]['motion']
+  assert all(s['triggerCamera'] == 2 for now, s in sent.items() if 130.2 <= now < 145.)
+  assert all(s['recordUntilMonoTime'] == 145e9 for now, s in sent.items() if now >= 130.)
+  assert sent[145.]['phase'] == 'Watching' and not sent[145.]['motion']
