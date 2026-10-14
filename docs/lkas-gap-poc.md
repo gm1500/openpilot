@@ -141,22 +141,54 @@ change is justified by these samples. The startup baseline fix is active:
 the log records `gm_lka_button_baseline` with `policyApplied=false`, and
 there are no subsequent LKAS state applications.
 
-More repetitions of the same paired sequence are unlikely to resolve the
-remaining ambiguity. A discriminating follow-up would separate gap-only
-presses from LKAS-only presses, with labelled switch-indicator state and
-longer holds. If the LKAS-only phase still produces no native CAN change,
-the next investigation is read access to the camera's discrete switch/
-indicator signals or its separate low-speed network, not a new high-speed
-CAN bit assignment.
+### Separate gap/LKAS groups, 2026-10-14
 
-For further signal identification, capture a parked run after startup has
-settled: leave the switch off for 10 seconds, on for 10, off for 10, on for
-10, then off for 10. Record the actual press times and indicator state, and
-include a separate two-second button hold to distinguish press/release
-events from a latched state. Avoid other switch inputs during that window.
-Compare native CAN changes with those labels before using a candidate for
-policy selection. If no correlated message is present, a different read
-interface to the factory camera or low-speed network will be necessary.
+The next recording, `000003f9--962ad6b8ee--0`, runs the same `c10fea4`
+firmware and lasts 39.05 seconds, stationary in Park. The driver labels
+the sequence as three gap presses, three LKAS presses in the middle,
+then three gap presses marking the end. Native bus-0 gap timing is:
+
+| Group | Press times from log start |
+| --- | --- |
+| First three gap presses | 9.886, 10.786, 11.657 seconds |
+| Final three gap presses | 35.797, 36.586, 37.477 seconds |
+
+The last release of the first group is at 11.836 seconds, bracketing the
+LKAS-only interval between 11.836 and 35.797 seconds. These are interval
+boundaries, not independently measured timestamps of the LKAS presses.
+The reuploaded `000003f8` file is byte-identical to the earlier paired
+recording, so it adds no independent samples.
+
+- `LKAButton` stays zero in all 1,301 bus-0 and 194 bus-2 `0x1E1` frames.
+  Bus 0 has 37 gap-high frames, accounting for exactly six press/release
+  pairs. There are no `lkas` button events.
+- The additional byte-3 `0x02` bit follows only those six gap presses.
+  All 798 frames inside the LKAS-only interval retain bytes 2–3 as
+  `04 01`. This resolves the paired test's ambiguity: that bit does not
+  detect the reported independent LKAS presses.
+- All 390 original bus-0 `PSCMStatus` frames retain detection mode 1,
+  hands-on status 1, and torque-delivered status 0. No switch state can
+  be recovered from those fields in this run.
+- The interval contains 74 bus-0 and 11 bus-2 message IDs. All 11 camera
+  message streams were checked: the five messages with counters each
+  retain one complete payload per counter value, and the other six are
+  constant. The counter-conditioned payloads also match both earlier runs.
+- Other sparse bit changes fail cross-recording validation. For example,
+  the apparent three-transition candidates in `0x135` and `0x264` repeat
+  on approximately eight-second counter cycles in the other runs, while
+  `0x3F3` also changes during gap-only activity and does not follow the
+  earlier 39 paired presses. No independent LKAS mapping is confirmed.
+- No extended CAN identifiers or expected low-speed switch/lane-status
+  message IDs appear anywhere in this recording.
+
+The requested separation test is complete; further repetitions of this
+same sequence are not the next step. Together with the documented direct
+switch/indicator wiring, these results point to a signal-access limitation
+on the recorded buses. They do not prove that another vehicle state or
+network cannot expose the selection. Investigate read access to the
+camera's discrete switch/indicator circuits or its separate low-speed
+network before proposing another mapping. No new CAN input, transmit
+command, or control behavior is enabled by this analysis.
 
 The reported touch issue was resolved by a device reboot. Touch input,
 filtering, and gesture handling have not been changed in this update.
