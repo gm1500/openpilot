@@ -21,6 +21,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mode import automatic_e2e_sel
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
+from openpilot.selfdrive.selfdrived.lane_policy_button import LanePolicyButton
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
@@ -62,6 +63,7 @@ class SelfdriveD:
       self.CP = CP
 
     self.car_events = CarEvents(self.CP)
+    self.lane_policy_button = LanePolicyButton()
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
@@ -562,6 +564,10 @@ class SelfdriveD:
 
   def step(self):
     CS = self.data_sample()
+    if self.CP.brand == 'gm' and not self.CP.passive:
+      lka_state = self.lane_policy_button.update(CS, self.params)
+      if lka_state is not None:
+        cloudlog.event('gm_lka_button_state', rawState=lka_state, lanePolicyEnabled=lka_state)
     self.update_events(CS)
     if not self.CP.passive and self.initialized:
       self.enabled, self.active = self.state_machine.update(self.events)
