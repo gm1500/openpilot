@@ -914,6 +914,66 @@ class TestOSMSpeedLimit(unittest.TestCase):
         self.assertEqual(calls, [100., 701.])
         self.assertTrue(all(result[1] == 40 / 3.6 for result in results))
 
+  def run_network_recovery(self, steps, successful_at, change_during_fetch=False):
+    class StopWorker(Exception):
+      pass
+    service = osm.OSMSpeedLimit()
+    service._thread = Mock()
+    clock = [100.]
+    service._fix = self.fix
+    service.update_network('wifi')
+    steps = iter(steps)
+    calls = {'roads': [], 'zones': []}
+    samples = []
+
+    def fetch(kind, fix):
+      calls[kind].append(clock[0])
+      if change_during_fetch and clock[0] == 100.:
+        service.update_network('cell4G')
+      if clock[0] < successful_at:
+        raise osm.requests.ConnectionError()
+      return (road(),) if kind == 'roads' else ()
+
+    def wait(_):
+      samples.append(service.update(service._fix, clock[0]))
+      try:
+        clock[0], network = next(steps)
+      except StopIteration as error:
+        raise StopWorker from error
+      service._fix = replace(self.fix, timestamp=clock[0])
+      service.update_network(network)
+
+    modules = {'openpilot.common.realtime': SimpleNamespace(drop_realtime=lambda: None),
+               'openpilot.common.swaglog': SimpleNamespace(cloudlog=Mock())}
+    with patch.dict(sys.modules, modules), patch.object(osm, 'fetch_roads', side_effect=lambda fix: fetch('roads', fix)), \
+         patch.object(osm, 'fetch_zones', side_effect=lambda fix: fetch('zones', fix)), \
+         patch.object(osm.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(service._wake, 'wait', side_effect=wait):
+      with self.assertRaises(StopWorker):
+        service._run()
+    self.assertTrue(all(sample is None for sample in samples[:-1]))
+    self.assertAlmostEqual(samples[-1][1], 40 / 3.6)
+    return calls
+
+  def test_cellular_handoff_recovers_failed_maps_without_waiting_for_backoff(self):
+    steps = [(101., 'wifi'), (129., 'wifi'), (130., 'wifi'), (140., 'none'), (145., 'cell4G')]
+    calls = self.run_network_recovery(steps, successful_at=145.)
+    self.assertEqual(calls, dict.fromkeys(('roads', 'zones'), [100., 130., 145.]))
+
+  def test_failed_maps_retry_within_one_minute_when_network_type_stays_the_same(self):
+    # A selected Wi-Fi path can regain internet without changing networkType.
+    steps = [(t, 'wifi') for t in (101., 129., 130., 189., 190., 249., 250., 309., 310., 369., 370.)]
+    calls = self.run_network_recovery(steps, successful_at=370.)
+    self.assertEqual(calls, dict.fromkeys(('roads', 'zones'), [100., 130., 190., 250., 310., 370.]))
+
+  def test_network_flapping_and_inflight_handoff_do_not_burst_requests(self):
+    steps = [(101., 'none'), (102., 'cell4G'), (103., 'wifi'), (104., 'none'), (105., 'cell4G'),
+             (106., 'wifi'), (107., 'cell4G'), (109., 'cell4G'), (110., 'cell4G')]
+    calls = self.run_network_recovery(steps, successful_at=110.)
+    self.assertEqual(calls, dict.fromkeys(('roads', 'zones'), [100., 105., 110.]))
+    calls = self.run_network_recovery([(101., 'cell4G'), (104., 'cell4G'), (105., 'cell4G')],
+                                      successful_at=105., change_during_fetch=True)
+    self.assertEqual(calls, dict.fromkeys(('roads', 'zones'), [100., 105.]))
+
 
 
 class TestMapPosition(unittest.TestCase):

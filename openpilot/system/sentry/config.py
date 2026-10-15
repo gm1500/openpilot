@@ -112,7 +112,7 @@ def apply_parking_default(params, sm, now):
 def apply_livestream_mode(params):
   # Called once when a viewer actually enables video on a connected session,
   # never for Connect's background prewarm. Use the same parking choice as the UI.
-  if not setting(params, 'SentryLivestreamOverride') or not setting(params, 'SentryEnabled'):
+  if not setting(params, 'SentryLivestreamOverride'):
     return None
   if not params.get_bool('IsOffroad') or not params.get_bool('IsLiveStreaming'):
     return None
@@ -121,6 +121,8 @@ def apply_livestream_mode(params):
   mode = setting(params, 'SentryLivestreamMode')
   mode = mode if mode < 2 else 'off'
   select_parking_mode(params, mode)
+  if mode != 'off':
+    params.put_bool('SentryEnabled', True, block=True)
   return mode
 
 

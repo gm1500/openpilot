@@ -289,8 +289,8 @@ class StreamSession:
   def apply_sentry_mode(self):
     if not self._connected or not self.enabled or self.is_body or not self.video_tracks or self._sentry_mode_applied:
       return
-    # One action per viewing session. Pause/resume, camera changes or repeated
-    # enable messages must not undo a later local choice or restart arming again.
+    # Each new live view applies the configured override. Repeated enable
+    # messages and camera changes within that view must not restart arming.
     self._sentry_mode_applied = True
     try:
       from openpilot.system.sentry.config import apply_livestream_mode
@@ -327,6 +327,7 @@ class StreamSession:
             if self.bitrate_controller is not None:
               self.bitrate_controller.enable(enabled)
             if not enabled:
+              self._sentry_mode_applied = False
               self.params.put("LivestreamRequestKeyframe", True)
             self.update_video_active()
             self.apply_sentry_mode()

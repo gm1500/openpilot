@@ -156,9 +156,10 @@ class SentryLayout(Widget):
                                    callback=lambda: self._set_sentry_enabled(False),
                                    enabled=lambda: setting(self.params, 'SentryEnabled'))
     self._stop_button.action_item.set_value(self.phase_status)
-    self._livestream_toggle = ListItem('Livestream',
-      description='When enabled, opening live video in Connect forces the selected mode for this parking session. ' +
-                  'Overrides the Wi-Fi skip; Enable Sentry must remain on. Choosing a mode here only configures this action. ' +
+    self._livestream_toggle = ListItem('Livestream trigger',
+      description='Each time you open live video in Connect, override the current parking mode with this selection. ' +
+                  'Low Risk or High Risk also enables Sentry and overrides the Wi-Fi skip. Off skips this parking. ' +
+                  'Choosing a mode here only configures the trigger. ' +
                   'Capture pauses during live viewing and rearms after it closes. Battery, temperature and parking-time limits still apply.',
       action_item=SentryEnableAction(self.params,
         lambda value: self.params.put_bool('SentryLivestreamOverride', value, block=True),
@@ -166,10 +167,10 @@ class SentryLayout(Widget):
     items = [
       self._stop_button,
       self._enable_toggle,
+      self._livestream_toggle,
       self.toggle('SentrySkipOnWifi', 'Skip Sentry on Wi-Fi',
                   'Defaults to Off this parking when parked on Wi-Fi, even with the screen off or no prompt. ' +
                   'Select Low Risk or High Risk above to override it for this parking session.'),
-      self._livestream_toggle,
       ListItem('Arming delay', description=f'Includes {CAMERA_WARMUP_SECONDS:g} seconds of camera warmup once video is available. ' +
                'Footage buffers throughout; motion saves and the eye wait until the total delay finishes.',
                action_item=SentryDurationButtons(self.params, 'SentryArmDelay')),

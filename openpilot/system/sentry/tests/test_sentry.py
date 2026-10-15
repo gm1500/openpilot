@@ -632,7 +632,7 @@ def test_settings_remain_editable_in_all_vehicle_states(monkeypatch, tmp_path, s
   monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*20, 40))
   layout = ui.SentryLayout()
   assert [row.title for row in layout.scroller._items] == [
-    'Sentry', 'Enable Sentry', 'Skip Sentry on Wi-Fi', 'Livestream', 'Arming delay', 'Pre-event buffer', 'Record after motion stops',
+    'Sentry', 'Enable Sentry', 'Livestream trigger', 'Skip Sentry on Wi-Fi', 'Arming delay', 'Pre-event buffer', 'Record after motion stops',
     'Motion sensitivity', 'Audio sensitivity', 'Gyro sensitivity', 'Battery cutoff', 'Maximum parked time', 'Pause capture above',
     'Red eye', 'Video watermark', 'Buffered footage', 'Current time',
   ]
@@ -700,7 +700,7 @@ def test_enable_switch_and_three_coloured_parking_modes_fit_one_row(monkeypatch,
   monkeypatch.setattr(ui, 'gui_label', lambda rect, text, size, *args, **kwargs: labels.append((rect, text)))
   monkeypatch.setattr(rl, 'draw_rectangle_rounded', lambda rect, rounding, segments, color: fills.append((color.r, color.g, color.b)))
   key = 'SentryLivestreamOverride' if livestream else 'SentryEnabled'
-  title = 'Livestream' if livestream else 'Enable Sentry'
+  title = 'Livestream trigger' if livestream else 'Enable Sentry'
   action = ui.SentryEnableAction(params, lambda enabled: params.put_bool(key, enabled, block=True),
                                 key=key, mode_key='SentryLivestreamMode' if livestream else None)
   row = ui.ListItem(title, action_item=action)
@@ -710,7 +710,7 @@ def test_enable_switch_and_three_coloured_parking_modes_fit_one_row(monkeypatch,
   action._render(rect)
   toggle = action.toggle.rect
   assert len(labels) == 3 and toggle.x+toggle.width < labels[0][0].x
-  assert labels[-1][0].x+labels[-1][0].width <= 2110
+  assert labels[-1][0].x+labels[-1][0].width <= 2110.001  # raylib rectangles store float32 coordinates
   assert all(box.y+box.height/2 == toggle.y+toggle.height/2 for box, _ in labels)
   for i, color in enumerate(((245, 196, 46), (190, 35, 42), (71, 184, 104))):
     box, _ = labels[i]

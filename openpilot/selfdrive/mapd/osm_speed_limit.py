@@ -16,6 +16,8 @@ from openpilot.selfdrive.mapd.municipal_zones import fetch_zones, zone_limit, ZO
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 QUERY_RADIUS = 1500.0  # metres; prefetch again after travelling 700 m
 QUERY_INTERVAL = 30.0
+MAX_RETRY_INTERVAL = 60.0
+NETWORK_RETRY_INTERVAL = 5.0  # reconnect promptly, but bound requests during network flapping
 CACHE_TTL = 600.0
 GPS_MAX_AGE = 3.0
 ACQUIRE_RADIUS = 25.0
@@ -683,11 +685,24 @@ class OSMSpeedLimit:
     self.clock = ZoneClock()
     self._thread: threading.Thread | None = None
     self._wake = threading.Event()
+    self._network_type: str | None = None
+    self._network_generation = 0
     self.control: Junction | None = None
     self.control_match: RoadMatch | None = None
     self.control_reason = 'noPosition'
     self.zone_type = 'none'
     self.zone_source = ''
+
+  def update_network(self, network_type: str):
+    # Signal-strength updates are not connection changes. Losing a connection
+    # doesn't help a failed fetch; a newly selected Wi-Fi/cellular path can.
+    with self._lock:
+      changed = network_type != self._network_type
+      self._network_type = network_type
+      if changed and network_type != 'none':
+        self._network_generation += 1
+    if changed:
+      self._wake.set()
 
   def update(self, fix: GpsFix | None, now: float) -> tuple[GpsFix, float | None, float | None, float] | None:
     self.control = self.control_match = None
@@ -769,12 +784,26 @@ class OSMSpeedLimit:
     next_query = next_zone_query = 0.
     zone_retry = QUERY_INTERVAL
     retry_interval = QUERY_INTERVAL
+    network_generation = 0
+    last_query = last_zone_query = -math.inf
+    query_failed = zone_failed = False
     while True:
       now = time.monotonic()
       with self._lock:
         fix = self._fix
         _, centre, fetched_at = self._cache
         _, zone_centre, zones_at = self._zone_cache
+        network_changed = network_generation != self._network_generation
+        network_generation = self._network_generation
+      if network_changed:
+        # Don't carry a failed Wi-Fi request's long backoff onto working
+        # cellular. Keep successful-cache refreshes on their usual schedule.
+        if query_failed:
+          next_query = min(next_query, last_query + NETWORK_RETRY_INTERVAL)
+          retry_interval = QUERY_INTERVAL
+        if zone_failed:
+          next_zone_query = min(next_zone_query, last_zone_query + NETWORK_RETRY_INTERVAL)
+          zone_retry = QUERY_INTERVAL
       if fix is not None and 0 <= now - fix.timestamp <= GPS_MAX_AGE:
         distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, centre)) if centre is not None else math.inf
         if now >= next_query and (distance >= 700 or now - fetched_at >= CACHE_TTL):
@@ -782,28 +811,36 @@ class OSMSpeedLimit:
             roads = fetch_roads(fix)
           except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as error:
             # Do not log coordinates or response bodies; retain only the bounded cache.
-            cloudlog.warning(f"OSM speed limit unavailable: {type(error).__name__}")
+            status = getattr(getattr(error, 'response', None), 'status_code', None)
+            cloudlog.warning(f"OSM speed limit unavailable: {type(error).__name__}, HTTP {status}")
+            query_failed = True
             next_query = time.monotonic() + retry_interval
-            retry_interval = min(300., retry_interval * 2)
+            retry_interval = min(MAX_RETRY_INTERVAL, retry_interval * 2)
           else:
             fetched_at = time.monotonic()
             with self._lock:
               self._cache = roads, fix, fetched_at
             retry_interval = QUERY_INTERVAL
+            query_failed = False
             next_query = fetched_at + QUERY_INTERVAL
+          last_query = time.monotonic()
         zone_distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, zone_centre)) if zone_centre is not None else math.inf
         if now >= next_zone_query and (zone_distance >= 700 or now - zones_at >= ZONE_TTL):
           try:
             zones = fetch_zones(fix)
           except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as error:
-            cloudlog.warning(f"Municipal speed zones unavailable: {type(error).__name__}")
+            status = getattr(getattr(error, 'response', None), 'status_code', None)
+            cloudlog.warning(f"Municipal speed zones unavailable: {type(error).__name__}, HTTP {status}")
+            zone_failed = True
             next_zone_query = time.monotonic() + zone_retry
-            zone_retry = min(300., zone_retry * 2)
+            zone_retry = min(MAX_RETRY_INTERVAL, zone_retry * 2)
           else:
             zones_at = time.monotonic()
             with self._lock:
               self._zone_cache = zones, fix, zones_at
             zone_retry = QUERY_INTERVAL
+            zone_failed = False
             next_zone_query = zones_at + QUERY_INTERVAL
+          last_zone_query = time.monotonic()
       self._wake.wait(0.2)
       self._wake.clear()

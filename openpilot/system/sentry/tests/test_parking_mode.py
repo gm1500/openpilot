@@ -68,19 +68,40 @@ def test_livestream_choice_overrides_wifi_only_for_this_parking(parking, choice)
   assert params.get_bool('SentryLivestreamOverride') and params.get('SentryLivestreamMode') == choice
 
 
-@pytest.mark.parametrize('blocker', ['default', 'disabled', 'master_off', 'onroad', 'no_stream', 'DoShutdown', 'DoReboot', 'DoUninstall'])
-def test_livestream_does_not_change_mode_when_blocked(parking, blocker):
+@pytest.mark.parametrize('choice', [LOW_RISK, HIGH_RISK, 2])
+@pytest.mark.parametrize('current', [LOW_RISK, HIGH_RISK, 'off'])
+@pytest.mark.parametrize('enabled', [False, True])
+def test_livestream_overrides_any_parking_mode_and_can_enable_master(parking, choice, current, enabled):
   params, _ = parking
+  select_parking_mode(params, current)
+  params.put_bool('SentryEnabled', enabled, block=True)
+  params.put_bool('IsLiveStreaming', True, block=True)
+  params.put_bool('SentryLivestreamOverride', True, block=True)
+  params.put('SentryLivestreamMode', choice, block=True)
+  selected_at = params.get('SentryArmResetAt')
+  expected = choice if choice < 2 else 'off'
+  assert apply_livestream_mode(params) == expected
+  assert parking_mode(params) == expected
+  assert params.get_bool('SentryEnabled') == (enabled or choice < 2)
+  assert params.get('SentryArmResetAt') > selected_at
+
+
+@pytest.mark.parametrize('blocker', ['default', 'disabled', 'onroad', 'no_stream', 'DoShutdown', 'DoReboot', 'DoUninstall'])
+@pytest.mark.parametrize('enabled', [False, True])
+def test_livestream_does_not_change_mode_when_blocked(parking, blocker, enabled):
+  params, _ = parking
+  params.put_bool('SentryEnabled', enabled, block=True)
   params.put_bool('IsLiveStreaming', True, block=True)
   if blocker != 'default':
     params.put_bool('SentryLivestreamOverride', True, block=True)
-  if blocker in ('disabled', 'master_off', 'onroad', 'no_stream'):
-    key = {'disabled': 'SentryLivestreamOverride', 'master_off': 'SentryEnabled',
+  if blocker in ('disabled', 'onroad', 'no_stream'):
+    key = {'disabled': 'SentryLivestreamOverride',
            'onroad': 'IsOffroad', 'no_stream': 'IsLiveStreaming'}[blocker]
     params.put_bool(key, False, block=True)
   elif blocker.startswith('Do'):
     params.put_bool(blocker, True, block=True)
   assert apply_livestream_mode(params) is None
+  assert params.get_bool('SentryEnabled') == enabled
   assert parking_mode(params) == LOW_RISK
   assert params.get('SentryArmResetAt') is None and params.get('SentryParkingModeSource') is None
 

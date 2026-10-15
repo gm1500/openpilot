@@ -34,7 +34,7 @@ def session(tmp_path):
 
 
 @pytest.mark.parametrize('prewarm', [False, True])
-def test_only_live_view_selects_once_and_keeps_choice_on_disconnect(session, prewarm):
+def test_each_live_view_applies_override_and_keeps_choice_on_disconnect(session, prewarm):
   s = session
   s.enabled = not prewarm
   s.params.put_bool('SentryOffThisDrive', True, block=True)
@@ -49,19 +49,23 @@ def test_only_live_view_selects_once_and_keeps_choice_on_disconnect(session, pre
     assert parking_mode(s.params) == HIGH_RISK
     assert livestream_video_active(s.params)
     assert s.params.get('SentryArmResetAt') > 0
-    # A later local selection wins over repeated enable messages and pause/resume.
+    # Duplicate enable messages preserve a local choice within this view.
     selected_at = select_parking_mode(s.params, LOW_RISK)
-    for enabled in (True, False, True):
+    for enabled in (True, True, False):
       s.message_handler(json.dumps({'type': 'livestreamVideoEnable', 'data': {'enabled': enabled}}).encode())
     assert parking_mode(s.params) == LOW_RISK
     assert s.params.get('SentryArmResetAt') == selected_at
+    # Reopening live video through the same peer applies the override again.
+    s.message_handler(json.dumps({'type': 'livestreamVideoEnable', 'data': {'enabled': True}}).encode())
+    assert parking_mode(s.params) == HIGH_RISK
+    assert s.params.get('SentryArmResetAt') > selected_at
 
   s.stream.wait_for_disconnection.side_effect = view
   asyncio.run(s.run())
   s.logger.exception.assert_not_called()
   assert s._cleanup_done and not s._connected
   assert not s.params.get_bool('LivestreamVideoActive')
-  assert parking_mode(s.params) == LOW_RISK
+  assert parking_mode(s.params) == HIGH_RISK
 
 
 @pytest.mark.parametrize('blocker', ['prewarm', 'failed_connection', 'no_video', 'body'])
@@ -117,7 +121,7 @@ def test_connect_release_resumes_sentry_while_peer_stays_connected(session, monk
     s.message_handler(json.dumps({'type': 'livestreamVideoEnable', 'data': {'enabled': True}}))
     assert livestream_video_active(s.params)
     assert not config.sentry_capture_requested(False, s.params, None)
-    assert s.params.get('SentryArmResetAt') == selected_at
+    assert s.params.get('SentryArmResetAt') > selected_at
 
   s.stream.wait_for_disconnection.side_effect = view
   asyncio.run(s.run())
