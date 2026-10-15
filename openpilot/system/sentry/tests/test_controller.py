@@ -339,7 +339,7 @@ def test_quiet_eye_and_later_lens_extend_event_without_rearming(monkeypatch, tmp
     sentryd.main()
 
   assert all(armed for now, armed in samples if now >= 142.)
-  assert not any(s['phase'].startswith(('Arming:', 'Camera warmup:')) for now, s in sent.items() if now >= 142.)
+  assert not any(s['phase'].startswith('Arming ') for now, s in sent.items() if now >= 142.)
   for now in (first+2., first+6., second-.2):
     assert not sent[round(now, 1)]['motion']
     assert sent[round(now, 1)]['recordUntilMonoTime'] == int((first+1.+post_seconds)*1e9)
@@ -551,8 +551,8 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
   # Manual saves bypass arming without letting exposure changes extend them.
   # Warmup consumes ten seconds of the total delay: 15 leaves just five.
   warm_at = ready_at+CAMERA_WARMUP_SECONDS
-  assert sent[warm_at]['phase'] == f'Arming: {arm_delay-CAMERA_WARMUP_SECONDS:g} s'
-  assert sent[arm_at-.2]['phase'] == 'Arming: 1 s'
+  assert sent[warm_at]['phase'] == f'Arming {arm_delay-CAMERA_WARMUP_SECONDS:g} s'
+  assert sent[arm_at-.2]['phase'] == 'Arming 1 s'
   assert all(not s['motion'] for now, s in sent.items() if now < arm_at)
   assert all(s['recordUntilMonoTime'] == 0 for now, s in sent.items() if now < ready_at-5.)
   manual_until = int((ready_at+10.)*1e9)
@@ -574,7 +574,7 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
   # user's delay, or stop confirmed motion from extending the open event.
   assert all(s['motion'] for now, s in sent.items() if drop_at <= now < stop_at)
   assert all(armed for now, armed in samples if arm_at <= now < stop_at)
-  assert all(not s['phase'].startswith(('Arming:', 'Camera warmup:')) for now, s in sent.items()
+  assert all(not s['phase'].startswith('Arming ') for now, s in sent.items()
              if arm_at <= now < stop_at)
   assert sent[restart_at]['phase'] == ('Watching' if eye_only else 'Recording')
   assert not sent[stop_at]['capture'] and not sent[stop_at]['motion']
@@ -684,7 +684,7 @@ def test_cooling_resumes_only_before_parking_expiry_and_detection_uses_wide_came
   for now in (150, 160, 180, 250):
     assert runtime[now]['phase'] == 'Cooling down' and not runtime[now]['capture']
   assert runtime[170]['phase'] == 'Waiting for temperature reading' and not runtime[170]['capture']
-  assert runtime[190]['capture'] and runtime[190]['phase'] == 'Camera warmup: 10 s'
+  assert runtime[190]['capture'] and runtime[190]['phase'] == 'Arming 30 s (Camera warmup 10 s)'
   for now in (3700, 3701, 3703, 3705):
     assert runtime[now]['phase'] == 'Parking budget reached' and not runtime[now]['capture']
     assert runtime[now]['parkingStartedAt'] == 100.
@@ -767,6 +767,12 @@ def test_risk_mode_trigger_sources_and_prebuffer(monkeypatch, tmp_path, risk, so
   with pytest.raises(Finished):
     sentryd.main()
   assert sent[105.]['capture']  # Buffer runs before arming in either mode.
+  assert sent[102.]['phase'] == 'Arming 15 s (Camera warmup 10 s)'
+  assert sent[107.]['phase'] == 'Arming 10 s (Camera warmup 5 s)'
+  assert sent[111.]['phase'] == 'Arming 6 s (Camera warmup 1 s)'
+  assert sent[112.]['phase'] == 'Arming 5 s'
+  assert sent[116.]['phase'] == 'Arming 1 s'
+  assert sent[117.]['phase'] == 'Watching'
   assert sent[110.]['recordUntilMonoTime'] == 0
   assert sent[110.]['soundLevel'] == 0.
   assert sent[130.]['soundLevel'] == pytest.approx(.6 if source == 'soundPressure' else 0.)

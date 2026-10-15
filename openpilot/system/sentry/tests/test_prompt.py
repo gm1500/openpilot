@@ -13,8 +13,8 @@ def prompt(monkeypatch, tmp_path):
   monkeypatch.setenv('SCALE', '1')
   from openpilot.selfdrive.ui.layouts import sentry_prompt as ui
   params = Params(str(tmp_path/'params'))
-  params.put_bool('SentryEnabled', True)
-  sm = {'sentryState': SimpleNamespace(phase='Arming: 30 s'),
+  params.put_bool('SentryEnabled', True, block=True)
+  sm = {'sentryState': SimpleNamespace(phase='Arming 30 s'),
         'deviceState': SimpleNamespace(networkType=log.DeviceState.NetworkType.none),
         'peripheralState': SimpleNamespace(voltage=12400)}
   sm = type('SM', (dict,), {'valid': dict.fromkeys(sm, True), 'recv_time': dict.fromkeys(sm, 100.)})(sm)
@@ -35,7 +35,7 @@ def test_choices_close_and_keep_master_enable(prompt, choice, risk, off):
   view, params, sm, device = prompt
   view.update(True)
   assert view.opened and device.sentry_prompt_visible
-  assert view.status == 'Arming in 30 s'
+  assert view.status == 'Arming 30 s'
   box = view.buttons[choice]
   pos = rl.Vector2(box.x+box.width/2, box.y+box.height/2)
   view._handle_mouse_press(pos)
@@ -51,10 +51,12 @@ def test_choices_close_and_keep_master_enable(prompt, choice, risk, off):
 def test_countdown_waits_for_actual_arming_and_stale_state_cannot_dismiss(prompt):
   view, params, sm, device = prompt
   view.update(True)
-  for phase in ('Starting cameras', 'Camera warmup: 10 s', 'Arming: 1 s'):
+  for phase in ('Starting cameras', 'Arming 15 s (Camera warmup 10 s)', 'Arming 6 s (Camera warmup 1 s)',
+                'Arming 5 s', 'Arming 1 s'):
     sm['sentryState'].phase = phase
     view.update(True)
     assert view.opened
+    assert view.status == phase
   sm['sentryState'].phase = 'Watching'
   sm.valid['sentryState'] = False
   view.update(True)
@@ -172,20 +174,22 @@ def test_render_bindings_and_countdown_header_alignment(prompt, monkeypatch):
     monkeypatch.setattr(rl, python_name, rl._wrap_function(rl.ffi.callback(signature, capture)))
   monkeypatch.setattr(ui, 'gui_label', lambda rect, text, size, *args, **kwargs: labels.append((rect, text, size)))
   view._render(view.rect)
-  assert calls.count('draw_rectangle_rounded') == 4 and calls.count('draw_line_ex') == 2
+  assert calls.count('draw_rectangle_rounded') == 3 and calls.count('draw_line_ex') == 2
   header, text, font_size = labels[0]
   close = view.buttons['close']
-  assert text == 'Arming in 30 s'
+  assert text == 'Arming 30 s'
   assert header.x == view.buttons[LOW_RISK].x
   assert header.y+header.height/2 == close.y+close.height/2
   assert header.x+header.width < close.x
-  cutoff, text, size = labels[1]
+  battery, text, _ = labels[1]
+  assert text == 'Battery 12.4 V · Cutoff 11.8 V'
+  cutoff, text, size = labels[2]
   assert text == 'Time cutoff 4 h' and size == font_size
-  assert cutoff.y == header.y and cutoff.height == header.height
-  assert header.x+header.width < cutoff.x and cutoff.x+cutoff.width < close.x
-  battery, text, _ = labels[2]
-  assert text == 'Battery 12.4 V   ·   Cutoff 11.8 V'
-  assert battery.y > header.y+header.height and battery.y+battery.height < view.buttons[LOW_RISK].y
+  assert battery.y == cutoff.y == header.y
+  assert battery.height == cutoff.height == header.height
+  assert header.x+header.width < battery.x and battery.x+battery.width < cutoff.x
+  assert cutoff.x+cutoff.width < close.x
+  assert header.y+header.height < view.buttons[LOW_RISK].y
 
 
 @pytest.mark.parametrize('wifi,changing', [(False, 0), (True, 2)])
@@ -219,7 +223,7 @@ def test_prompt_uses_existing_screen_deadline_and_arming_does_not_wake_it(prompt
   _, params, sm, _ = prompt
   clock = [100.]
   sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi if wifi else log.DeviceState.NetworkType.none
-  sm['sentryState'] = SimpleNamespace(phase='Camera warmup: 10 s', eyeEnabled=True, motion=False, sensorActive=False)
+  sm['sentryState'] = SimpleNamespace(phase='Arming 15 s (Camera warmup 10 s)', eyeEnabled=True, motion=False, sensorActive=False)
   context = SimpleNamespace(ignition=False, started=False, sentry_active=not wifi, sm=sm)
   monkeypatch.setattr(ui, 'ui_state', context)
   monkeypatch.setattr(sentry_prompt, 'ui_state', context)
@@ -238,7 +242,7 @@ def test_prompt_uses_existing_screen_deadline_and_arming_does_not_wake_it(prompt
   for t in (104., 105., 109.9, 110.1, 115., 120.):
     clock[0] = t
     sm.recv_time['sentryState'] = t
-    sm['sentryState'].phase = 'Watching' if t >= armed_at else 'Arming: 5 s'
+    sm['sentryState'].phase = 'Watching' if t >= armed_at else 'Arming 5 s'
     device._update_wakefulness()  # Timer must dismiss the prompt even without a render.
     view.update(True)
     assert device._interaction_time == 110.  # No second menu timeout on dismissal.
@@ -254,7 +258,7 @@ def test_touch_on_prompt_renews_normal_interaction_timer(prompt, monkeypatch):
   from openpilot.selfdrive.ui.layouts import sentry_prompt
   _, params, sm, _ = prompt
   clock = [100.]
-  sm['sentryState'] = SimpleNamespace(phase='Arming: 30 s', eyeEnabled=True, motion=False, sensorActive=False)
+  sm['sentryState'] = SimpleNamespace(phase='Arming 30 s', eyeEnabled=True, motion=False, sensorActive=False)
   context = SimpleNamespace(ignition=False, started=False, sentry_active=True, sm=sm)
   app = SimpleNamespace(target_fps=20, mouse_events=[], big_ui=lambda: True)
   monkeypatch.setattr(ui, 'ui_state', context)

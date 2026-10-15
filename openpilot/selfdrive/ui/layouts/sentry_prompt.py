@@ -52,7 +52,7 @@ class SentryPrompt(Widget):
       return
     fresh = sm.valid['sentryState'] and 0 <= now-sm.recv_time['sentryState'] < 2.
     phase = sm['sentryState'].phase if fresh else 'Starting Sentry'
-    self.status = phase.replace('Arming:', 'Arming in')
+    self.status = phase
     if self.opened and fresh and phase in ('Watching', 'Recording'):
       self.choose(None)  # Keep the default/current mode when the actual timer expires.
 
@@ -79,7 +79,7 @@ class SentryPrompt(Widget):
 
   def _update_layout_rects(self):
     r = self._rect
-    margin, gap, header = 40, 24, 220
+    margin, gap, header = 40, 24, 130
     x, y, width = r.x+margin, r.y+margin+header, r.width-2*margin
     height = r.height-2*margin-header
     top = (height-gap)*2/3
@@ -93,16 +93,15 @@ class SentryPrompt(Widget):
 
   def _render(self, rect):
     rl.draw_rectangle_rec(rect, rl.Color(15, 18, 21, 255))
-    header_width, cutoff_width = rect.width-200, 440
-    gui_label(rl.Rectangle(rect.x+40, rect.y+40, header_width-cutoff_width-40, 90), self.status, 48,
+    header_width, battery_width, cutoff_width, gap = rect.width-200, 700, 380, 32
+    status_width = header_width-battery_width-cutoff_width-2*gap
+    gui_label(rl.Rectangle(rect.x+40, rect.y+40, status_width, 90), self.status, 36,
               rl.WHITE, font_weight=FontWeight.MEDIUM)
+    gui_label(rl.Rectangle(rect.x+40+status_width+gap, rect.y+40, battery_width, 90),
+              f'{self.battery_status} · Cutoff {setting(self.params, "SentryCutoffVoltage"):.1f} V', 32, rl.LIGHTGRAY)
     gui_label(rl.Rectangle(rect.x+40+header_width-cutoff_width, rect.y+40, cutoff_width, 90),
-              f'Time cutoff {setting(self.params, "SentryMaxHours")} h', 48, rl.WHITE,
+              f'Time cutoff {setting(self.params, "SentryMaxHours")} h', 36, rl.WHITE,
               font_weight=FontWeight.MEDIUM, alignment=TextAlignment.RIGHT)
-    battery_box = rl.Rectangle(rect.x+40, rect.y+150, min(1040, rect.width-80), 70)
-    rl.draw_rectangle_rounded(battery_box, .2, 12, rl.Color(30, 35, 40, 255))
-    gui_label(rl.Rectangle(battery_box.x+24, battery_box.y, battery_box.width-48, battery_box.height),
-              f'{self.battery_status}   ·   Cutoff {setting(self.params, "SentryCutoffVoltage"):.1f} V', 36, rl.LIGHTGRAY)
     default_mode = 'off' if self.wifi_default else setting(self.params, 'SentryRiskMode')
     for mode, title, detail, fill, ink in (
       (LOW_RISK, 'Low Risk', 'Sound and vehicle movement', rl.Color(245, 196, 46, 255), rl.BLACK),

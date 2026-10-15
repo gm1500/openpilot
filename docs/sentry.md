@@ -18,10 +18,13 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
 ## Parking risk choice
 
 Each drive ends with a full-screen parking overlay on comma 3X. The top left shows
-the controller's camera warmup/arming countdown; the top right X dismisses it without
-changing the parking default. The time cutoff sits on the same row and uses the same
-font size as the countdown. A single shaded section below groups live battery voltage
-with the configured battery cutoff. Stale voltage says unavailable.
+the controller's total arming countdown; during camera warmup it reads, for example,
+`Arming 15 s (Camera warmup 10 s)`. Both counts decrease together, and the parenthetical
+disappears at the end of warmup, leaving `Arming 5 s` to count down normally. The top
+right X dismisses the prompt without changing the parking default. Battery voltage,
+battery cutoff and time cutoff sit inline on that same header row with no separate
+background. The time cutoff uses the countdown's font size; battery details are slightly
+smaller. Stale voltage says unavailable.
 Low Risk (yellow) and High Risk (red) split the
 upper selection area. The green lower third turns Sentry off for this drive only.
 The default tile pulses in its mode colour every 1.2 seconds, ranging from half to

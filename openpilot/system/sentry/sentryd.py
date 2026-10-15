@@ -253,11 +253,10 @@ def main():
               phase = f'Camera recovering: {math.ceil(recovery)} s' if recovery > 0 else 'Watching'
             else:
               warmup_remaining = CAMERA_WARMUP_SECONDS-(now-ready_since)
+              remaining = max(0., max(CAMERA_WARMUP_SECONDS, arm_delay)-(now-ready_since))
+              phase = f'Arming {math.ceil(remaining)} s' if remaining else 'Watching'
               if warmup_remaining > 0:
-                phase = f'Camera warmup: {math.ceil(warmup_remaining)} s'
-              else:
-                remaining = max(0., arm_delay-(now-ready_since))
-                phase = f'Arming: {math.ceil(remaining)} s' if remaining else 'Watching'
+                phase += f' (Camera warmup {math.ceil(warmup_remaining)} s)'
               arm_complete = now-ready_since >= max(CAMERA_WARMUP_SECONDS, arm_delay)
           # Arming belongs to this capture session, not an event or the eye.
           # Brief frame gaps do not disarm it; CameraMotion independently learns
