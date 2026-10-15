@@ -914,6 +914,62 @@ class TestOSMSpeedLimit(unittest.TestCase):
         self.assertEqual(calls, [100., 701.])
         self.assertTrue(all(result[1] == 40 / 3.6 for result in results))
 
+  def test_overpass_queue_and_slow_response_fit_client_budget(self):
+    element = {'type': 'way', 'tags': {'highway': 'residential', 'maxspeed': '40'},
+               'geometry': [{'lat': -.001, 'lon': 0.}, {'lat': .001, 'lon': 0.}]}
+    body = json.dumps({'elements': [element]}).encode()
+    # Live route query returned valid data after 37.46 s; the former 20 s
+    # deadline rejected that response even if the 12 s read wait didn't expire.
+    for elapsed in (16., 26.85, 37.46, 46.):
+      with self.subTest(elapsed=elapsed):
+        clock = [100.]
+        def chunks(_, clock=clock, elapsed=elapsed):
+          clock[0] += elapsed
+          yield body
+        response = Mock()
+        response.iter_content.side_effect = chunks
+        with patch.object(osm.requests, 'post') as post, patch.object(osm.time, 'monotonic', side_effect=lambda clock=clock: clock[0]):
+          post.return_value.__enter__.return_value = response
+          if elapsed > 45.:
+            with self.assertRaisesRegex(ValueError, 'deadline'):
+              osm.fetch_roads(self.fix)
+          else:
+            self.assertEqual(osm.fetch_roads(self.fix), (road(),))
+          self.assertGreater(post.call_args.kwargs['timeout'][1], 15. + 10.)  # server queue + execution budget
+
+  def test_slow_success_does_not_delay_prefetch_at_new_vehicle_position(self):
+    class StopWorker(Exception):
+      pass
+    for duration in (5., 37.):
+      with self.subTest(duration=duration):
+        service = osm.OSMSpeedLimit()
+        service._fix = self.fix
+        clock = [100.]
+        calls = []
+        # Car advances 900 m while the download completes. Its current fix is
+        # inside the cache but already beyond the movement prefetch threshold.
+        latitude = point(0., 900.)[0]
+        def fetch(fix, calls=calls, clock=clock, service=service, duration=duration, latitude=latitude):
+          calls.append((clock[0], fix.latitude))
+          if len(calls) == 2:
+            raise StopWorker
+          clock[0] += duration
+          service._fix = replace(self.fix, latitude=latitude, timestamp=clock[0])
+          return (road(),)
+        def wait(_, clock=clock, service=service):
+          if clock[0] > 180.:
+            raise StopWorker
+          clock[0] = round(clock[0] + .2, 1)
+          service._fix = replace(service._fix, timestamp=clock[0])
+        modules = {'openpilot.common.realtime': SimpleNamespace(drop_realtime=lambda: None),
+                   'openpilot.common.swaglog': SimpleNamespace(cloudlog=Mock())}
+        with patch.dict(sys.modules, modules), patch.object(osm, 'fetch_roads', side_effect=fetch), \
+             patch.object(osm, 'fetch_zones', return_value=()), patch.object(osm.time, 'monotonic', side_effect=lambda clock=clock: clock[0]), \
+             patch.object(service._wake, 'wait', side_effect=wait):
+          with self.assertRaises(StopWorker):
+            service._run()
+        self.assertEqual(calls, [(100., 0.), (max(130., 100.2 + duration), latitude)])
+
   def run_network_recovery(self, steps, successful_at, change_during_fetch=False):
     class StopWorker(Exception):
       pass

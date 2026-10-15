@@ -24,6 +24,8 @@ ACQUIRE_RADIUS = 25.0
 TRACK_RADIUS = 45.0
 QCOM_UNKNOWN_ACCURACY = 15.0  # Matching allowance, not a measured GPS uncertainty
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+OVERPASS_READ_TIMEOUT = 35.0  # allow the server's 15 s queue plus 10 s query budget and transfer margin
+OVERPASS_RESPONSE_DEADLINE = 45.0
 ROAD_TYPES = ("motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street", "service", "road",
               "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link")
 EARTH_RADIUS = 6371000.0
@@ -641,9 +643,9 @@ class RoadTracker:
 def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
   query = f'[out:json][timeout:10][maxsize:16777216];way(around:{QUERY_RADIUS:.0f},{fix.latitude:.6f},{fix.longitude:.6f})'
   query += f'["highway"~"^({"|".join(ROAD_TYPES)})$"]->.roads;.roads out body geom;'
-  deadline = time.monotonic() + 20
+  deadline = time.monotonic() + OVERPASS_RESPONSE_DEADLINE
   # One request at a time, bounded response size, no identifiers or route history.
-  with requests.post(OVERPASS_URL, data={"data": query}, timeout=(3.05, 12), stream=True,
+  with requests.post(OVERPASS_URL, data={"data": query}, timeout=(5., OVERPASS_READ_TIMEOUT), stream=True,
                      headers={"User-Agent": "boat-anchor-speed-limit/1.0 (https://github.com/gm1500/openpilot)"}) as response:
     response.raise_for_status()
     body = bytearray()
@@ -807,6 +809,7 @@ class OSMSpeedLimit:
       if fix is not None and 0 <= now - fix.timestamp <= GPS_MAX_AGE:
         distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, centre)) if centre is not None else math.inf
         if now >= next_query and (distance >= 700 or now - fetched_at >= CACHE_TTL):
+          query_started = time.monotonic()
           try:
             roads = fetch_roads(fix)
           except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as error:
@@ -822,7 +825,11 @@ class OSMSpeedLimit:
               self._cache = roads, fix, fetched_at
             retry_interval = QUERY_INTERVAL
             query_failed = False
-            next_query = fetched_at + QUERY_INTERVAL
+            # A slow download may have used the entire prefetch interval while
+            # the car travelled towards the cache edge. Don't wait another 30 s
+            # before fetching at the latest position. Still one request at a time.
+            next_query = max(fetched_at, query_started + QUERY_INTERVAL)
+            cloudlog.event('mapd.roads_fetched', roads=len(roads), duration=round(fetched_at - query_started, 2))
           last_query = time.monotonic()
         zone_distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, zone_centre)) if zone_centre is not None else math.inf
         if now >= next_zone_query and (zone_distance >= 700 or now - zones_at >= ZONE_TTL):
