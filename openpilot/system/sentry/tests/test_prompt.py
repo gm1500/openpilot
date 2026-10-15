@@ -31,7 +31,7 @@ def prompt(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize('choice,risk,off', [(LOW_RISK, LOW_RISK, False), (HIGH_RISK, HIGH_RISK, False),
                                            ('off', LOW_RISK, True), ('close', LOW_RISK, False)])
-def test_choices_close_and_keep_master_enable(prompt, choice, risk, off):
+def test_choices_stay_open_except_close_and_keep_master_enable(prompt, choice, risk, off):
   view, params, sm, device = prompt
   view.update(True)
   assert view.opened and device.sentry_prompt_visible
@@ -40,10 +40,11 @@ def test_choices_close_and_keep_master_enable(prompt, choice, risk, off):
   pos = rl.Vector2(box.x+box.width/2, box.y+box.height/2)
   view._handle_mouse_press(pos)
   view._handle_mouse_release(pos)
-  assert not view.opened and not device.sentry_prompt_visible
+  assert view.opened == device.sentry_prompt_visible == (choice != 'close')
   assert setting(params, 'SentryRiskMode') == risk
   assert params.get_bool('SentryOffThisDrive') == off
   assert params.get_bool('SentryEnabled')
+  view.choose(None)
   view.update(True)
   assert not view.opened  # Going back into settings does not reopen the prompt.
 
@@ -98,7 +99,48 @@ def test_wifi_default_off_can_be_overridden_and_network_changes_do_not_reselect(
   view.update(True)
   sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi
   view.update(True)
-  assert not view.opened and params.get_bool('SentryOffThisDrive') == (mode in (None, 'off'))
+  assert view.opened == (mode is not None)
+  assert params.get_bool('SentryOffThisDrive') == (mode in (None, 'off'))
+
+
+def test_switching_off_keeps_original_deadline_and_can_be_changed_again(prompt, monkeypatch):
+  from openpilot.selfdrive.ui.layouts import sentry_prompt as ui
+  view, params, sm, device = prompt
+  view.update(True)
+  for now, mode in ((105., HIGH_RISK), (110., 'off'), (115., LOW_RISK), (120., 'off'), (125., 'off')):
+    monkeypatch.setattr(ui.time, 'monotonic', lambda: now)
+    view.choose(mode)
+    sm.recv_time['sentryState'] = now
+    view.update(True)
+    assert view.opened and device.sentry_prompt_visible
+    assert view.close_at == 130.
+    assert params.get_bool('SentryOffThisDrive') == (mode == 'off')
+  assert view.status == 'Sentry off · Closing in 5 s'
+  monkeypatch.setattr(ui.time, 'monotonic', lambda: 130.)
+  view.update(True)
+  assert not view.opened and params.get_bool('SentryModePrompted')
+  assert params.get_bool('SentryOffThisDrive')
+
+
+def test_overriding_off_follows_resumed_arming_not_off_deadline_or_old_state(prompt, monkeypatch):
+  from openpilot.selfdrive.ui.layouts import sentry_prompt as ui
+  view, params, sm, device = prompt
+  sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi
+  view.update(True)
+  monkeypatch.setattr(ui.time, 'monotonic', lambda: 129.)
+  sm['sentryState'].phase = 'Watching'
+  sm.recv_time['sentryState'] = 128.9
+  view.choose(HIGH_RISK)
+  view.update(True)
+  assert view.opened and view.status == 'Starting Sentry'
+  assert not params.get_bool('SentryOffThisDrive')
+  for now, phase in ((130., 'Arming 15 s (Camera warmup 10 s)'), (140., 'Arming 5 s'), (145., 'Watching')):
+    monkeypatch.setattr(ui.time, 'monotonic', lambda: now)
+    sm.recv_time['sentryState'] = now
+    sm['sentryState'].phase = phase
+    view.update(True)
+    assert view.opened == (now < 145.)
+    assert view.status == phase
 
 
 @pytest.mark.parametrize('blocker', ['disabled', 'stale', 'invalid'])
@@ -192,8 +234,8 @@ def test_render_bindings_and_countdown_header_alignment(prompt, monkeypatch):
   assert header.y+header.height < view.buttons[LOW_RISK].y
 
 
-@pytest.mark.parametrize('wifi,changing', [(False, 0), (True, 2)])
-def test_only_default_tile_background_pulses(prompt, monkeypatch, wifi, changing):
+@pytest.mark.parametrize('wifi', [False, True])
+def test_pulse_moves_to_each_selected_mode_while_prompt_stays_open(prompt, monkeypatch, wifi):
   from openpilot.selfdrive.ui.layouts import sentry_prompt as ui
   view, params, sm, device = prompt
   if wifi:
@@ -207,17 +249,23 @@ def test_only_default_tile_background_pulses(prompt, monkeypatch, wifi, changing
     if rect.y >= view.buttons[LOW_RISK].y:
       fills.append((fill.r, fill.g, fill.b))
   monkeypatch.setattr(rl, 'draw_rectangle_rounded', capture)
-  for t in (120.3, 120.9, 121.5):
-    monkeypatch.setattr(ui.time, 'monotonic', lambda t=t: t)
-    view._render(view.rect)
-  assert [fills[i] != fills[i+3] for i in range(3)] == [i == changing for i in range(3)]
-  assert fills[:3] == fills[6:]
-  assert max(fills[changing+3]) == pytest.approx(max(fills[changing])*.5, abs=1)
+  for mode, changing in ((None, 2 if wifi else 0), (HIGH_RISK, 1), (LOW_RISK, 0), ('off', 2), (HIGH_RISK, 1)):
+    if mode is not None:
+      view.choose(mode)
+    assert view.opened and device.sentry_prompt_visible
+    fills.clear()
+    for t in (120.3, 120.9, 121.5):
+      monkeypatch.setattr(ui.time, 'monotonic', lambda t=t: t)
+      view._render(view.rect)
+    assert [fills[i] != fills[i+3] for i in range(3)] == [i == changing for i in range(3)]
+    assert fills[:3] == fills[6:]
+    assert max(fills[changing+3]) == pytest.approx(max(fills[changing])*.5, abs=1)
 
 
 @pytest.mark.parametrize('wifi', [False, True])
 @pytest.mark.parametrize('armed_at', [105., 115.])
-def test_prompt_uses_existing_screen_deadline_and_arming_does_not_wake_it(prompt, monkeypatch, wifi, armed_at):
+@pytest.mark.parametrize('choice', [None, HIGH_RISK, 'off'])
+def test_prompt_uses_existing_screen_deadline_and_arming_does_not_wake_it(prompt, monkeypatch, wifi, armed_at, choice):
   from openpilot.selfdrive.ui import ui_state as ui
   from openpilot.selfdrive.ui.layouts import sentry_prompt
   _, params, sm, _ = prompt
@@ -241,16 +289,22 @@ def test_prompt_uses_existing_screen_deadline_and_arming_does_not_wake_it(prompt
   assert view.opened and device._interaction_time == 110.  # Opening spends the existing budget.
   for t in (104., 105., 109.9, 110.1, 115., 120.):
     clock[0] = t
+    if t == 104. and choice is not None:
+      view.choose(choice)
+      assert view.opened
     sm.recv_time['sentryState'] = t
     sm['sentryState'].phase = 'Watching' if t >= armed_at else 'Arming 5 s'
     device._update_wakefulness()  # Timer must dismiss the prompt even without a render.
     view.update(True)
     assert device._interaction_time == 110.  # No second menu timeout on dismissal.
     assert device.awake == (t < 110.)
+    off = choice == 'off' or choice is None and wifi
+    if t < 110.:
+      assert view.opened == (off or t < armed_at)
     if t > 110.:
       assert not view.opened and not device.sentry_prompt_visible
       assert params.get_bool('SentryModePrompted')
-  assert params.get_bool('SentryOffThisDrive') == wifi
+  assert params.get_bool('SentryOffThisDrive') == off
 
 
 def test_touch_on_prompt_renews_normal_interaction_timer(prompt, monkeypatch):

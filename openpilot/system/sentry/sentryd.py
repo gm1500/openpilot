@@ -197,7 +197,8 @@ def main():
         if capture:
           risk = setting(params, 'SentryRiskMode')
           if risk != previous_risk:
-            cameras.clear()
+            # Both modes already sample the same cameras. Keep their exposure
+            # history and arming clock when the parking selection changes.
             preview.reset()
             previous_risk = risk
           if sensors is None:

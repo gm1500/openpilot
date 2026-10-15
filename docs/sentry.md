@@ -22,16 +22,19 @@ Each drive ends with a full-screen parking overlay on comma 3X. The top left sho
 the controller's total arming countdown; during camera warmup it reads, for example,
 `Arming 15 s (Camera warmup 10 s)`. Both counts decrease together, and the parenthetical
 disappears at the end of warmup, leaving `Arming 5 s` to count down normally. The top
-right X dismisses the prompt without changing the parking default. Battery voltage,
+right X dismisses the prompt without changing the current selection. Battery voltage,
 battery cutoff and time cutoff sit inline on that same header row with no separate
 background. The time cutoff uses the countdown's font size; battery details are slightly
 smaller. Stale voltage says unavailable.
 Low Risk (yellow) and High Risk (red) split the
 upper selection area. The green lower third turns Sentry off for this drive only.
-The default tile pulses in its mode colour every 1.2 seconds, ranging from half to
-full brightness, and is labelled Default; the other tiles remain steady.
-Every choice returns to the regular offroad UI. The prompt also closes when arming
-finishes or the existing screen interaction timer expires, and cannot intercept the driving screen.
+The selected tile pulses in its mode colour every 1.2 seconds, ranging from half to
+full brightness; the other tiles remain steady. There is no extra Default label.
+Tapping another tile applies that choice immediately and moves the pulse to it,
+keeping the prompt open so the selection can be changed again. Switching between
+Low and High Risk preserves camera warmup and the arming countdown. The prompt
+closes when arming finishes or the existing screen interaction timer expires,
+whichever happens first, and cannot intercept the driving screen.
 Opening or automatically closing it does not reset that timer or add a second menu
 timeout. Touches renew the normal interaction timer. Arming continues with the screen off.
 An explicit global Enable Sentry/STOP setting is still respected.
@@ -41,7 +44,9 @@ When a fresh device state reports Wi-Fi at prompt opening, the green Off tile be
 the default and capture is skipped immediately. The choices remain available for the
 configured arming-delay duration, or until the screen timeout, before the prompt closes; no running cameras are
 needed for that countdown. Selecting either risk mode clears the skip and starts normal
-arming. X keeps Off. Later network changes do not override a choice or rearm that
+arming, with the prompt following that controller countdown. Selecting Off manually
+keeps the prompt open for the remainder of the original choice window; repeated taps
+do not restart it. X keeps the current selection. Later network changes do not override a choice or rearm that
 parking session. Each new drive resets the temporary choice and checks Wi-Fi again.
 With the option disabled, or without a fresh Wi-Fi connection, Low Risk remains the default.
 

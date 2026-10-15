@@ -6,7 +6,7 @@ import pytest
 from opendbc.car.structs import car
 from openpilot.cereal import log
 from openpilot.system.sentry import sentryd
-from openpilot.system.sentry.config import DEFAULTS, CAMERA_WARMUP_SECONDS, HIGH_RISK
+from openpilot.system.sentry.config import DEFAULTS, CAMERA_WARMUP_SECONDS, LOW_RISK, HIGH_RISK
 from openpilot.system.sentry.location import vehicle_identity
 from openpilot.system.sentry.motion import Motion, PreviewSelector
 
@@ -455,8 +455,8 @@ def test_controller_requests_gps_only_until_snapshot_or_timeout(monkeypatch, tmp
 
 @pytest.mark.parametrize('arm_delay', [15, 30, 60])
 @pytest.mark.parametrize('eye_only', [False, True])
-@pytest.mark.parametrize('recorder_gap', [None, 'heartbeat', 'buffer'])
-def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_delay, eye_only, recorder_gap):
+@pytest.mark.parametrize('recorder_gap,change_risk', [(None, False), ('heartbeat', False), ('buffer', False), (None, True)])
+def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_delay, eye_only, recorder_gap, change_risk):
   class Params(dict):
     get_bool = dict.get
     def remove(self, key):
@@ -505,6 +505,8 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
           self['sentryRecorderState'].bufferBytes = 0
       if now == ready_at-5.:
         params['SentryManualTrigger'] = True
+      if change_risk and now in (ready_at+2., ready_at+4.):
+        params['SentryRiskMode'] = LOW_RISK if now == ready_at+2. else HIGH_RISK
       if now >= stop_at:
         params['SentryEnabled'] = False
 
@@ -512,9 +514,10 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
     warm_until = 0.
     def __init__(self, stream):
       self.stream, self.last_received = stream, 0.
+      self.connected_at = clock[0]+.4
     def sample(self, now, sensitivity, armed, gyro=None):
       samples.append((now, armed))
-      if now < {0: 135., 1: ready_at, 2: 140.}[self.stream] or (self.stream == 1 and drop_at <= now < restart_at):
+      if now < max(self.connected_at, {0: 135., 1: ready_at, 2: 140.}[self.stream]) or (self.stream == 1 and drop_at <= now < restart_at):
         return Motion()
       self.last_received = now
       # Deliberately return motion even while unarmed: the controller must gate

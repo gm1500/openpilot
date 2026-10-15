@@ -12,7 +12,7 @@ from openpilot.system.ui.widgets.label import gui_label
 
 
 class SentryPrompt(Widget):
-  """One parking choice per drive, sharing the controller's arming countdown."""
+  """Parking selection stays editable until arming or the screen timer finishes."""
   def __init__(self):
     super().__init__()
     self.params = Params()
@@ -22,6 +22,7 @@ class SentryPrompt(Widget):
     self.buttons = {}
     self.wifi_default = False
     self.close_at = 0.
+    self.resume_after = 0.
     self.battery_status = 'Battery unavailable'
     device.add_interactive_timeout_callback(self._on_interactive_timeout)
 
@@ -38,19 +39,24 @@ class SentryPrompt(Widget):
                            sm['deviceState'].networkType == log.DeviceState.NetworkType.wifi)
       if self.wifi_default:
         self.params.put_bool('SentryOffThisDrive', True, block=True)
-        self.close_at = now+setting(self.params, 'SentryArmDelay')
+      # Off has no controller countdown. Keep the original choice window when
+      # switching to it; tapping a tile must not restart that window.
+      self.close_at = now+setting(self.params, 'SentryArmDelay')
+      self.resume_after = 0.
       self.opened = True
       device.sentry_prompt_visible = True
 
     voltage = sm['peripheralState'].voltage/1000.
     voltage_valid = sm.valid['peripheralState'] and 0 <= now-sm.recv_time['peripheralState'] < 3. and 6 < voltage < 20
     self.battery_status = f'Battery {voltage:.1f} V' if voltage_valid else 'Battery unavailable'
-    if self.wifi_default:
-      self.status = f'Wi-Fi · Sentry off · Closing in {max(0, math.ceil(self.close_at-now))} s'
+    if self.params.get_bool('SentryOffThisDrive'):
+      prefix = 'Wi-Fi · ' if self.wifi_default else ''
+      self.status = f'{prefix}Sentry off · Closing in {max(0, math.ceil(self.close_at-now))} s'
       if self.opened and now >= self.close_at:
         self.choose(None)
       return
-    fresh = sm.valid['sentryState'] and 0 <= now-sm.recv_time['sentryState'] < 2.
+    fresh = (sm.valid['sentryState'] and 0 <= now-sm.recv_time['sentryState'] < 2. and
+             sm.recv_time['sentryState'] > self.resume_after)
     phase = sm['sentryState'].phase if fresh else 'Starting Sentry'
     self.status = phase
     if self.opened and fresh and phase in ('Watching', 'Recording'):
@@ -68,14 +74,20 @@ class SentryPrompt(Widget):
       self.choose(None)
 
   def choose(self, mode):
-    # X retains the parking default, including Off on Wi-Fi.
+    # Apply selections immediately, but leave all three tiles available until
+    # arming/screen timeout. X dismisses while retaining the current selection.
     if mode == 'off':
       self.params.put_bool('SentryOffThisDrive', True, block=True)
     elif mode is not None:
+      if self.params.get_bool('SentryOffThisDrive'):
+        self.resume_after = time.monotonic()  # Ignore controller state from before resuming capture.
       self.params.put('SentryRiskMode', mode, block=True)
       self.params.put_bool('SentryOffThisDrive', False, block=True)
     self.params.put_bool('SentryModePrompted', True, block=True)
-    self.close()
+    if mode is None:
+      self.close()
+    else:
+      self.wifi_default = False
 
   def _update_layout_rects(self):
     r = self._rect
@@ -102,7 +114,7 @@ class SentryPrompt(Widget):
     gui_label(rl.Rectangle(rect.x+40+header_width-cutoff_width, rect.y+40, cutoff_width, 90),
               f'Time cutoff {setting(self.params, "SentryMaxHours")} h', 36, rl.WHITE,
               font_weight=FontWeight.MEDIUM, alignment=TextAlignment.RIGHT)
-    default_mode = 'off' if self.wifi_default else setting(self.params, 'SentryRiskMode')
+    selected_mode = 'off' if self.params.get_bool('SentryOffThisDrive') else setting(self.params, 'SentryRiskMode')
     for mode, title, detail, fill, ink in (
       (LOW_RISK, 'Low Risk', 'Sound and vehicle movement', rl.Color(245, 196, 46, 255), rl.BLACK),
       (HIGH_RISK, 'High Risk', 'Camera motion, sound and vehicle movement', rl.Color(190, 35, 42, 255), rl.WHITE),
@@ -110,8 +122,7 @@ class SentryPrompt(Widget):
        rl.Color(71, 184, 104, 255), rl.BLACK),
     ):
       box = self.buttons[mode]
-      if mode == default_mode:
-        detail += ' · Default'
+      if mode == selected_mode:
         # Breathe from half to full brightness every 1.2 seconds; keep the
         # yellow/red/green mode colours and leave the other tiles steady.
         brightness = .75+.25*math.sin(time.monotonic()*math.tau/1.2)
