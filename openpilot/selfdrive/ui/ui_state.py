@@ -478,7 +478,7 @@ class Device:
       self.sentry_motion_until = 0.
     elif state.motion and state.motionCamera in (1, 2) or state.sensorActive:
       self.sentry_motion_until = time.monotonic()+.75
-    self._set_awake(ui_state.ignition or not interaction_timeout or self.sentry_eye_visible or self.sentry_prompt_visible or PC)
+    self._set_awake(ui_state.ignition or not interaction_timeout or self.sentry_eye_visible or PC)
 
   def _set_awake(self, on: bool):
     if on != self._awake:

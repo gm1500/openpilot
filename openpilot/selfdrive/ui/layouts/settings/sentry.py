@@ -128,8 +128,8 @@ class SentryLayout(Widget):
       ListItem('Risk mode', description='Low: sound and physical movement. High: also camera motion. ' +
                'Both keep the pre-event video buffer. Defaults to Low Risk after each drive.',
                action_item=SentryModeButtons(self.params)),
-      ListItem('Arming delay', description=f'Starts after {CAMERA_WARMUP_SECONDS:g} seconds of camera warmup. ' +
-               'Footage buffers throughout; motion saves and the eye wait until both stages finish.',
+      ListItem('Arming delay', description=f'Includes {CAMERA_WARMUP_SECONDS:g} seconds of camera warmup once video is available. ' +
+               'Footage buffers throughout; motion saves and the eye wait until the total delay finishes.',
                action_item=SentryDurationButtons(self.params, 'SentryArmDelay')),
       ListItem('Pre-event buffer', description='How much available footage to keep before motion is confirmed.',
                action_item=SentryDurationButtons(self.params, 'SentryPreSeconds')),

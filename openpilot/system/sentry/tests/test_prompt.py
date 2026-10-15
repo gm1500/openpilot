@@ -18,7 +18,8 @@ def prompt(monkeypatch, tmp_path):
         'deviceState': SimpleNamespace(networkType=log.DeviceState.NetworkType.none),
         'peripheralState': SimpleNamespace(voltage=12400)}
   sm = type('SM', (dict,), {'valid': dict.fromkeys(sm, True), 'recv_time': dict.fromkeys(sm, 100.)})(sm)
-  device = SimpleNamespace(sentry_prompt_visible=False, _reset_interactive_timeout=lambda: None)
+  callbacks = []
+  device = SimpleNamespace(sentry_prompt_visible=False, add_interactive_timeout_callback=callbacks.append)
   monkeypatch.setattr(ui, 'Params', lambda: params)
   monkeypatch.setattr(ui, 'ui_state', SimpleNamespace(sm=sm))
   monkeypatch.setattr(ui, 'device', device)
@@ -169,18 +170,22 @@ def test_render_bindings_and_countdown_header_alignment(prompt, monkeypatch):
     def capture(*args, name=python_name):
       calls.append(name)
     monkeypatch.setattr(rl, python_name, rl._wrap_function(rl.ffi.callback(signature, capture)))
-  monkeypatch.setattr(ui, 'gui_label', lambda rect, text, *args, **kwargs: labels.append((rect, text)))
+  monkeypatch.setattr(ui, 'gui_label', lambda rect, text, size, *args, **kwargs: labels.append((rect, text, size)))
   view._render(view.rect)
-  assert calls.count('draw_rectangle_rounded') == 3 and calls.count('draw_line_ex') == 2
-  header, text = labels[0]
+  assert calls.count('draw_rectangle_rounded') == 4 and calls.count('draw_line_ex') == 2
+  header, text, font_size = labels[0]
   close = view.buttons['close']
   assert text == 'Arming in 30 s'
   assert header.x == view.buttons[LOW_RISK].x
   assert header.y+header.height/2 == close.y+close.height/2
   assert header.x+header.width < close.x
-  assert [text for _, text in labels[1:4]] == ['Battery 12.4 V', 'Battery cutoff 11.8 V', 'Time cutoff 4 h']
-  for rect, _ in labels[1:4]:
-    assert rect.y > header.y+header.height and rect.y+rect.height < view.buttons[LOW_RISK].y
+  cutoff, text, size = labels[1]
+  assert text == 'Time cutoff 4 h' and size == font_size
+  assert cutoff.y == header.y and cutoff.height == header.height
+  assert header.x+header.width < cutoff.x and cutoff.x+cutoff.width < close.x
+  battery, text, _ = labels[2]
+  assert text == 'Battery 12.4 V   ·   Cutoff 11.8 V'
+  assert battery.y > header.y+header.height and battery.y+battery.height < view.buttons[LOW_RISK].y
 
 
 @pytest.mark.parametrize('wifi,changing', [(False, 0), (True, 2)])
@@ -194,8 +199,83 @@ def test_only_default_tile_background_pulses(prompt, monkeypatch, wifi, changing
     monkeypatch.setattr(rl, name, lambda *args: None)
   monkeypatch.setattr(ui, 'gui_label', lambda *args, **kwargs: None)
   fills = []
-  monkeypatch.setattr(rl, 'draw_rectangle_rounded', lambda rect, rounding, segments, fill: fills.append((fill.r, fill.g, fill.b)))
-  for t in (100.5, 101.5):
+  def capture(rect, rounding, segments, fill):
+    if rect.y >= view.buttons[LOW_RISK].y:
+      fills.append((fill.r, fill.g, fill.b))
+  monkeypatch.setattr(rl, 'draw_rectangle_rounded', capture)
+  for t in (120.3, 120.9, 121.5):
     monkeypatch.setattr(ui.time, 'monotonic', lambda t=t: t)
     view._render(view.rect)
   assert [fills[i] != fills[i+3] for i in range(3)] == [i == changing for i in range(3)]
+  assert fills[:3] == fills[6:]
+  assert max(fills[changing+3]) == pytest.approx(max(fills[changing])*.5, abs=1)
+
+
+@pytest.mark.parametrize('wifi', [False, True])
+@pytest.mark.parametrize('armed_at', [105., 115.])
+def test_prompt_uses_existing_screen_deadline_and_arming_does_not_wake_it(prompt, monkeypatch, wifi, armed_at):
+  from openpilot.selfdrive.ui import ui_state as ui
+  from openpilot.selfdrive.ui.layouts import sentry_prompt
+  _, params, sm, _ = prompt
+  clock = [100.]
+  sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi if wifi else log.DeviceState.NetworkType.none
+  sm['sentryState'] = SimpleNamespace(phase='Camera warmup: 10 s', eyeEnabled=True, motion=False, sensorActive=False)
+  context = SimpleNamespace(ignition=False, started=False, sentry_active=not wifi, sm=sm)
+  monkeypatch.setattr(ui, 'ui_state', context)
+  monkeypatch.setattr(sentry_prompt, 'ui_state', context)
+  monkeypatch.setattr(ui, 'gui_app', SimpleNamespace(target_fps=20, mouse_events=[], big_ui=lambda: True))
+  monkeypatch.setattr(ui, 'PC', False)
+  monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
+  device = ui.Device()
+  device.set_override_interactive_timeout(10)
+  monkeypatch.setattr(device, '_set_awake', lambda awake: setattr(device, '_awake', awake))
+  monkeypatch.setattr(sentry_prompt, 'device', device)
+  view = sentry_prompt.SentryPrompt()
+  params.put('SentryArmDelay', 15, block=True)
+  clock[0] = 102.
+  view.update(True)
+  assert view.opened and device._interaction_time == 110.  # Opening spends the existing budget.
+  for t in (104., 105., 109.9, 110.1, 115., 120.):
+    clock[0] = t
+    sm.recv_time['sentryState'] = t
+    sm['sentryState'].phase = 'Watching' if t >= armed_at else 'Arming: 5 s'
+    device._update_wakefulness()  # Timer must dismiss the prompt even without a render.
+    view.update(True)
+    assert device._interaction_time == 110.  # No second menu timeout on dismissal.
+    assert device.awake == (t < 110.)
+    if t > 110.:
+      assert not view.opened and not device.sentry_prompt_visible
+      assert params.get_bool('SentryModePrompted')
+  assert params.get_bool('SentryOffThisDrive') == wifi
+
+
+def test_touch_on_prompt_renews_normal_interaction_timer(prompt, monkeypatch):
+  from openpilot.selfdrive.ui import ui_state as ui
+  from openpilot.selfdrive.ui.layouts import sentry_prompt
+  _, params, sm, _ = prompt
+  clock = [100.]
+  sm['sentryState'] = SimpleNamespace(phase='Arming: 30 s', eyeEnabled=True, motion=False, sensorActive=False)
+  context = SimpleNamespace(ignition=False, started=False, sentry_active=True, sm=sm)
+  app = SimpleNamespace(target_fps=20, mouse_events=[], big_ui=lambda: True)
+  monkeypatch.setattr(ui, 'ui_state', context)
+  monkeypatch.setattr(sentry_prompt, 'ui_state', context)
+  monkeypatch.setattr(ui, 'gui_app', app)
+  monkeypatch.setattr(ui, 'PC', False)
+  monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
+  device = ui.Device()
+  device.set_override_interactive_timeout(10)
+  monkeypatch.setattr(device, '_set_awake', lambda awake: setattr(device, '_awake', awake))
+  monkeypatch.setattr(sentry_prompt, 'device', device)
+  view = sentry_prompt.SentryPrompt()
+  view.update(True)
+  clock[0] = 105.
+  app.mouse_events = [SimpleNamespace(left_down=True)]
+  device._update_wakefulness()
+  assert device._interaction_time == 115.
+  app.mouse_events = []
+  clock[0] = 110.1
+  device._update_wakefulness()
+  assert view.opened and device.awake
+  clock[0] = 115.1
+  device._update_wakefulness()
+  assert not view.opened and not device.awake and params.get_bool('SentryModePrompted')

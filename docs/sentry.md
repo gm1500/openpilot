@@ -19,20 +19,23 @@ thermal behavior, battery draw, and Connect indexing/playback still require devi
 
 Each drive ends with a full-screen parking overlay on comma 3X. The top left shows
 the controller's camera warmup/arming countdown; the top right X dismisses it without
-changing the parking default. Live battery voltage, the configured battery cutoff and
-the configured time cutoff appear below the countdown. Stale voltage says unavailable.
+changing the parking default. The time cutoff sits on the same row and uses the same
+font size as the countdown. A single shaded section below groups live battery voltage
+with the configured battery cutoff. Stale voltage says unavailable.
 Low Risk (yellow) and High Risk (red) split the
 upper selection area. The green lower third turns Sentry off for this drive only.
-The default tile gently pulses in its mode colour every two seconds and is labelled
-Default; the other tiles remain steady.
+The default tile pulses in its mode colour every 1.2 seconds, ranging from half to
+full brightness, and is labelled Default; the other tiles remain steady.
 Every choice returns to the regular offroad UI. The prompt also closes when arming
-finishes, stays awake while visible, and cannot intercept the driving screen.
+finishes or the existing screen interaction timer expires, and cannot intercept the driving screen.
+Opening or automatically closing it does not reset that timer or add a second menu
+timeout. Touches renew the normal interaction timer. Arming continues with the screen off.
 An explicit global Enable Sentry/STOP setting is still respected.
 
 Skip Sentry on Wi-Fi is enabled by default and appears just below Enable Sentry.
 When a fresh device state reports Wi-Fi at prompt opening, the green Off tile becomes
 the default and capture is skipped immediately. The choices remain available for the
-configured arming-delay duration before the prompt closes; no running cameras are
+configured arming-delay duration, or until the screen timeout, before the prompt closes; no running cameras are
 needed for that countdown. Selecting either risk mode clears the skip and starts normal
 arming. X keeps Off. Later network changes do not override a choice or rearm that
 parking session. Each new drive resets the temporary choice and checks Wi-Fi again.
@@ -114,10 +117,11 @@ then reboots after success. No panda changes are needed.
   Driving controls, modeld and locationd are never started for sentry. Ignition/onroad
   stops capture; driving and sentry encoders cannot run simultaneously.
 - Starts filling the RAM buffer after the offroad transition. Once both wide cameras
-  deliver frames and the recorder has buffered video, a separate 10-second camera warmup
-  runs before the selected 15/30/60-second arming delay (default 30). With the default, motion
-  arms 40 seconds after video is ready. The detector learns the changing exposure throughout
-  both stages; automatic events and the eye wait until both finish. Manual saves work during
+  deliver frames and the recorder has buffered video, the 10-second camera warmup runs
+  within the selected 15/30/60-second total arming delay (default 30). A 15-second delay
+  leaves five seconds after warmup; the default arms 30 seconds after video is ready.
+  The detector learns the changing exposure throughout; automatic events and the eye
+  wait until warmup and the total delay have both finished. Manual saves work during
   either stage. Once armed, the capture session stays armed through quiet periods, completed
   events and brief camera/recorder gaps. A real camera reconnect or frame-counter reset gives
   that lens a new 10-second exposure warmup without repeating the user's arming delay or

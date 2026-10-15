@@ -203,7 +203,7 @@ def main():
           if sensors is None:
             sensors = SensorActivity()
           arm_delay = setting(params, 'SentryArmDelay')
-          armed = arm_complete or ready_since is not None and now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
+          armed = arm_complete or ready_since is not None and now-ready_since >= max(CAMERA_WARMUP_SECONDS, arm_delay)
           sensor_trigger = sensors.sample(now, armed, setting(params, 'SentryAudioSensitivity'), setting(params, 'SentryGyroSensitivity'))
           gyro_diagnostics = sensors.gyro_diagnostics
           sound_level = sensors.audio_level(now) if armed else 0.
@@ -242,8 +242,8 @@ def main():
           elif not recorder_ready:
             phase = 'Waiting for encoded video'
           else:
-            # Camera exposure gets its own settling period before the user's
-            # full arming delay. Both start only after working video arrives.
+            # Camera exposure settles within the user's total arming delay.
+            # Both clocks start together once working video arrives.
             # Keep that clock across recorder-only gaps: saving pre-roll or
             # syncing segments can delay status while cameras stay exposed.
             if ready_since is None:
@@ -256,9 +256,9 @@ def main():
               if warmup_remaining > 0:
                 phase = f'Camera warmup: {math.ceil(warmup_remaining)} s'
               else:
-                remaining = max(0., arm_delay+warmup_remaining)
+                remaining = max(0., arm_delay-(now-ready_since))
                 phase = f'Arming: {math.ceil(remaining)} s' if remaining else 'Watching'
-              arm_complete = now-ready_since >= CAMERA_WARMUP_SECONDS+arm_delay
+              arm_complete = now-ready_since >= max(CAMERA_WARMUP_SECONDS, arm_delay)
           # Arming belongs to this capture session, not an event or the eye.
           # Brief frame gaps do not disarm it; CameraMotion independently learns
           # exposure again after an actual camera reconnect/frame-counter reset.

@@ -23,6 +23,7 @@ class SentryPrompt(Widget):
     self.wifi_default = False
     self.close_at = 0.
     self.battery_status = 'Battery unavailable'
+    device.add_interactive_timeout_callback(self._on_interactive_timeout)
 
   def update(self, eligible):
     if not eligible or not setting(self.params, 'SentryEnabled'):
@@ -40,7 +41,6 @@ class SentryPrompt(Widget):
         self.close_at = now+setting(self.params, 'SentryArmDelay')
       self.opened = True
       device.sentry_prompt_visible = True
-      device._reset_interactive_timeout()
 
     voltage = sm['peripheralState'].voltage/1000.
     voltage_valid = sm.valid['peripheralState'] and 0 <= now-sm.recv_time['peripheralState'] < 3. and 6 < voltage < 20
@@ -61,7 +61,11 @@ class SentryPrompt(Widget):
       self.opened = False
       self.pressed = None
       device.sentry_prompt_visible = False
-      device._reset_interactive_timeout()
+
+  def _on_interactive_timeout(self):
+    # Arming continues in sentryd while the ordinary screen timer sleeps the UI.
+    if self.opened:
+      self.choose(None)
 
   def choose(self, mode):
     # X retains the parking default, including Off on Wi-Fi.
@@ -89,13 +93,16 @@ class SentryPrompt(Widget):
 
   def _render(self, rect):
     rl.draw_rectangle_rec(rect, rl.Color(15, 18, 21, 255))
-    gui_label(rl.Rectangle(rect.x+40, rect.y+40, rect.width-200, 90), self.status, 48,
+    header_width, cutoff_width = rect.width-200, 440
+    gui_label(rl.Rectangle(rect.x+40, rect.y+40, header_width-cutoff_width-40, 90), self.status, 48,
               rl.WHITE, font_weight=FontWeight.MEDIUM)
-    labels = (self.battery_status, f'Battery cutoff {setting(self.params, "SentryCutoffVoltage"):.1f} V',
-              f'Time cutoff {setting(self.params, "SentryMaxHours")} h')
-    width = (rect.width-80)/3
-    for i, text in enumerate(labels):
-      gui_label(rl.Rectangle(rect.x+40+i*width, rect.y+150, width-24, 60), text, 36, rl.LIGHTGRAY)
+    gui_label(rl.Rectangle(rect.x+40+header_width-cutoff_width, rect.y+40, cutoff_width, 90),
+              f'Time cutoff {setting(self.params, "SentryMaxHours")} h', 48, rl.WHITE,
+              font_weight=FontWeight.MEDIUM, alignment=TextAlignment.RIGHT)
+    battery_box = rl.Rectangle(rect.x+40, rect.y+150, min(1040, rect.width-80), 70)
+    rl.draw_rectangle_rounded(battery_box, .2, 12, rl.Color(30, 35, 40, 255))
+    gui_label(rl.Rectangle(battery_box.x+24, battery_box.y, battery_box.width-48, battery_box.height),
+              f'{self.battery_status}   ·   Cutoff {setting(self.params, "SentryCutoffVoltage"):.1f} V', 36, rl.LIGHTGRAY)
     default_mode = 'off' if self.wifi_default else setting(self.params, 'SentryRiskMode')
     for mode, title, detail, fill, ink in (
       (LOW_RISK, 'Low Risk', 'Sound and vehicle movement', rl.Color(245, 196, 46, 255), rl.BLACK),
@@ -106,9 +113,9 @@ class SentryPrompt(Widget):
       box = self.buttons[mode]
       if mode == default_mode:
         detail += ' · Default'
-        # A gentle two-second breath identifies the default without changing
-        # the meaning of the yellow/red/green mode colours.
-        brightness = .85+.15*math.sin(time.monotonic()*math.tau/2.)
+        # Breathe from half to full brightness every 1.2 seconds; keep the
+        # yellow/red/green mode colours and leave the other tiles steady.
+        brightness = .75+.25*math.sin(time.monotonic()*math.tau/1.2)
         fill = rl.Color(int(fill.r*brightness), int(fill.g*brightness), int(fill.b*brightness), fill.a)
       rl.draw_rectangle_rounded(box, .08, 12, fill)
       gui_label(rl.Rectangle(box.x+20, box.y+box.height/2-70, box.width-40, 90), title, 64,

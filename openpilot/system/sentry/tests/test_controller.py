@@ -465,13 +465,13 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
   params = Params(DEFAULTS | {'SentryRiskMode': HIGH_RISK, 'IsOffroad': True, 'SentryArmDelay': arm_delay, 'SentryPostSeconds': 15})
   clock = [100.]
   ready_at = 145.
-  arm_at = ready_at+CAMERA_WARMUP_SECONDS
-  saving_at = arm_at+arm_delay+1.2
-  saved_at = arm_at+arm_delay+4.
-  drop_at = arm_at+arm_delay+5.
+  arm_at = ready_at+arm_delay
+  saving_at = arm_at+1.2
+  saved_at = arm_at+4.
+  drop_at = arm_at+5.
   restart_at = drop_at+3.
   rearm_at = restart_at+CAMERA_WARMUP_SECONDS
-  stop_at = rearm_at+arm_delay+5.
+  stop_at = rearm_at+5.
   sent = {}
   samples = []
 
@@ -503,7 +503,7 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
           self.recv_time['sentryRecorderState'] = saving_at-.2
         else:
           self['sentryRecorderState'].bufferBytes = 0
-      if now == ready_at+2.:
+      if now == ready_at-5.:
         params['SentryManualTrigger'] = True
       if now >= stop_at:
         params['SentryEnabled'] = False
@@ -519,7 +519,7 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
       self.last_received = now
       # Deliberately return motion even while unarmed: the controller must gate
       # both automatic requests and the eye independently of the detector.
-      confirmed = not eye_only and (not armed or now >= arm_at+arm_delay+1.)
+      confirmed = not eye_only and (not armed or now >= arm_at+1.)
       return Motion(True, .2, .8, .4, triggered=confirmed)
 
   class Finished(Exception):
@@ -547,18 +547,20 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
   with pytest.raises(Finished):
     sentryd.main()
 
-  assert sent[ready_at]['phase'] == f'Camera warmup: {CAMERA_WARMUP_SECONDS:g} s'
-  # Manual saves bypass both delays without letting exposure changes extend them.
-  # The manual tail finishes at arm_at+7; the arming clock must still be running.
-  assert sent[arm_at+8.]['phase'] == f'Arming: {arm_delay-8} s'
-  assert all(not s['motion'] for now, s in sent.items() if now < arm_at+arm_delay)
-  assert all(s['recordUntilMonoTime'] == 0 for now, s in sent.items() if now < ready_at+2.)
-  manual_until = int((ready_at+17.)*1e9)
-  assert all(s['recordUntilMonoTime'] == manual_until for now, s in sent.items() if ready_at+2. <= now < arm_at+arm_delay)
-  assert min(now for now, armed in samples if armed) == arm_at+arm_delay
-  assert sent[arm_at+arm_delay+.4]['motion']
-  assert sent[arm_at+arm_delay+.4]['recordUntilMonoTime'] == manual_until
-  assert (sent[arm_at+arm_delay+1.2]['recordUntilMonoTime'] > manual_until) == (not eye_only)
+  assert sent[ready_at]['phase'] == 'Recording'  # Manual save does not reset the warmup clock.
+  # Manual saves bypass arming without letting exposure changes extend them.
+  # Warmup consumes ten seconds of the total delay: 15 leaves just five.
+  warm_at = ready_at+CAMERA_WARMUP_SECONDS
+  assert sent[warm_at]['phase'] == f'Arming: {arm_delay-CAMERA_WARMUP_SECONDS:g} s'
+  assert sent[arm_at-.2]['phase'] == 'Arming: 1 s'
+  assert all(not s['motion'] for now, s in sent.items() if now < arm_at)
+  assert all(s['recordUntilMonoTime'] == 0 for now, s in sent.items() if now < ready_at-5.)
+  manual_until = int((ready_at+10.)*1e9)
+  assert all(s['recordUntilMonoTime'] == manual_until for now, s in sent.items() if ready_at-5. <= now < arm_at)
+  assert min(now for now, armed in samples if armed) == arm_at
+  assert sent[arm_at+.4]['motion']
+  assert sent[arm_at+.4]['recordUntilMonoTime'] == manual_until
+  assert (sent[arm_at+1.2]['recordUntilMonoTime'] > manual_until) == (not eye_only)
   assert sent[saved_at]['motion']  # Recorder recovery must not replay arming.
   assert sent[saved_at]['phase'] == ('Watching' if eye_only else 'Recording')
   assert all(armed for now, armed in samples if saving_at <= now < drop_at)
@@ -571,9 +573,9 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
   # A missing cabin sample must not disarm the healthy wide camera, replay the
   # user's delay, or stop confirmed motion from extending the open event.
   assert all(s['motion'] for now, s in sent.items() if drop_at <= now < stop_at)
-  assert all(armed for now, armed in samples if arm_at+arm_delay <= now < stop_at)
+  assert all(armed for now, armed in samples if arm_at <= now < stop_at)
   assert all(not s['phase'].startswith(('Arming:', 'Camera warmup:')) for now, s in sent.items()
-             if arm_at+arm_delay <= now < stop_at)
+             if arm_at <= now < stop_at)
   assert sent[restart_at]['phase'] == ('Watching' if eye_only else 'Recording')
   assert not sent[stop_at]['capture'] and not sent[stop_at]['motion']
   assert sent[stop_at]['recordUntilMonoTime'] == 0
@@ -779,7 +781,8 @@ def test_risk_mode_trigger_sources_and_prebuffer(monkeypatch, tmp_path, risk, so
   assert (sent[130.]['recordUntilMonoTime'] > 130e9) == bool(source or risk and camera)
   if source is not None:
     assert sent[132.]['recordUntilMonoTime'] > sent[130.]['recordUntilMonoTime']
-  assert not any(armed for now, armed in detects if now < 127.)
+  assert not any(armed for now, armed in detects if now < 117.)
+  assert min(now for now, armed in detects if armed) == 117.
   assert all(armed for now, armed in detects if now >= 130.)
   if not risk and source is None:
     assert not sent[130.]['motion']  # Preview observation alone cannot wake the Low Risk eye.
