@@ -11,6 +11,7 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH, CAMERA_WARMUP_SECONDS, RECORDING_CAMERA_MASK, MOTION_CAMERAS, HIGH_RISK
+from openpilot.system.sentry.config import apply_parking_default
 from openpilot.system.sentry.clock import SentryClock
 from openpilot.system.sentry.location import vehicle_identity, parked_location, gps_location
 from openpilot.system.sentry.motion import MotionDetector, Motion, PreviewSelector
@@ -25,7 +26,7 @@ def inactive_reason(params, sm, now, device_type):
   if not setting(params, 'SentryEnabled'):
     return 'Off'
   if params.get_bool('SentryOffThisDrive'):
-    return 'Off for this drive'
+    return 'Off on Wi-Fi' if params.get('SentryParkingModeSource') == 'wifi' else 'Off for this parking'
   if device_type != 'tizi':
     return 'Requires comma 3X'
   if any(params.get_bool(k) for k in ('DoShutdown', 'DoReboot', 'DoUninstall')):
@@ -94,7 +95,8 @@ def main():
   rk = Ratekeeper(5, print_delay_threshold=None)
   off_since = None
   parking_since, parking_expired = None, False
-  ready_since = None
+  ready_since, arming_since = None, None
+  last_arm_reset = None
   arm_complete = False
   location = None
   cameras = {}
@@ -113,11 +115,19 @@ def main():
     while True:
       sm.update(0)
       now, wall = time.monotonic(), time.time()  # noqa: TID251
-      phase = inactive_reason(params, sm, now, HARDWARE.get_device_type())
-      session = not phase
       driving = (not params.get_bool('IsOffroad') or
                  recent(sm, 'deviceState', now) and sm['deviceState'].started or
                  recent(sm, 'pandaStates', now) and any(p.ignitionLine or p.ignitionCan for p in sm['pandaStates']))
+      apply_parking_default(params, sm, now)
+      arm_reset = params.get('SentryArmResetAt')
+      if arm_reset is not None and arm_reset != last_arm_reset:
+        # Every explicit tap starts a fresh delay, including the current mode.
+        # Already-warm cameras keep their exposure history and warmup clock.
+        arming_since = min(now, arm_reset) if ready_since is not None else None
+        arm_complete = False
+      last_arm_reset = arm_reset
+      phase = inactive_reason(params, sm, now, HARDWARE.get_device_type())
+      session = not phase
       if driving:
         parking_since, parking_expired = None, False
         cooldown = False
@@ -131,7 +141,7 @@ def main():
         sensors = None
         preview.reset()
         off_since, location, cameras = None, None, {}
-        ready_since = None
+        ready_since, arming_since = None, None
         arm_complete = False
         record_until, gps_finished, low_since = 0., False, None
         cutoff_reason = ''
@@ -198,13 +208,14 @@ def main():
           risk = setting(params, 'SentryRiskMode')
           if risk != previous_risk:
             # Both modes already sample the same cameras. Keep their exposure
-            # history and arming clock when the parking selection changes.
+            # history; explicit mode taps reset the separate arming clock above.
             preview.reset()
             previous_risk = risk
           if sensors is None:
             sensors = SensorActivity()
           arm_delay = setting(params, 'SentryArmDelay')
-          armed = arm_complete or ready_since is not None and now-ready_since >= max(CAMERA_WARMUP_SECONDS, arm_delay)
+          armed = arm_complete or (ready_since is not None and arming_since is not None and
+                                   now-ready_since >= CAMERA_WARMUP_SECONDS and now-arming_since >= arm_delay)
           sensor_trigger = sensors.sample(now, armed, setting(params, 'SentryAudioSensitivity'), setting(params, 'SentryGyroSensitivity'))
           gyro_diagnostics = sensors.gyro_diagnostics
           sound_level = sensors.audio_level(now) if armed else 0.
@@ -235,7 +246,7 @@ def main():
           if ready != len(cameras):
             phase = f'Waiting for cameras ({ready}/{len(cameras)})'
             if not arm_complete:
-              ready_since = None
+              ready_since, arming_since = None, None
           elif not sensors_ready and risk != HIGH_RISK:
             phase = 'Waiting for sound / motion sensors'
           elif not recorder_fresh:
@@ -249,16 +260,18 @@ def main():
             # syncing segments can delay status while cameras stay exposed.
             if ready_since is None:
               ready_since = now
+            if arming_since is None:
+              arming_since = now
             if arm_complete:
               recovery = max(camera.warm_until-now for camera in cameras.values())
               phase = f'Camera recovering: {math.ceil(recovery)} s' if recovery > 0 else 'Watching'
             else:
               warmup_remaining = CAMERA_WARMUP_SECONDS-(now-ready_since)
-              remaining = max(0., max(CAMERA_WARMUP_SECONDS, arm_delay)-(now-ready_since))
+              remaining = max(0., warmup_remaining, arm_delay-(now-arming_since))
               phase = f'Arming {math.ceil(remaining)} s' if remaining else 'Watching'
               if warmup_remaining > 0:
                 phase += f' (Camera warmup {math.ceil(warmup_remaining)} s)'
-              arm_complete = now-ready_since >= max(CAMERA_WARMUP_SECONDS, arm_delay)
+              arm_complete = remaining == 0.
           # Arming belongs to this capture session, not an event or the eye.
           # Brief frame gaps do not disarm it; CameraMotion independently learns
           # exposure again after an actual camera reconnect/frame-counter reset.
@@ -275,13 +288,13 @@ def main():
             preview.observe(results, now)
           if manual or triggered:
             record_until = now+setting(params, 'SentryPostSeconds')
-          if recorder_fresh and sm['sentryRecorderState'].recording:
+          if arm_complete and recorder_fresh and sm['sentryRecorderState'].recording:
             phase = 'Recording'
         else:
           cameras.clear()
           sensors = None
           preview.reset()
-          ready_since = None
+          ready_since, arming_since = None, None
           arm_complete = False
           record_until = 0.
         error = sm['sentryRecorderState'].error if now-sm.recv_time['sentryRecorderState'] < 2. else ''

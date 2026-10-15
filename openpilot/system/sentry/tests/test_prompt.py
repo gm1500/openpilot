@@ -5,7 +5,7 @@ import pyray as rl
 
 from openpilot.common.params import Params, ParamKeyFlag
 from openpilot.cereal import log
-from openpilot.system.sentry.config import LOW_RISK, HIGH_RISK, setting
+from openpilot.system.sentry.config import LOW_RISK, HIGH_RISK, setting, apply_parking_default
 
 
 @pytest.fixture
@@ -14,8 +14,10 @@ def prompt(monkeypatch, tmp_path):
   from openpilot.selfdrive.ui.layouts import sentry_prompt as ui
   params = Params(str(tmp_path/'params'))
   params.put_bool('SentryEnabled', True, block=True)
+  params.put_bool('IsOffroad', True, block=True)
   sm = {'sentryState': SimpleNamespace(phase='Arming 30 s'),
-        'deviceState': SimpleNamespace(networkType=log.DeviceState.NetworkType.none),
+        'deviceState': SimpleNamespace(started=False, networkType=log.DeviceState.NetworkType.none),
+        'pandaStates': [SimpleNamespace(ignitionLine=False, ignitionCan=False)],
         'peripheralState': SimpleNamespace(voltage=12400)}
   sm = type('SM', (dict,), {'valid': dict.fromkeys(sm, True), 'recv_time': dict.fromkeys(sm, 100.)})(sm)
   callbacks = []
@@ -88,6 +90,7 @@ def test_next_drive_resets_off_override_and_high_risk_and_onroad_closes_prompt(p
 def test_wifi_default_off_can_be_overridden_and_network_changes_do_not_reselect(prompt, mode):
   view, params, sm, device = prompt
   sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi
+  apply_parking_default(params, sm, 100.)
   view.update(True)
   assert view.wifi_default and params.get_bool('SentryOffThisDrive')
   assert view.status == 'Wi-Fi: Sentry off, closing in 30 s'
@@ -98,12 +101,13 @@ def test_wifi_default_off_can_be_overridden_and_network_changes_do_not_reselect(
   sm['deviceState'].networkType = log.DeviceState.NetworkType.none
   view.update(True)
   sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi
+  apply_parking_default(params, sm, 100.)
   view.update(True)
   assert view.opened == (mode is not None)
   assert params.get_bool('SentryOffThisDrive') == (mode in (None, 'off'))
 
 
-def test_switching_off_keeps_original_deadline_and_can_be_changed_again(prompt, monkeypatch):
+def test_each_mode_tap_restarts_choice_deadline_including_repeated_off(prompt, monkeypatch):
   from openpilot.selfdrive.ui.layouts import sentry_prompt as ui
   view, params, sm, device = prompt
   view.update(True)
@@ -113,10 +117,11 @@ def test_switching_off_keeps_original_deadline_and_can_be_changed_again(prompt, 
     sm.recv_time['sentryState'] = now
     view.update(True)
     assert view.opened and device.sentry_prompt_visible
-    assert view.close_at == 130.
+    assert view.close_at == now+30.
+    assert params.get('SentryArmResetAt') == now
     assert params.get_bool('SentryOffThisDrive') == (mode == 'off')
-  assert view.status == 'Sentry off, closing in 5 s'
-  monkeypatch.setattr(ui.time, 'monotonic', lambda: 130.)
+  assert view.status == 'Sentry off, closing in 30 s'
+  monkeypatch.setattr(ui.time, 'monotonic', lambda: 155.)
   view.update(True)
   assert not view.opened and params.get_bool('SentryModePrompted')
   assert params.get_bool('SentryOffThisDrive')
@@ -126,6 +131,7 @@ def test_overriding_off_follows_resumed_arming_not_off_deadline_or_old_state(pro
   from openpilot.selfdrive.ui.layouts import sentry_prompt as ui
   view, params, sm, device = prompt
   sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi
+  apply_parking_default(params, sm, 100.)
   view.update(True)
   monkeypatch.setattr(ui.time, 'monotonic', lambda: 129.)
   sm['sentryState'].phase = 'Watching'
@@ -153,6 +159,7 @@ def test_wifi_skip_requires_enabled_option_and_fresh_connection(prompt, blocker)
     sm.recv_time['deviceState'] = 90.
   else:
     sm.valid['deviceState'] = False
+  apply_parking_default(params, sm, 100.)
   view.update(True)
   assert not view.wifi_default and not params.get_bool('SentryOffThisDrive')
 
@@ -161,8 +168,9 @@ def test_wifi_default_dismisses_without_cameras_and_resets_on_next_drive(prompt,
   from openpilot.selfdrive.ui.layouts import sentry_prompt as ui
   view, params, sm, device = prompt
   sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi
+  apply_parking_default(params, sm, 100.)
   view.update(True)
-  sm['sentryState'].phase = 'Off for this drive'
+  sm['sentryState'].phase = 'Off for this parking'
   sm.valid['sentryState'] = False
   monkeypatch.setattr(ui.time, 'monotonic', lambda: 130.)
   view.update(True)
@@ -240,6 +248,7 @@ def test_pulse_moves_to_each_selected_mode_while_prompt_stays_open(prompt, monke
   view, params, sm, device = prompt
   if wifi:
     sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi
+  apply_parking_default(params, sm, 100.)
   view.update(True)
   for name in ('draw_rectangle_rec', 'draw_line_ex'):
     monkeypatch.setattr(rl, name, lambda *args: None)
@@ -271,6 +280,7 @@ def test_prompt_uses_existing_screen_deadline_and_arming_does_not_wake_it(prompt
   _, params, sm, _ = prompt
   clock = [100.]
   sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi if wifi else log.DeviceState.NetworkType.none
+  apply_parking_default(params, sm, 100.)
   sm['sentryState'] = SimpleNamespace(phase='Arming 15 s (Camera warmup 10 s)', eyeEnabled=True, motion=False, sensorActive=False)
   context = SimpleNamespace(ignition=False, started=False, sentry_active=not wifi, sm=sm)
   monkeypatch.setattr(ui, 'ui_state', context)

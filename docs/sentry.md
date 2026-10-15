@@ -27,28 +27,38 @@ battery cutoff and time cutoff sit inline on that same header row with no separa
 background. The time cutoff uses the countdown's font size; battery details are slightly
 smaller. Stale voltage says unavailable.
 Low Risk (yellow) and High Risk (red) split the
-upper selection area. The green lower third turns Sentry off for this drive only.
+upper selection area. The green lower third, **Off this parking**, skips only this parking session.
 The selected tile pulses in its mode colour every 1.2 seconds, ranging from half to
 full brightness; the other tiles remain steady. There is no extra Default label.
 Tapping another tile applies that choice immediately and moves the pulse to it,
-keeping the prompt open so the selection can be changed again. Switching between
-Low and High Risk preserves camera warmup and the arming countdown. The prompt
+keeping the prompt open so the selection can be changed again. Every mode tap,
+including the already-selected mode, restarts the full configured arming delay.
+Already-running cameras keep their warmup progress; only the arming clock resets. The prompt
 closes when arming finishes or the existing screen interaction timer expires,
 whichever happens first, and cannot intercept the driving screen.
 Opening or automatically closing it does not reset that timer or add a second menu
 timeout. Touches renew the normal interaction timer. Arming continues with the screen off.
 An explicit global Enable Sentry/STOP setting is still respected.
 
-Skip Sentry on Wi-Fi is enabled by default and appears just below Enable Sentry.
-When a fresh device state reports Wi-Fi at prompt opening, the green Off tile becomes
-the default and capture is skipped immediately. The choices remain available for the
+Settings puts the master Enable Sentry switch and the yellow Low Risk, red High Risk,
+and green Off this parking choices together on one row. The master switch persists;
+green Off skips this parking without disabling the master switch. Switching the master
+off and back on preserves that parking choice; select Low or High to arm again.
+Skip Sentry on Wi-Fi is enabled by default and appears immediately below that row.
+The controller chooses the parking default once fresh device and ignition state confirm
+the vehicle is parked. With Wi-Fi connected, the green Off tile becomes the default and
+capture is skipped even if the prompt never appears or the screen is asleep. Opening or
+dismissing the prompt does not make that decision. The prompt's choices remain available for the
 configured arming-delay duration, or until the screen timeout, before the prompt closes; no running cameras are
 needed for that countdown. Selecting either risk mode clears the skip and starts normal
 arming, with the prompt following that controller countdown. Selecting Off manually
-keeps the prompt open for the remainder of the original choice window; repeated taps
-do not restart it. X keeps the current selection. Later network changes do not override a choice or rearm that
-parking session. Each new drive resets the temporary choice and checks Wi-Fi again.
-With the option disabled, or without a fresh Wi-Fi connection, Low Risk remains the default.
+starts a fresh choice window of the same duration while keeping capture off; repeated
+Off taps restart that window too. X keeps the current selection. Later network changes do not override a choice or rearm that
+parking session. Settings and the prompt share the same selection, and an explicit
+choice in either overrides the Wi-Fi default. Each new drive resets the temporary
+choice; a choice made during that drive can also apply to the upcoming parking session.
+With the option disabled or no Wi-Fi connection, the automatic default is Low Risk.
+If device or ignition state is stale, the controller waits for a fresh reading before deciding.
 
 - Low Risk saves events from sudden sound changes or accelerometer/gyroscope activity.
   Both wide cameras are analyzed while idle, retaining five seconds of decaying motion
@@ -110,9 +120,9 @@ With the option disabled, or without a fresh Wi-Fi connection, Low Risk remains 
   recorder is added. Sentry consumes sound levels, not raw audio. It drains queued IMU
   samples to avoid missing a short impact between controller ticks.
 - Both modes use the same camera warmup, arming delay, pre/post-event buffer, route,
-  bookmark, thermal, battery and parking-time rules. Mode selection does not restart
-  arming or extend the parking budget. Risk mode is also available immediately below
-  Enable Sentry in settings. Choosing a mode there clears the temporary off override.
+  bookmark, thermal, battery and parking-time rules. Every explicit mode selection
+  restarts arming without extending the parking budget. All three parking modes are also available inline
+  with Enable Sentry in settings. Choosing Low or High clears the temporary parking skip.
 - Low Risk, the temporary off override and the prompt acknowledgment reset for the
   next drive; manager startup also resets them. Permanent disabling stays permanent.
 
@@ -386,7 +396,7 @@ against `/VERSION`, uses the stock AGNOS updater if needed, restores the previou
 enable setting, and reboots. A failed update or build does not reboot; local changes and
 diverged history are never discarded. Re-enable Sentry manually after resolving a failure.
 For an update that must finish with Sentry enabled, run `bash tools/sentry_update.sh --enable-sentry`.
-This also clears the temporary "off for this drive" choice after a successful build. Without
+This also clears the temporary "off this parking" choice after a successful build. Without
 that option, a retry after an earlier failed update can preserve the disabled state left by
 that failure. The updater uses blocking parameter writes and verifies the saved value before
 rebooting. Its output is retained in `/data/sentry-update.log`, including the starting and
@@ -540,7 +550,7 @@ through instantaneous power loss.
 | Red eye | On |
 | Video watermark | On: local timestamp with UTC offset, camera name and known parking coordinates |
 
-The row order is Sentry status/STOP, Enable Sentry, Skip Sentry on Wi-Fi, Risk mode, Arming delay, Pre-event buffer,
+The row order is Sentry status/STOP, Enable Sentry with all three parking modes, Skip Sentry on Wi-Fi, Arming delay, Pre-event buffer,
 Record after motion stops, Motion sensitivity, Audio sensitivity, Gyro sensitivity, Battery cutoff, Maximum parked time,
 Pause capture above, Red eye, Video watermark, then Buffered footage and Current time.
 Sensitivity is the first slider. Battery cutoff includes the current voltage inline; stale
@@ -669,7 +679,9 @@ Checks cover repeated isolated spikes after a shake, quiet release, slow bias dr
 periodic background vibration above the old threshold ceiling, independent audio/acceleration
 thresholds, registered slider defaults and live updates in both risk modes. Prompt checks
 cover Wi-Fi freshness, manual overrides, timeout without cameras, next-drive reset,
-live/stale battery readings and pulsing only the default tile. Hardware confirmation
+live/stale battery readings and pulsing only the selected tile. Controller and settings
+checks cover Wi-Fi defaults without a prompt, all three inline parking choices, and
+preserving a parking skip across master-switch toggles. Hardware confirmation
 of the initial-shake response and nuisance-trigger improvement remains necessary.
 
 The supplied `000003fc--5297953ec1` segments 0–3 run the ambient-calibration build.

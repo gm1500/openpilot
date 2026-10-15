@@ -632,7 +632,7 @@ def test_settings_remain_editable_in_all_vehicle_states(monkeypatch, tmp_path, s
   monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*20, 40))
   layout = ui.SentryLayout()
   assert [row.title for row in layout.scroller._items] == [
-    'Sentry', 'Enable Sentry', 'Skip Sentry on Wi-Fi', 'Risk mode', 'Arming delay', 'Pre-event buffer', 'Record after motion stops',
+    'Sentry', 'Enable Sentry', 'Skip Sentry on Wi-Fi', 'Arming delay', 'Pre-event buffer', 'Record after motion stops',
     'Motion sensitivity', 'Audio sensitivity', 'Gyro sensitivity', 'Battery cutoff', 'Maximum parked time', 'Pause capture above',
     'Red eye', 'Video watermark', 'Buffered footage', 'Current time',
   ]
@@ -671,6 +671,52 @@ def test_settings_remain_editable_in_all_vehicle_states(monkeypatch, tmp_path, s
   params.put_bool('SentryEnabled', False, block=True)
   layout._update_state()
   assert not layout._enable_toggle.action_item.get_state()
+  modes = layout._enable_toggle.action_item.modes
+  modes.select_button(2)
+  assert params.get_bool('SentryOffThisDrive')
+  layout._set_sentry_enabled(True)
+  assert params.get_bool('SentryOffThisDrive')  # Master enable does not cancel this parking's skip.
+  assert not state.sentry_active
+  modes.select_button(1)
+  assert params.get('SentryRiskMode') == 1 and not params.get_bool('SentryOffThisDrive')
+  assert state.sentry_active and params.get('SentryParkingModeSource') == 'manual'
+  assert [modes.is_button_selected(i) for i in range(3)] == [False, True, False]
+  layout._enable_toggle.action_item.set_touch_valid_callback(lambda: False)
+  assert not modes._touch_valid() and not layout._enable_toggle.action_item.toggle._touch_valid()
+
+
+def test_enable_switch_and_three_coloured_parking_modes_fit_one_row(monkeypatch, tmp_path):
+  import pyray as rl
+  from openpilot.common.params import Params
+  from openpilot.selfdrive.ui.layouts.settings import sentry as ui
+  from openpilot.system.ui.widgets import list_view
+  params = Params(str(tmp_path/'params'))
+  params.put_bool('SentryEnabled', True, block=True)
+  monkeypatch.setattr(ui.gui_app, 'font', lambda *args: rl.Font())
+  monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*30, 60))
+  monkeypatch.setattr(ui.Toggle, '_render', lambda *args: None)
+  labels, fills = [], []
+  monkeypatch.setattr(ui, 'gui_label', lambda rect, text, size, *args, **kwargs: labels.append((rect, text)))
+  monkeypatch.setattr(rl, 'draw_rectangle_rounded', lambda rect, rounding, segments, color: fills.append((color.r, color.g, color.b)))
+  action = ui.SentryEnableAction(params, lambda enabled: params.put_bool('SentryEnabled', enabled, block=True))
+  row = ui.ListItem('Enable Sentry', action_item=action)
+  # 2160px display, 500px sidebar and 50px panel margins on both sides.
+  rect = row.get_right_item_rect(rl.Rectangle(550, 25, 1560, 170))
+  assert rect.x >= 550+20+len('Enable Sentry')*30
+  action._render(rect)
+  toggle = action.toggle.rect
+  assert len(labels) == 3 and toggle.x+toggle.width < labels[0][0].x
+  assert labels[-1][0].x+labels[-1][0].width <= 2110
+  assert all(box.y+box.height/2 == toggle.y+toggle.height/2 for box, _ in labels)
+  for i, color in enumerate(((245, 196, 46), (190, 35, 42), (71, 184, 104))):
+    box, _ = labels[i]
+    action.modes._handle_mouse_release(rl.Vector2(box.x+box.width/2, box.y+box.height/2))
+    fills.clear()
+    action._render(rect)
+    assert fills[i] == color
+    assert [action.modes.is_button_selected(n) for n in range(3)] == [n == i for n in range(3)]
+    assert params.get_bool('SentryEnabled')
+  assert params.get_bool('SentryOffThisDrive')
 
 
 @pytest.mark.parametrize('key,shutdown_key', [('SentryMaxHours', 'SentryShutdownOnTimeLimit'), ('SentryMaxTemp', 'SentryShutdownOnOverheat')])

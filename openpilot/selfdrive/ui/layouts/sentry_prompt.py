@@ -3,9 +3,8 @@ import time
 import pyray as rl
 
 from openpilot.common.params import Params
-from openpilot.cereal import log
 from openpilot.selfdrive.ui.ui_state import ui_state, device
-from openpilot.system.sentry.config import setting, LOW_RISK, HIGH_RISK
+from openpilot.system.sentry.config import setting, parking_mode, select_parking_mode, LOW_RISK, HIGH_RISK
 from openpilot.system.ui.lib.application import FontWeight, TextAlignment
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.label import gui_label
@@ -20,11 +19,14 @@ class SentryPrompt(Widget):
     self.status = ''
     self.pressed = None
     self.buttons = {}
-    self.wifi_default = False
     self.close_at = 0.
     self.resume_after = 0.
     self.battery_status = 'Battery unavailable'
     device.add_interactive_timeout_callback(self._on_interactive_timeout)
+
+  @property
+  def wifi_default(self):
+    return self.params.get('SentryParkingModeSource') == 'wifi'
 
   def update(self, eligible):
     if not eligible or not setting(self.params, 'SentryEnabled'):
@@ -32,15 +34,7 @@ class SentryPrompt(Widget):
       return
     sm, now = ui_state.sm, time.monotonic()
     if not self.opened and not self.params.get_bool('SentryModePrompted'):
-      # Choose once per parking prompt. Later network changes cannot override
-      # an explicit risk choice or silently rearm a skipped parking session.
-      self.wifi_default = (setting(self.params, 'SentrySkipOnWifi') and sm.valid['deviceState'] and
-                           0 <= now-sm.recv_time['deviceState'] < 5. and
-                           sm['deviceState'].networkType == log.DeviceState.NetworkType.wifi)
-      if self.wifi_default:
-        self.params.put_bool('SentryOffThisDrive', True, block=True)
-      # Off has no controller countdown. Keep the original choice window when
-      # switching to it; tapping a tile must not restart that window.
+      # Off has no controller countdown, so the prompt owns its choice window.
       self.close_at = now+setting(self.params, 'SentryArmDelay')
       self.resume_after = 0.
       self.opened = True
@@ -76,18 +70,12 @@ class SentryPrompt(Widget):
   def choose(self, mode):
     # Apply selections immediately, but leave all three tiles available until
     # arming/screen timeout. X dismisses while retaining the current selection.
-    if mode == 'off':
-      self.params.put_bool('SentryOffThisDrive', True, block=True)
-    elif mode is not None:
-      if self.params.get_bool('SentryOffThisDrive'):
-        self.resume_after = time.monotonic()  # Ignore controller state from before resuming capture.
-      self.params.put('SentryRiskMode', mode, block=True)
-      self.params.put_bool('SentryOffThisDrive', False, block=True)
-    self.params.put_bool('SentryModePrompted', True, block=True)
-    if mode is None:
-      self.close()
+    if mode is not None:
+      self.resume_after = select_parking_mode(self.params, mode)
+      self.close_at = self.resume_after+setting(self.params, 'SentryArmDelay')
     else:
-      self.wifi_default = False
+      self.params.put_bool('SentryModePrompted', True, block=True)
+      self.close()
 
   def _update_layout_rects(self):
     r = self._rect
@@ -114,11 +102,11 @@ class SentryPrompt(Widget):
     gui_label(rl.Rectangle(rect.x+40+header_width-cutoff_width, rect.y+40, cutoff_width, 90),
               f'Time cutoff {setting(self.params, "SentryMaxHours")} h', 36, rl.WHITE,
               font_weight=FontWeight.MEDIUM, alignment=TextAlignment.RIGHT)
-    selected_mode = 'off' if self.params.get_bool('SentryOffThisDrive') else setting(self.params, 'SentryRiskMode')
+    selected_mode = parking_mode(self.params)
     for mode, title, detail, fill, ink in (
       (LOW_RISK, 'Low Risk', 'Sound and vehicle movement', rl.Color(245, 196, 46, 255), rl.BLACK),
       (HIGH_RISK, 'High Risk', 'Camera motion, sound and vehicle movement', rl.Color(190, 35, 42, 255), rl.WHITE),
-      ('off', 'Sentry off for this drive', 'Wi-Fi connected' if self.wifi_default else 'Choose again after the next drive',
+      ('off', 'Off this parking', 'Wi-Fi connected' if self.wifi_default else 'Skips this parking session only',
        rl.Color(71, 184, 104, 255), rl.BLACK),
     ):
       box = self.buttons[mode]

@@ -3,11 +3,12 @@ import time
 
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.ui_state import ui_state, device
-from openpilot.system.sentry.config import setting, RANGES, DURATION_PRESETS, CAMERA_WARMUP_SECONDS
+from openpilot.system.sentry.config import setting, parking_mode, select_parking_mode, RANGES, DURATION_PRESETS, CAMERA_WARMUP_SECONDS
 from openpilot.system.sentry.clock import time_status
-from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.application import gui_app, FontWeight, TextAlignment
 from openpilot.system.ui.widgets import Widget
-from openpilot.system.ui.widgets.list_view import ListItem, MultipleButtonAction, toggle_item, text_item, button_item
+from openpilot.system.ui.widgets.list_view import ListItem, MultipleButtonAction, ToggleAction, toggle_item, text_item, button_item
+from openpilot.system.ui.widgets.label import gui_label
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 from openpilot.system.ui.widgets.toggle import Toggle, WIDTH as TOGGLE_WIDTH, HEIGHT as TOGGLE_HEIGHT
 
@@ -94,27 +95,57 @@ class SentryDurationButtons(MultipleButtonAction):
 
 class SentryModeButtons(MultipleButtonAction):
   def __init__(self, params):
-    super().__init__(['Low Risk', 'High Risk'], button_width=260)
+    super().__init__(['Low Risk', 'High Risk', 'Off this parking'], button_width=280)
     self.params = params
 
   def is_button_selected(self, index):
-    return setting(self.params, 'SentryRiskMode') == index
+    return parking_mode(self.params) == (index if index < 2 else 'off')
 
   def select_button(self, index):
     if self.enabled:
-      self.params.put('SentryRiskMode', index, block=True)
-      self.params.put_bool('SentryOffThisDrive', False, block=True)
+      select_parking_mode(self.params, index if index < 2 else 'off')
+
+  def _render(self, rect):
+    self.button_width = (rect.width-40)/3
+    for i, (title, color) in enumerate(zip(self.buttons, ((245, 196, 46), (190, 35, 42), (71, 184, 104)), strict=True)):
+      selected = self.is_button_selected(i)
+      brightness = 1. if selected else .4
+      fill = rl.Color(*(int(c*brightness) for c in color), 255)
+      box = rl.Rectangle(rect.x+i*(self.button_width+20), rect.y+(rect.height-100)/2, self.button_width, 100)
+      rl.draw_rectangle_rounded(box, 1., 20, fill)
+      gui_label(box, title, 30, rl.BLACK if selected and i != 1 else rl.WHITE,
+                font_weight=FontWeight.MEDIUM, alignment=TextAlignment.CENTER)
+
+
+class SentryEnableAction(ToggleAction):
+  def __init__(self, params, callback):
+    super().__init__(initial_state=setting(params, 'SentryEnabled'), width=1080, callback=callback)
+    self._child(self.toggle)
+    self.modes = self._child(SentryModeButtons(params))
+
+  def set_touch_valid_callback(self, callback):
+    super().set_touch_valid_callback(callback)
+    self.modes.set_touch_valid_callback(callback)
+
+  def _render(self, rect):
+    for child in (self.toggle, self.modes):
+      child.set_parent_rect(self._parent_rect or rect)
+      child.set_enabled(self.enabled)
+    self.toggle.render(rl.Rectangle(rect.x, rect.y+(rect.height-TOGGLE_HEIGHT)/2, TOGGLE_WIDTH, TOGGLE_HEIGHT))
+    self.modes.render(rl.Rectangle(rect.x+TOGGLE_WIDTH+40, rect.y, rect.width-TOGGLE_WIDTH-40, rect.height))
 
 
 class SentryLayout(Widget):
   def __init__(self):
     super().__init__()
     self.params = Params()
-    self._enable_toggle = toggle_item('Enable Sentry',
-                                     'Can be changed in any vehicle state. Arms after ignition turns off. ' +
-                                     'Switch off or press STOP to end Sentry until you enable it again.',
-                                     initial_state=setting(self.params, 'SentryEnabled'),
-                                     callback=self._set_sentry_enabled)
+    self._enable_toggle = ListItem('Enable Sentry',
+                                   description='The switch enables automatic arming after ignition turns off. ' +
+                                   'Low Risk: sound and vehicle movement. High Risk: also camera motion. ' +
+                                   'Off this parking skips only this parking session and keeps the master switch enabled. ' +
+                                   'Each mode tap restarts the arming delay. A new drive resets the parking choice. ' +
+                                   'Switch off or press STOP to disable Sentry until enabled again.',
+                                   action_item=SentryEnableAction(self.params, self._set_sentry_enabled))
     self._stop_button = button_item('Sentry', 'STOP',
                                    'Stops parked capture and the red eye. Saved events remain available for manual upload from Connect.',
                                    callback=lambda: self._set_sentry_enabled(False),
@@ -124,10 +155,8 @@ class SentryLayout(Widget):
       self._stop_button,
       self._enable_toggle,
       self.toggle('SentrySkipOnWifi', 'Skip Sentry on Wi-Fi',
-                  'Default to Off when Wi-Fi is connected at the parking prompt. You can still select either risk mode.'),
-      ListItem('Risk mode', description='Low: sound and physical movement. High: also camera motion. ' +
-               'Both keep the pre-event video buffer. Defaults to Low Risk after each drive.',
-               action_item=SentryModeButtons(self.params)),
+                  'Defaults to Off this parking when parked on Wi-Fi, even with the screen off or no prompt. ' +
+                  'Select Low Risk or High Risk above to override it for this parking session.'),
       ListItem('Arming delay', description=f'Includes {CAMERA_WARMUP_SECONDS:g} seconds of camera warmup once video is available. ' +
                'Footage buffers throughout; motion saves and the eye wait until the total delay finishes.',
                action_item=SentryDurationButtons(self.params, 'SentryArmDelay')),
@@ -160,8 +189,6 @@ class SentryLayout(Widget):
     # Settings persist in any vehicle state; sentryd gates parked capture.
     # Persist the command before refreshing the switch or evaluating process gates.
     self.params.put_bool('SentryEnabled', enabled, block=True)
-    if enabled:
-      self.params.put_bool('SentryOffThisDrive', False, block=True)
     if not enabled:
       self.params.remove('SentryManualTrigger')
       device.sentry_motion_until = 0.

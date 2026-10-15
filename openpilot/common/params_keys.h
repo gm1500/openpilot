@@ -8,9 +8,11 @@
 inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SentryEnabled", {PERSISTENT, BOOL, "1"}},
     {"SentrySkipOnWifi", {PERSISTENT, BOOL, "1"}},
-    {"SentryRiskMode", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION | CLEAR_ON_OFFROAD_TRANSITION, INT, "0"}},
+    {"SentryRiskMode", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, INT, "0"}},
     {"SentryOffThisDrive", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
     {"SentryModePrompted", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
+    {"SentryParkingModeSource", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, STRING}},
+    {"SentryArmResetAt", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, FLOAT}},
     {"SentrySensitivity", {PERSISTENT, INT, "75"}},
     {"SentryAudioSensitivity", {PERSISTENT, INT, "25"}},
     {"SentryGyroSensitivity", {PERSISTENT, INT, "50"}},

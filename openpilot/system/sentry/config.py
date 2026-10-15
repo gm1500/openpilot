@@ -1,9 +1,13 @@
 """Shared sentry settings and a RAM-only process lease. No camera/control spoofing."""
 import json
+import fcntl
 import math
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import time
+
+from openpilot.cereal import log
 
 RUNTIME_PATH = Path('/dev/shm/openpilot_sentry.json')
 LEASE_SECONDS = 2.0
@@ -45,6 +49,61 @@ def setting(params, key):
     return type(default)(min(high, max(low, number)))
   except (TypeError, ValueError, OverflowError):
     return default
+
+
+def parking_mode(params):
+  return 'off' if params.get_bool('SentryOffThisDrive') else setting(params, 'SentryRiskMode')
+
+
+@contextmanager
+def parking_mode_lock():
+  # UI and controller can make their first choice simultaneously. Serialize the
+  # few parameter writes; the lock file lives in RAM and is never written per tick.
+  with RUNTIME_PATH.with_suffix('.mode.lock').open('a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+      yield
+    finally:
+      fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def select_parking_mode(params, mode):
+  # Both UIs share one explicit choice; the controller must not replace it with
+  # a Wi-Fi default. The master switch remains independent of this parking.
+  if mode not in (LOW_RISK, HIGH_RISK, 'off'):
+    raise ValueError(f'Invalid Sentry parking mode: {mode}')
+  with parking_mode_lock():
+    selected_at = time.monotonic()
+    params.put('SentryParkingModeSource', 'manual', block=True)
+    if mode != 'off':
+      params.put('SentryRiskMode', mode, block=True)
+    params.put_bool('SentryOffThisDrive', mode == 'off', block=True)
+    params.put_bool('SentryModePrompted', True, block=True)
+    params.put('SentryArmResetAt', selected_at, block=True)
+  return selected_at
+
+
+def apply_parking_default(params, sm, now):
+  # Called by sentryd once fresh parked/network state is available, including
+  # while the UI is asleep or the master switch is off. Latch until a new drive.
+  if params.get('SentryParkingModeSource'):
+    return
+  if not params.get_bool('IsOffroad') or any(not sm.valid[s] or not 0 <= now-sm.recv_time[s] < 2.
+                                           for s in ('deviceState', 'pandaStates')):
+    return
+  if sm['deviceState'].started or not sm['pandaStates'] or any(p.ignitionLine or p.ignitionCan for p in sm['pandaStates']):
+    return
+  with parking_mode_lock():
+    if params.get('SentryParkingModeSource'):
+      return
+    if params.get_bool('SentryOffThisDrive'):
+      source = 'manual'  # Retain a choice made before this controller update.
+    else:
+      wifi = sm['deviceState'].networkType == log.DeviceState.NetworkType.wifi
+      source = 'wifi' if setting(params, 'SentrySkipOnWifi') and wifi else 'default'
+      if source == 'wifi':
+        params.put_bool('SentryOffThisDrive', True, block=True)
+    params.put('SentryParkingModeSource', source, block=True)
 
 
 def read_runtime(now=None):
