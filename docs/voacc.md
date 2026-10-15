@@ -118,6 +118,42 @@ later stop requests in the recorded trace still reapply hold.
 
 ## Stop bar
 
+The E2E approach preview uses a solid green bar at half width (225 px), labeled
+E2E APPROACH. Its displayed distance is smoothed over 0.5 s with ego-motion
+compensation and clipped to the current available path. Adjacent planner/model
+frames must not send a distant green preview to the near-stop dock; an
+unprojectable green cue is hidden instead. This filtering is display-only and
+does not alter E2E activation, braking, or the confirmed virtual stop.
+
+Brief approach dropouts retain the preview for 0.25 s, then fade it over 0.15 s,
+only while fresh model data still indicates slowing. Departure, pedal takeover,
+disengagement, invalid data, or real-lead overlap clears it immediately. Stop
+confirmation immediately replaces the preview. Applied brakes alone do not
+retain green indefinitely. In 2e1/14-15 replay, the green phase changes from
+three flashes with 22/30 unprojectable frames to one continuous interval with
+35/35 projectable frames, approximately 45-65 m down the road.
+
+A confirmed virtual stop uses the full-width yellow/dynamic-distance-colour bar,
+labeled STOP TARGET. Its display-only brake retention remains until release.
+Both stages share the same thickness and rounded trapezoid profile. Green
+previews the smoothed endpoint; yellow shows the committed stopping position.
+
+Confirmed STOP TARGET bars now also clip their drawing to the latest model
+path endpoint when the planner's target extends beyond that path. Adjacent
+planner/model frames can disagree on path length; this no longer sends a valid
+distant target to the near-screen dock. The displayed numeric distance stays
+exactly the planner's target, including during brake hold. No target smoothing,
+projection extrapolation or control change is added. Invalid geometry retains
+the existing unavailable-position behavior.
+
+On route 2eb, asynchronous UI replay of segments 27–29 reduced unprojectable
+moving STOP TARGET frames from 14 to zero in segment 28 and seven to zero in
+segment 29. Their seven and four road/dock toggles also became zero. Displayed
+distances, labels, brake-hold state and visibility were identical throughout.
+All 39 model-stop and stop-bar tests passed. This replay validates the geometry
+selection rather than a rendered camera recording or closed-loop control.
+
+
 Comma 3/3X draws a solid ground-perspective trapezoid with subtly rounded corners.
 Both edges stay horizontal; the far edge is 80% of the near edge's width, including
 when docked. Its fixed 450 px near-edge width is about 2.5 times
