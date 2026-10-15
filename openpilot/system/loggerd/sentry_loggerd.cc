@@ -63,6 +63,22 @@ struct PreviewSelection {
   uint64_t time;
   int camera;
 };
+enum class Timeline { GAP, FOOTAGE, AUDIO, GYRO };
+struct TriggerSelection {
+  uint64_t time, until;
+  Timeline mode;
+};
+Timeline trigger_mode(cereal::SentryState::Reader state) {
+  // Physical gyro activity takes priority when sound accompanies the same hit.
+  if (state.getGyroActive()) return Timeline::GYRO;
+  return state.getAudioActive() ? Timeline::AUDIO : Timeline::FOOTAGE;
+}
+Timeline timeline_at(const std::deque<TriggerSelection> &triggers, uint64_t time) {
+  for (auto it = triggers.rbegin(); it != triggers.rend(); ++it) {
+    if (it->time <= time) return time < it->until ? it->mode : Timeline::FOOTAGE;
+  }
+  return Timeline::FOOTAGE;
+}
 int preview_at(const std::vector<PreviewSelection> &previews, uint64_t time, int camera) {
   for (const auto &selection : previews) {
     if (selection.time > time) break;
@@ -118,6 +134,7 @@ public:
   uint64_t preview_time = 0;
   uint64_t start_time;
   uint64_t last_time = 0;
+  Timeline timeline_mode = Timeline::GAP;
 
   SavedSegment(const std::string &route, int number_, kj::ArrayPtr<capnp::word> init, uint64_t start, bool gap = false)
       : path(Path::log_root() + "/" + route + "--" + std::to_string(number_)), number(number_), start_time(start), last_time(start) {
@@ -153,24 +170,28 @@ public:
     event.initSentinel().setType(type);
     write(msg.toBytes());
   }
-  void timeline(uint64_t time, bool available) {
-    // Saved-log annotation only, never a live driving alert. Connect paints
-    // userPrompt orange until normal; bookmarks remain yellow above it.
+  void timeline(uint64_t time, Timeline mode) {
+    // Saved-log annotations only, never published to live driving services.
+    // Connect's fixed palette uses enabled for green and critical for red.
+    // Keep state DISABLED/active false, and identify every annotation as Sentry.
+    bool available = mode != Timeline::GAP;
     MessageBuilder msg;
     auto event = msg.initEvent(true);
     event.setLogMonoTime(time);
     auto state = event.initSelfdriveState();
     state.setState(cereal::SelfdriveState::OpenpilotState::DISABLED);
-    state.setEnabled(false);
+    state.setEnabled(mode == Timeline::AUDIO);
     state.setActive(false);
     state.setEngageable(false);
-    state.setAlertStatus(available ? cereal::SelfdriveState::AlertStatus::USER_PROMPT : cereal::SelfdriveState::AlertStatus::NORMAL);
+    state.setAlertStatus(mode == Timeline::GYRO ? cereal::SelfdriveState::AlertStatus::CRITICAL :
+                         mode == Timeline::FOOTAGE ? cereal::SelfdriveState::AlertStatus::USER_PROMPT : cereal::SelfdriveState::AlertStatus::NORMAL);
     state.setAlertSize(available ? cereal::SelfdriveState::AlertSize::SMALL : cereal::SelfdriveState::AlertSize::NONE);
     if (available) {
-      state.setAlertType("sentryRecording/permanent");
-      state.setAlertText1("Sentry recording");
+      state.setAlertType(mode == Timeline::AUDIO ? "sentryAudio/permanent" : mode == Timeline::GYRO ? "sentryGyro/permanent" : "sentryRecording/permanent");
+      state.setAlertText1(mode == Timeline::AUDIO ? "Sentry audio event" : mode == Timeline::GYRO ? "Sentry gyro event" : "Sentry recording");
     }
     write(msg.toBytes());
+    timeline_mode = mode;
   }
   bool fill_preview(uint64_t from, uint64_t until) {
     const uint64_t frame_duration = SECOND/MAIN_FPS;
@@ -208,7 +229,7 @@ public:
     return true;
   }
   void pause() { resume.fill(true); }
-  void append(const Packet &packet, const std::vector<PreviewSelection> &previews) {
+  void append(const Packet &packet, const std::vector<PreviewSelection> &previews, const std::deque<TriggerSelection> &triggers) {
     capnp::FlatArrayMessageReader reader(packet.words.asPtr());
     auto event = reader.getRoot<cereal::Event>();
     last_time = std::max(last_time, packet.time);
@@ -259,7 +280,7 @@ public:
     }
     bool filled = false;
     if (packet.camera >= 3 && preview_gap) {
-      timeline(preview_end, false);
+      timeline(preview_end, Timeline::GAP);
       if (bridge) filled = fill_preview(preview_end, packet.frame_time);
     }
     auto bytes = data.getData();
@@ -280,8 +301,9 @@ public:
       // or minute boundary. Delay the end marker until the next actual gap or
       // finalization, since overlapping pre-roll can fill a paused interval.
       const uint64_t frame_duration = SECOND/info.fps;
-      if (!preview_time || packet.frame_time-preview_time > frame_duration*3/2) {
-        timeline(packet.frame_time, true);
+      Timeline mode = timeline_at(triggers, packet.frame_time);
+      if (!preview_time || packet.frame_time-preview_time > frame_duration*3/2 || timeline_mode != mode) {
+        timeline(packet.frame_time, mode);
       }
       preview_encoder = packet.camera;
       preview_time = packet.frame_time;
@@ -308,12 +330,12 @@ public:
   void close(bool last, bool complete = true) {
     uint64_t preview_end = preview_time ? preview_time+SECOND/MAIN_FPS : start_time;
     if (preview_time) {
-      timeline(preview_end, false);  // Black filler never extends orange.
+      timeline(preview_end, Timeline::GAP);  // Black filler never extends an event colour.
       last_time = std::max(last_time, preview_end);
     }
     uint64_t end = start_time+SEGMENT_LENGTH*SECOND;
     if (!complete) end = std::min(end, last_time);
-    if (!preview_time && end > start_time) timeline(start_time, false);
+    if (!preview_time && end > start_time) timeline(start_time, Timeline::GAP);
     fill_preview(preview_end, end);
     if (complete) last_time = std::max(last_time, end-1);
     sentinel(last ? SentinelType::END_OF_ROUTE : SentinelType::END_OF_SEGMENT, last_time);
@@ -333,6 +355,7 @@ public:
 class Recorder {
 public:
   std::map<int, Segment> ring;
+  std::deque<TriggerSelection> triggers;
   std::map<int, std::unique_ptr<SavedSegment>> saved;
   std::array<int, SENTRY_ENCODER_COUNT> source_segments;
   std::array<uint64_t, SENTRY_ENCODER_COUNT> source_times = {};
@@ -386,6 +409,7 @@ public:
   void reset() {
     finish();
     ring.clear();
+    triggers.clear();
     buffered = 0;
     source_segments.fill(-1);
     source_times.fill(0);
@@ -428,7 +452,7 @@ public:
       latest_segment = std::max(latest_segment, segment);
       out = std::make_unique<SavedSegment>(route, segment, route_init.asPtr(), route_start+segment*SEGMENT_LENGTH*SECOND);
     }
-    out->append(packet, entry.previews);
+    out->append(packet, entry.previews, triggers);
     last_preview_time = std::max(last_preview_time, out->preview_time);
     packet.saved = true;
   }
@@ -473,12 +497,16 @@ public:
       // find their own first playable frame after trimming/eviction.
     }
   }
-  void tick(uint64_t record_until, uint64_t now, uint64_t control_time, int trigger_camera) {
+  void tick(uint64_t record_until, uint64_t now, uint64_t control_time, int trigger_camera, Timeline mode = Timeline::FOOTAGE) {
     pre_seconds = history_seconds();
     // Only confirmed motion or a diagnostic manual trigger advances the deadline.
     // The immediate eye signal must never create bookmarks or extend a route.
     uint64_t motion_time = record_until > now && record_until > last_record_until ? control_time : 0;
     last_record_until = record_until;
+    if (motion_time) triggers.push_back({motion_time, record_until, mode});
+    // Keep the full maximum pre-roll plus its preceding selection. History is
+    // bounded even if a parked session records continuously for many hours.
+    while (triggers.size() > 1 && triggers[1].time+60*SECOND < now) triggers.pop_front();
     // One standard route bookmark per motion burst, after five quiet seconds.
     // Write it directly to this route: the UI owns the live userBookmark topic.
     bool bookmark = motion_time && (!last_motion || motion_time >= last_motion+5*SECOND);
@@ -649,7 +677,7 @@ int main() {
                    sm["deviceState"].isDeviceState() &&
                    !ignition && !sm["deviceState"].getDeviceState().getStarted();
     if (!capture) recorder.reset();
-    if (capture) recorder.tick(state.getRecordUntilMonoTime(), now, sm["sentryState"].getLogMonoTime(), state.getTriggerCamera());
+    if (capture) recorder.tick(state.getRecordUntilMonoTime(), now, sm["sentryState"].getLogMonoTime(), state.getTriggerCamera(), trigger_mode(state));
     if (capture && state.getRecordUntilMonoTime() > now) {
       recorder.select_preview(sm["sentryState"].getLogMonoTime(), state.getTriggerCamera());
     }

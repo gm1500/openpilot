@@ -1,4 +1,5 @@
 """Decode real camera packets across overlapping events and sparse session minutes."""
+import json
 import shutil
 import subprocess
 from fractions import Fraction
@@ -76,7 +77,10 @@ def validate_session(root, tmp_path):
                           f'{long}--0': [1010], f'{long}--600': [37017]}
   origins = {first: base, second: base+310_000_000_000, filled: base+400_000_000_000, long: base+1_000_000_000_000}
   gaps = {f'{first}--{n}' for n in (1, 2)} | {f'{long}--{n}' for n in range(1, 600)}
-  assert {d.name for d in root.iterdir()} == set(expected) | gaps, 'only bridge whole minutes between saved events'
+  colour_route = (tmp_path/'colour_route.txt').read_text().strip()
+  assert {d.name for d in root.iterdir()} == set(expected) | gaps | {f'{colour_route}--{n}' for n in range(2)}, \
+    'only bridge whole minutes between saved events'
+  validate_colours(root, colour_route, base, tmp_path)
   inits = {}
   full_inits = {}
   for name, frame_numbers in expected.items():
@@ -179,3 +183,37 @@ def validate_session(root, tmp_path):
   playback.mkdir()
   for number in range(4):
     shutil.copyfile(root/f'{first}--{number}'/'qcamera.ts', playback/f'{number}.ts')
+
+
+def validate_colours(root, route, base, tmp_path):
+  expected = [
+    [(600, 'orange'), (610, 'green'), (611, 'red'), (613, 'orange'), (620, 'green'),
+     (622, 'blue'), (644, 'orange'), (659, 'red'), (660, 'blue')],
+    [(660, 'green'), (662, 'orange'), (670, 'green'), (672, 'blue')],
+  ]
+  export = []
+  for number, transitions in enumerate(expected):
+    for filename in ('qlog.zst', 'rlog.zst'):
+      logged = messages(root/f'{route}--{number}'/filename)
+      states = [e for e in logged if e.which() == 'selfdriveState']
+      actual = []
+      for e in states:
+        state = e.selfdriveState
+        assert e.valid and state.state == 'disabled' and not state.active and not state.engageable
+        mode = 'green' if state.enabled else 'red' if state.alertStatus == 'critical' else \
+               'orange' if state.alertStatus == 'userPrompt' else 'blue'
+        actual.append(((e.logMonoTime-base)/1e9, mode))
+        assert str(state.alertStatus) == {'green': 'normal', 'red': 'critical', 'orange': 'userPrompt', 'blue': 'normal'}[mode]
+        assert state.alertType == {'green': 'sentryAudio/permanent', 'red': 'sentryGyro/permanent',
+                                   'orange': 'sentryRecording/permanent', 'blue': ''}[mode]
+      assert actual == transitions
+      if filename == 'qlog.zst':
+        for e in logged:
+          offset = round((e.logMonoTime-base-600_000_000_000)/1e6)
+          if e.which() == 'selfdriveState':
+            export.append({'type': 'state', 'route_offset_millis': offset, 'route_offset_nanos': 0,
+                           'data': {'enabled': e.selfdriveState.enabled, 'state': 'disabled',
+                                    'alertStatus': {'normal': 0, 'userPrompt': 1, 'critical': 2}[str(e.selfdriveState.alertStatus)]}})
+          elif e.which() == 'userBookmark':
+            export.append({'type': 'user_bookmark', 'route_offset_millis': offset, 'route_offset_nanos': 0, 'data': {}})
+  (tmp_path/'connect-events.json').write_text(json.dumps({'duration': 72000, 'events': export}))

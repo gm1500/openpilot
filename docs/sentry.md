@@ -3,7 +3,8 @@
 Sentry is integrated into `batmobile`. The changes developed on `sentry-session-routes-poc`
 are included as one additional squashed commit: one route per armed session, with small
 logs and black preview video bridging quiet gaps. Blue means no saved camera footage,
-orange marks saved preview intervals, and yellow marks confirmed motion.
+red marks gyro-triggered intervals and green marks audio-triggered intervals. Other
+saved footage is orange, with yellow bookmarks at confirmed trigger bursts.
 
 Manage the feature under **Settings → Sentry** in any vehicle state, including onroad.
 All configuration controls remain editable; enabling Sentry onroad takes effect when parked.
@@ -200,11 +201,18 @@ then reboots after success. No panda changes are needed.
 - Warmup and arming footage stays in the RAM history. A later event can therefore include
   the initial exposure/IR fade in its pre-roll even though that fade did not trigger a save.
   The motion bookmark identifies the confirmed trigger, rather than the start of pre-roll.
-- Connect's timeline is orange only where saved preview footage is available, blue across
-  unsaved gaps, and yellow at confirmed-motion bookmarks. Log-only state annotations mark
-  the first saved frame and the end of its continuous run, including pre-roll and the tail.
-  These annotations never publish live driving alerts. Existing uploaded routes are not
-  rewritten or recolored.
+- Connect's timeline uses red for gyro-triggered intervals and green for audio-triggered
+  intervals. Gyro takes priority when both activity flags accompany a confirmed trigger.
+  The latest confirmed trigger determines the colour from its timestamp through its
+  recording deadline; activity flags alone cannot recolour or extend an event. Pre-roll,
+  visual-only, accelerometer-only and manual events retain orange where footage exists.
+  Unsaved gaps stay blue, with yellow bookmarks at confirmed trigger bursts. Historical
+  trigger choices survive overlapping pre-roll and minute boundaries. Only saved-log
+  state annotations change: Connect's existing palette uses `enabled=true` for green
+  and `alertStatus=critical` for red, while `state=disabled` and `active=false` identify
+  these as annotations, not driving engagement. Nothing is published to live driving
+  services. Existing uploaded routes are not rewritten or recoloured. Update and rebuild
+  the native Sentry recorder for these colours to appear in newly recorded routes.
 - On ignition, shutdown, stale controller/health, thermal pause or disable, recording ends
   and the RAM buffer is discarded. This version does not retain the unsaved ring across reboots.
 
@@ -295,7 +303,7 @@ tail, and between non-overlapping events in the same minute. A brief lens-handof
 retains the existing last-frame hold. Real video rejoins after filler only on an IDR with
 its own SPS/PPS restored. The three HEVC streams are never padded or relabeled. Preview
 indexes include filler so in-file indexes stay correct; filler uses `frameId = UINT32_MAX`
-to distinguish it from sensor frames. Blue/orange availability is derived exclusively from
+to distinguish it from sensor frames. Blue versus saved-footage availability is derived exclusively from
 accepted real preview frames, not these synthetic indexes. Bookmarks retain their actual
 motion times. A final open partial minute is only filled through its logged end on disarm;
 already finalized minutes are not rewritten.
@@ -313,12 +321,13 @@ only once. After an unsaved gap, each video resumes on a decodable keyframe. Qca
 camera indexes, log clocks and bookmarks retain the original real-time offsets. The three
 HEVC files remain assigned to their original lenses.
 
-Orange availability follows accepted qcamera frames, not the requested recording deadline
+Timeline availability follows accepted qcamera frames, not the requested recording deadline
 or the start of a segment minute. Each continuous run ends one frame period after its last
 saved frame. Its closing `normal` state is written into the same event log, so it cannot
-carry orange across missing minutes. Overlapping pre-roll that fills a pause stays orange;
-an actual unsaved gap gets a blue interval. There are only two state annotations per saved
-run in each footage segment. Each wholly quiet minute between events instead has just one
+carry a colour across missing minutes. Overlapping pre-roll that fills a pause retains
+its historical trigger colours; an actual unsaved gap gets a blue interval. State
+annotations mark each saved run's start/end and any colour changes, rather than every
+frame. Each wholly quiet minute between events instead has just one
 normal state in its minimal gap log; there is no periodic idle telemetry stream.
 
 The complete black TS measured **46,060 bytes per minute** using the native VideoWriter;
@@ -611,6 +620,13 @@ power telemetry alone can miss upstream losses. Choose the voltage threshold for
 battery and verify with a meter before unattended operation.
 
 ## Validation
+
+The native recorder test feeds real encoded packets through mixed audio/gyro events,
+overlapping pre-roll, minute boundaries, gaps and disarming. Both qlog and rlog contain
+the expected green/red/orange/blue transitions, with gyro priority for simultaneous
+audio activity. The optional `test_connect_events.cjs` loads Connect's actual event
+parser and verifies its colour selectors against those recorded transitions. This is
+a local frontend contract check; hosted backend ingestion still needs a device upload.
 
 The supplied `00000400--0c90749c8d` segments 0–13 run `2f0593c`. Across roughly
 14 minutes, 3,928 saved Sentry states contain 93 observed recording-deadline advances:

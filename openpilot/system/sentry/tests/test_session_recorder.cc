@@ -23,16 +23,31 @@ int main(int argc, char **argv) {
   }
   Recorder recorder;
   uint64_t base = nanos_since_boot()-600*SECOND;
+  {
+    MessageBuilder message;
+    auto state = message.initEvent(true).initSentryState();
+    assert(trigger_mode(state.asReader()) == Timeline::FOOTAGE);
+    state.setAccelActive(true);
+    assert(trigger_mode(state.asReader()) == Timeline::FOOTAGE);
+    state.setAudioActive(true);
+    assert(trigger_mode(state.asReader()) == Timeline::AUDIO);
+    state.setGyroActive(true);
+    assert(trigger_mode(state.asReader()) == Timeline::GYRO);  // Gyro wins simultaneous activity.
+    state.setAudioActive(false);
+    assert(trigger_mode(state.asReader()) == Timeline::GYRO);
+  }
   uint64_t deadline = 0;
   int camera = VISION_STREAM_WIDE_ROAD;
-  auto feed = [&](int first, int last, const std::map<int, int> &triggers) {
+  auto feed = [&](int first, int last, const std::map<int, int> &triggers, const std::map<int, Timeline> &modes = {}) {
     for (int frame = first*MAIN_FPS; frame < last*MAIN_FPS; ++frame) {
       uint64_t now = base+frame*(SECOND/MAIN_FPS);
       if (auto found = triggers.find(frame); found != triggers.end()) {
         deadline = now+2*SECOND;
         camera = found->second;
       }
-      recorder.tick(deadline, now, now, camera);
+      // Activity flags clear between hits; colour lasts for the confirmed tail.
+      auto mode = modes.find(frame);
+      recorder.tick(deadline, now, now, camera, mode != modes.end() ? mode->second : Timeline::FOOTAGE);
       if (deadline > now) recorder.select_preview(now, camera);
       for (int c = 0; c < SENTRY_ENCODER_COUNT; ++c) {
         capnp::FlatArrayMessageReader reader(inputs[c][frame%40].words.asPtr());
@@ -105,6 +120,17 @@ int main(int argc, char **argv) {
   assert(recorder.gaps.empty());
   recorder.reset();
   Params().put("SentryPreSeconds", "15");
+
+  // Mixed triggers within one event, resumed pre-roll, and a minute boundary.
+  // Later audio must not recolour earlier gyro footage when pre-roll overlaps.
+  assert(recorder.triggers.empty());
+  feed(600, 673, {{12200, 2}, {12220, 2}, {12400, 2}, {13180, 2}, {13200, 2}, {13400, 2}},
+                 {{12200, Timeline::AUDIO}, {12220, Timeline::GYRO}, {12400, Timeline::AUDIO},
+                  {13180, Timeline::GYRO}, {13200, Timeline::AUDIO}, {13400, Timeline::AUDIO}});
+  const std::string colour_route = recorder.route;
+  recorder.reset();
+  assert(recorder.triggers.empty());
+  std::ofstream{fixtures/"colour_route.txt"} << colour_route << '\n';
 
   // Ten quiet hours must not generate files on their own. Once motion resumes,
   // drain incrementally; disarming also completes any remaining bounded ranges.
