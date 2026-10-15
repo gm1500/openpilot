@@ -2650,8 +2650,8 @@ struct Event {
     mapSpeedLimit @107 :Custom.MapSpeedLimit;
     mapCruiseState @108 :Custom.MapCruiseState;
     mapTrafficControl @109 :Custom.MapTrafficControl;
-    customReserved3 @110 :Custom.CustomReserved3;
-    customReserved4 @111 :Custom.CustomReserved4;
+    sentryState @110 :Custom.SentryState;
+    sentryRecorderState @111 :Custom.SentryRecorderState;
     customReserved5 @112 :Custom.CustomReserved5;
     customReserved6 @113 :Custom.CustomReserved6;
     customReserved7 @114 :Custom.CustomReserved7;

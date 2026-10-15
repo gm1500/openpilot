@@ -117,10 +117,50 @@ struct ModelStopState {
   predictionGrace @5 :Bool;
 }
 
-struct CustomReserved3 @0xda96579883444c35 {
+struct SentryState @0xda96579883444c35 {
+  sessionActive @0 :Bool;
+  capture @1 :Bool;
+  phase @2 :Text;
+  motion @3 :Bool;
+  motionX @4 :Float32;
+  motionY @5 :Float32;
+  motionCamera @6 :UInt8;
+  motionScore @7 :Float32;
+  recordUntilMonoTime @8 :UInt64;
+  latitude @9 :Float64;
+  longitude @10 :Float64;
+  locationAccuracy @11 :Float32;
+  locationSavedAt @12 :Float64;
+  locationSource @13 :Text;
+  locationValid @14 :Bool;
+  eyeEnabled @15 :Bool;
+  cameraMask @16 :UInt8;
+  timeZone @17 :Text;
+  utcOffsetSeconds @18 :Int32;
+  # Confirmed recording source (VisionStreamType), independent of the eye.
+  triggerCamera @19 :UInt8;
+  # Short-lived sound envelope above ambient, normalized for the eye glow.
+  soundLevel @20 :Float32;
+  # Brief confirmed sensor activity, independent of the saved recording tail.
+  sensorActive @21 :Bool;
+  gyroActive @22 :Bool;
+  audioActive @23 :Bool;
+  accelActive @24 :Bool;
+  # Strongest gyro sample relative to its threshold in this controller tick.
+  # All values are rad/s; zero when no fresh sample was evaluated.
+  gyroMagnitude @25 :Float32;
+  gyroThreshold @26 :Float32;
+  gyroNoise @27 :Float32;
+  gyroBaselineOffset @28 :Float32;  # Rolling center relative to learned bias.
 }
 
-struct CustomReserved4 @0x80ae746ee2596b11 {
+struct SentryRecorderState @0x80ae746ee2596b11 {
+  recording @0 :Bool;
+  route @1 :Text;
+  bufferSeconds @2 :Float32;
+  bufferBytes @3 :UInt64;
+  error @4 :Text;
+  previewCamera @5 :UInt8;
 }
 
 struct CustomReserved5 @0xa5cd762cd951a455 {
