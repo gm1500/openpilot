@@ -8,6 +8,7 @@ from pathlib import Path
 import time
 
 from openpilot.cereal import log
+from openpilot.system.webrtc.helpers import livestream_video_active
 
 RUNTIME_PATH = Path('/dev/shm/openpilot_sentry.json')
 LEASE_SECONDS = 2.0
@@ -142,7 +143,8 @@ def write_runtime(state):
 
 
 def sentry_capture_requested(started, params, CP):
-  return not started and setting(params, 'SentryEnabled') and not params.get_bool('SentryOffThisDrive') and bool(read_runtime().get('capture'))
+  return (not started and setting(params, 'SentryEnabled') and not params.get_bool('SentryOffThisDrive') and
+          not livestream_video_active(params) and bool(read_runtime().get('capture')))
 
 
 def sentry_gps_requested(started, params, CP):

@@ -280,6 +280,12 @@ class StreamSession:
   async def get_answer(self):
     return await self.stream.start()
 
+  def update_video_active(self):
+    active = self._connected and self.enabled and bool(self.video_tracks) and not self._cleanup_done
+    if self.params.get_bool("LivestreamVideoActive") != active:
+      self.params.put_bool("LivestreamVideoActive", active, block=True)
+      cloudlog.event("webrtcd.video_active", session_id=self.identifier, active=active)
+
   def apply_sentry_mode(self):
     if not self._connected or not self.enabled or self.is_body or not self.video_tracks or self._sentry_mode_applied:
       return
@@ -296,6 +302,8 @@ class StreamSession:
       self.logger.exception('Could not apply Sentry livestream mode')
 
   def message_handler(self, message: bytes):
+    if self._cleanup_done:
+      return
     try:
       payload = json.loads(message) if isinstance(message, (bytes, str)) else None
       if isinstance(payload, dict):
@@ -320,6 +328,7 @@ class StreamSession:
               self.bitrate_controller.enable(enabled)
             if not enabled:
               self.params.put("LivestreamRequestKeyframe", True)
+            self.update_video_active()
             self.apply_sentry_mode()
           case "clockSync":
             pong = json.dumps({"type": "clockSync", "data": {
@@ -359,6 +368,7 @@ class StreamSession:
 
       await asyncio.wait_for(self.stream.wait_for_connection(), timeout=15)
       self._connected = True
+      self.update_video_active()
       self.apply_sentry_mode()
       if self.stream.has_messaging_channel():
         if self.incoming_bridge is not None:
@@ -391,6 +401,7 @@ class StreamSession:
         return
       self._cleanup_done = True
       self._connected = False
+      self.update_video_active()
       self.params.put("LivestreamRequestKeyframe", False)
       if self.bitrate_controller is not None:
         await self.bitrate_controller.stop()
@@ -465,6 +476,7 @@ async def handle_get_stream(state: ServerState, raw_body: bytes, content_type: s
     except TimeoutError:
       await session.stop()
       stream_dict.pop(session.identifier, None)
+      schedule_teardown(state)
       logging.getLogger("webrtcd").exception("Timed out creating stream answer")
       with cloudlog.ctx(session_id=session.identifier):
         cloudlog.warning("webrtcd.session.answer_timeout")
@@ -472,6 +484,7 @@ async def handle_get_stream(state: ServerState, raw_body: bytes, content_type: s
     except Exception:
       await session.stop()
       stream_dict.pop(session.identifier, None)
+      schedule_teardown(state)
       logging.getLogger("webrtcd").exception("Failed to create stream answer")
       with cloudlog.ctx(session_id=session.identifier):
         cloudlog.exception("webrtcd.session.answer_exception")
@@ -618,6 +631,8 @@ def prewarm_stream_session_imports() -> None:
 
 
 def webrtcd_thread(host: str, port: int):
+  # A restarted daemon has no viewer, even if its previous process crashed.
+  Params().put_bool("LivestreamVideoActive", False, block=True)
   logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
   prewarm_start = time.monotonic()
   prewarm_stream_session_imports()

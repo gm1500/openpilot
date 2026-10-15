@@ -12,6 +12,7 @@ from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.sentry.config import setting, write_runtime, RUNTIME_PATH, CAMERA_WARMUP_SECONDS, RECORDING_CAMERA_MASK, MOTION_CAMERAS, HIGH_RISK
 from openpilot.system.sentry.config import apply_parking_default
+from openpilot.system.webrtc.helpers import livestream_video_active
 from openpilot.system.sentry.clock import SentryClock
 from openpilot.system.sentry.location import vehicle_identity, parked_location, gps_location
 from openpilot.system.sentry.motion import MotionDetector, Motion, PreviewSelector
@@ -191,7 +192,7 @@ def main():
           phase = 'Cooling down'
         elif now < restart_until:
           phase = 'Applying camera settings'
-        elif params.get_bool('IsDriverViewEnabled') or params.get_bool('IsLiveStreaming'):
+        elif params.get_bool('IsDriverViewEnabled') or livestream_video_active(params):
           phase = 'Camera preview in use'
         else:
           capture = elapsed >= 2.  # allow driving encoders to finish offroad transition
