@@ -21,8 +21,9 @@ def test_each_sensor_can_trigger_and_duplicates_do_not(service, value):
   assert detector.ready(4.)
   assert detector.update(service, value, 4.01, armed=True) == (service != 'gyroscope')
   assert not detector.update(service, value, 4.01, armed=True)
-  assert detector.update(service, value, 4.02, armed=True) == (service == 'gyroscope')
-  assert not detector.update(service, value, 4.03, armed=True)  # burst debounce
+  assert not detector.update(service, value, 4.02, armed=True)
+  assert detector.update(service, value, 4.031, armed=True) == (service == 'gyroscope')
+  assert not detector.update(service, value, 4.04, armed=True)  # burst debounce
 
 
 @pytest.mark.parametrize('axis', range(3))
@@ -144,7 +145,8 @@ def test_continuous_gyro_vibration_calibrates_without_losing_short_impacts(frequ
   assert detector.ambient['gyroscope'].spread > .002
   impact = (bias[0], bias[1]+6*amplitude, bias[2])
   assert not detector.update('gyroscope', impact, 10.01, True)
-  assert detector.update('gyroscope', impact, 10.02, True)
+  assert not detector.update('gyroscope', impact, 10.02, True)
+  assert detector.update('gyroscope', impact, 10.031, True)
   assert detector.active(10.2, 'gyroscope')
   assert not detector.active(10.4, 'gyroscope')
 
@@ -165,16 +167,18 @@ def test_confirmed_source_stays_visible_inside_recording_debounce_then_releases(
   settle(detector)
   assert detector.update('soundPressure', 80., 4.01, True)
   assert not detector.update('gyroscope', (.05, 0., 0.), 4.02, True)
-  assert not detector.update('gyroscope', (.05, 0., 0.), 4.03, True)  # Confirmed, inside audio's debounce.
+  assert not detector.update('gyroscope', (.05, 0., 0.), 4.03, True)
+  assert not detector.active(4.03, 'gyroscope')
+  assert not detector.update('gyroscope', (.05, 0., 0.), 4.041, True)  # Confirmed, inside audio's debounce.
   assert detector.active(4.2, 'soundPressure') and detector.active(4.2, 'gyroscope')
   assert not detector.active(4.2, 'accelerometer')
   assert not detector.update('soundPressure', 40., 4.03, True)
-  assert not detector.update('gyroscope', (0., 0., 0.), 4.04, True)
+  assert not detector.update('gyroscope', (0., 0., 0.), 4.05, True)
   assert not detector.active(4.4)
 
 
 @pytest.mark.parametrize('rotate', [False, True])
-@pytest.mark.parametrize('scale,expected', [(0.4, False), (0.6, True), (0.9, True), (1., True)])
+@pytest.mark.parametrize('scale,expected', [(0.4, False), (0.6, False), (0.9, True), (1., True)])
 def test_bookmarked_gyro_amplitude_when_sustained(rotate, scale, expected):
   # Bias and bookmarked sample from stationary 000003ef--91bc370306/5.
   # qlog is ~1 Hz: repeat the measured amplitude for a synthetic 125 ms pulse,
@@ -192,7 +196,7 @@ def test_bookmarked_gyro_amplitude_when_sustained(rotate, scale, expected):
   assert any(hits) == expected
 
 
-@pytest.mark.parametrize('sensitivity,expected', [(0, False), (25, False), (50, False), (75, True), (100, True)])
+@pytest.mark.parametrize('sensitivity,expected', [(0, False), (25, False), (50, False), (75, False), (100, True)])
 def test_gyro_slider_detects_lighter_shakes_without_changing_audio_or_acceleration(sensitivity, expected):
   detector = ActivityDetector()
   settle(detector)
@@ -202,6 +206,46 @@ def test_gyro_slider_detects_lighter_shakes_without_changing_audio_or_accelerati
     detector = ActivityDetector()
     settle(detector)
     assert detector.update(service, value, 4.1, True, audio_sensitivity=50, gyro_sensitivity=sensitivity) == (service == 'soundPressure')
+
+
+@pytest.mark.parametrize('sensitivity,scale', [
+  (-10, 2*math.sqrt(2)), (0, 2*math.sqrt(2)), (25, 2.), (50, math.sqrt(2)),
+  (75, 1.), (100, 1/math.sqrt(2)), (110, 1/math.sqrt(2)),
+])
+@pytest.mark.parametrize('noise,floor', [(0., .0025), (.002, .008)])
+def test_gyro_scale_recenters_old_25_at_new_50_for_quiet_and_noisy_background(sensitivity, scale, noise, floor):
+  detector = ActivityDetector()
+  settle(detector)
+  detector.ambient['gyroscope'].spread = noise
+  detector.update('gyroscope', (.001, 0., 0.), 4.01, True, gyro_sensitivity=sensitivity)
+  assert detector.gyro_sample['gyroThreshold'] == pytest.approx(floor*scale)
+
+
+@pytest.mark.parametrize('amplitude,expected', [(.0034, False), (.0037, True)])
+def test_new_default_preserves_old_25_percent_amplitude_boundary(amplitude, expected):
+  detector = ActivityDetector()
+  settle(detector)
+  hits = [detector.update('gyroscope', (amplitude, 0., 0.), 4.+i/104., True) for i in range(1, 14)]
+  assert any(hits) == expected
+
+
+@pytest.mark.parametrize('samples', [1, 2, 3, 4])
+@pytest.mark.parametrize('axis', range(3))
+def test_strong_gyro_spike_bursts_need_full_20_ms_even_at_max_sensitivity(samples, axis):
+  detector = ActivityDetector()
+  settle(detector)
+  peak = [0., 0., 0.]
+  peak[axis] = .03
+  for burst in range(4):
+    hits = []
+    for i in range(1, 261):
+      t = 4.+burst*2.5+i/104.
+      hits.append(detector.update('gyroscope', peak if i <= samples else (0., 0., 0.), t, True,
+                                  gyro_sensitivity=100))
+      if i == samples:
+        assert detector.active(t, 'gyroscope') == (samples == 4)
+    # At 104 Hz, three samples span 19.2 ms; four span 28.8 ms.
+    assert sum(hits) == (1 if samples == 4 else 0)
 
 
 def test_short_first_gyro_jolt_triggers_before_slower_rebound_and_then_releases():
@@ -238,9 +282,10 @@ def test_repeated_isolated_gyro_peaks_do_not_retrigger_after_a_real_shake(peak):
   detector = ActivityDetector()
   settle(detector)
   assert not detector.update('gyroscope', (.02, 0., 0.), 4.01, True)
-  assert detector.update('gyroscope', (.02, 0., 0.), 4.02, True)
+  assert not detector.update('gyroscope', (.02, 0., 0.), 4.02, True)
+  assert detector.update('gyroscope', (.02, 0., 0.), 4.031, True)
   for i in range(1, 1041):
-    t = 4.02+i/104.
+    t = 4.031+i/104.
     value = (peak if i % 104 == 0 else 0., 0., 0.)
     assert not detector.update('gyroscope', value, t, True)
     if t > 4.4:
@@ -288,15 +333,16 @@ def test_native_messages_and_brief_impact_between_controller_ticks(monkeypatch, 
   message(service, value, 4.01, sensor_delay=.005)
   if service == 'gyroscope':
     message(service, value, 4.02, sensor_delay=.005)
-  message(service, ambient[service], 4.03, sensor_delay=.005)
+    message(service, value, 4.031, sensor_delay=.005)
+  message(service, ambient[service], 4.04, sensor_delay=.005)
   assert activity.sample(4.2, armed=True)
   assert activity.active(4.2, service)  # Later quiet sample did not hide the impact.
   assert not activity.active(4.4, service)
   if service == 'gyroscope':
-    assert activity.gyro.samples[-1][0] == pytest.approx(4.025)
+    assert activity.gyro.samples[-1][0] == pytest.approx(4.035)
     assert activity.gyro.angle(4., 4.015) > .002
     assert activity.gyro_diagnostics['gyroMagnitude'] == pytest.approx(.3)
-    assert activity.gyro_diagnostics['gyroThreshold'] == pytest.approx(.0025)
+    assert activity.gyro_diagnostics['gyroThreshold'] == pytest.approx(.0035355339)
     assert activity.gyro_diagnostics['gyroNoise'] == 0.
     assert activity.gyro_diagnostics['gyroBaselineOffset'] == 0.
   assert not activity.sample(4.2, armed=True)

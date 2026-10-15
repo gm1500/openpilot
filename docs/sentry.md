@@ -68,17 +68,22 @@ With the option disabled, or without a fresh Wi-Fi connection, Low Risk remains 
   that threshold from the previous block. The slider adjusts both paths without
   changing calibration speed.
 - Gyro bias follows the rolling median slowly, and median absolute deviation estimates
-  ordinary background vibration. Gyro sensitivity defaults to 50%, retaining the quiet
-  threshold of 0.0025 rad/s or four times that spread, whichever is higher. The noise
-  threshold is no longer capped below potentially larger background vibration. The 0–100% slider
-  scales this learned threshold: 0% doubles it, 50% retains it and 100% halves it.
+  ordinary background vibration. Gyro sensitivity defaults to 50%, using the former
+  25% threshold. The base remains 0.0025 rad/s or four times that spread, whichever
+  is higher. The slider multiplies this base by `2 ** ((75 - sensitivity) / 50)`:
+  new 25/50/75/100% match old 0/25/50/75%. New 0% extends the less-sensitive end.
+  The quiet threshold at the default is approximately 0.00354 rad/s; learned vibration
+  can raise it further without a cap. Saved slider numbers remain unchanged, so the
+  threshold rises by approximately 41% at every existing setting. This recentering
+  replaces the earlier proposed threshold doubling; the two are not stacked.
   Changes take effect while capturing in either risk mode, without changing the audio
   setting or acceleration threshold.
   Short bumps remain detectable; sustained rotation cannot become a new stationary bias.
   Calibration retains native samples so periodic vibration is not lost to downsampling.
-  Acceleration retains its learned gravity vector and 0.6 m/s² threshold. Moderate gyro
-  changes need 20 ms confirmation; stronger gyro motion needs 8 ms, still requiring
-  multiple samples at 104 Hz. One large gyro sample cannot trigger by itself.
+  Acceleration retains its learned gravity vector and 0.6 m/s² threshold. All gyro
+  changes need 20 ms continuously above threshold, including strong peaks. The former
+  8 ms shortcut is removed: at 104 Hz, four above-threshold samples are needed because
+  three span only 19.2 ms. A brief pair of strong noise samples cannot trigger by itself.
   Acceleration retains 40 ms confirmation, and strong audio/acceleration can trigger
   immediately. Recording triggers are debounced for two seconds. Each input settles
   for three seconds and relearns after missing data. Calibration resets each capture
@@ -599,6 +604,26 @@ power telemetry alone can miss upstream losses. Choose the voltage threshold for
 battery and verify with a meter before unattended operation.
 
 ## Validation
+
+The supplied `00000400--0c90749c8d` segments 0–13 run `2f0593c`. Across roughly
+14 minutes, 3,928 saved Sentry states contain 93 observed recording-deadline advances:
+85 with gyro activity and eight with audio activity, with no audio/gyro overlap.
+Acceleration and visual motion sometimes accompany these activity flags. From segment
+3 onward, all 54 deadline advances have gyro activity and none have audio activity.
+The diagnostic threshold/noise ratio indicates gyro sensitivity fell from 75% to 50%
+near the end of segment 0 and stayed at 50%. Later baseline offsets have a median
+of 0.000206 rad/s and a maximum of 0.00109 rad/s, below the effective thresholds;
+this supports investigating brief noise peaks rather than increasing bias adaptation.
+Later trigger-tick peak/threshold ratios have a median of 2.69. Only one of those 54
+peaks is below a 41%-higher threshold, and only four are below a doubled threshold:
+raising amplitude alone cannot be assumed to solve the nuisance activity. These are
+5 Hz peak summaries, not raw gyro samples or continuous above-threshold durations;
+they cannot replay the new detector or establish how many events it will reject.
+The revised scale is paired with removal of the 8 ms strong-peak shortcut. Synthetic
+104 Hz tests verify that one-, two- and three-sample bursts remain quiet while a
+four-sample pulse can trigger, including at maximum sensitivity. Quiet/noisy threshold
+checks verify the exact old-25/new-50 mapping. A new parked capture is still required
+to measure nuisance-trigger reduction and retained sensitivity to real shakes.
 
 The supplied `000003fd--ba28bfd142` segments 5–6 run `e924c49`, Low Risk and audio
 sensitivity 50%. Across roughly two minutes, 32 observed recording-deadline advances

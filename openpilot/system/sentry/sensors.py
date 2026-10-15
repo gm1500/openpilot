@@ -89,7 +89,9 @@ class ActivityDetector:
 
     dt = timestamp-previous
     baseline = self.baseline[service]
-    gyro_scale = 2.**((50.-min(100., max(0., float(gyro_sensitivity))))/50.)
+    # Shift the existing curve by 25 slider points: new 50% is old 25%.
+    # Scale both the quiet floor and learned vibration threshold together.
+    gyro_scale = 2.**((75.-min(100., max(0., float(gyro_sensitivity))))/50.)
     impulse = False
     if service == 'soundPressure':
       # micd's dB readings are uncalibrated. Use change above the ambient
@@ -109,9 +111,9 @@ class ActivityDetector:
                    gyro_scale*max(GYRO_THRESHOLD_RAD_S, 4*self.ambient[service].spread))  # m/s², rad/s
       strength = math.dist(values, baseline)/threshold
       # A brief initial jolt can end before 40 ms while its slower rebound
-      # passes that gate. Even a strong gyro hit must span multiple samples:
-      # one large sample is not evidence of a physical shake.
-      confirm = (.008 if strength >= 2. else .02) if service == 'gyroscope' else .04
+      # passes that gate. Strong noise spikes must meet the same 20 ms gate:
+      # a short pair of large samples is not evidence of a physical shake.
+      confirm = .02 if service == 'gyroscope' else .04
       if service == 'gyroscope':
         self.gyro_sample = {'gyroMagnitude': strength*threshold, 'gyroThreshold': threshold,
                             'gyroNoise': self.ambient[service].spread,
