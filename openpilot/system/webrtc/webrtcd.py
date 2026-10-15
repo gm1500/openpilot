@@ -258,6 +258,8 @@ class StreamSession:
     self.run_task: asyncio.Task | None = None
     self._cleanup_lock = asyncio.Lock()
     self._cleanup_done = False
+    self._connected = False
+    self._sentry_mode_applied = False
     self.logger = logging.getLogger("webrtcd")
     cloudlog.warning(
       "New stream session (%s), video cameras %s, video enabled %s, incoming services %s, outgoing services %s",
@@ -277,6 +279,21 @@ class StreamSession:
 
   async def get_answer(self):
     return await self.stream.start()
+
+  def apply_sentry_mode(self):
+    if not self._connected or not self.enabled or self.is_body or not self.video_tracks or self._sentry_mode_applied:
+      return
+    # One action per viewing session. Pause/resume, camera changes or repeated
+    # enable messages must not undo a later local choice or restart arming again.
+    self._sentry_mode_applied = True
+    try:
+      from openpilot.system.sentry.config import apply_livestream_mode
+      mode = apply_livestream_mode(self.params)
+      if mode is not None:
+        cloudlog.event('sentry.livestream_mode', mode=mode)
+    except Exception:
+      # A Sentry setting failure must not terminate the viewer's connection.
+      self.logger.exception('Could not apply Sentry livestream mode')
 
   def message_handler(self, message: bytes):
     try:
@@ -303,6 +320,7 @@ class StreamSession:
               self.bitrate_controller.enable(enabled)
             if not enabled:
               self.params.put("LivestreamRequestKeyframe", True)
+            self.apply_sentry_mode()
           case "clockSync":
             pong = json.dumps({"type": "clockSync", "data": {
               "action": "pong", "browserSendTime": payload["data"]["browserSendTime"], "deviceTime": time.time() * 1000, # noqa: TID251
@@ -340,6 +358,8 @@ class StreamSession:
       self.stream.set_message_handler(self.message_handler)
 
       await asyncio.wait_for(self.stream.wait_for_connection(), timeout=15)
+      self._connected = True
+      self.apply_sentry_mode()
       if self.stream.has_messaging_channel():
         if self.incoming_bridge is not None:
           await self.shared_pub_master.add_services_if_needed(self.incoming_bridge_services)
@@ -370,6 +390,7 @@ class StreamSession:
       if self._cleanup_done:
         return
       self._cleanup_done = True
+      self._connected = False
       self.params.put("LivestreamRequestKeyframe", False)
       if self.bitrate_controller is not None:
         await self.bitrate_controller.stop()

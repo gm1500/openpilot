@@ -60,6 +60,27 @@ choice; a choice made during that drive can also apply to the upcoming parking s
 With the option disabled or no Wi-Fi connection, the automatic default is Low Risk.
 If device or ignition state is stale, the controller waits for a fresh reading before deciding.
 
+The **Livestream** row directly below the Wi-Fi option has an enable toggle and the same
+three mode choices: Low Risk, High Risk and Off this parking. The toggle defaults off,
+with High Risk selected as its initial action. There is no No change mode; switch the
+toggle off to disable the action. Configuring this row does not change the current parking
+choice until a livestream is viewed. The global Enable Sentry switch must remain on.
+
+When a parked livestream successfully connects and its video is enabled, the selected mode
+becomes the explicit choice for this parking session, overriding the automatic Wi-Fi skip.
+Connect's background prewarm connections, failed connections, onroad streams and body
+teleoperation do not apply it. The action runs once per viewing session: camera switches,
+pause/resume and duplicate enable messages cannot undo a later local mode choice.
+Closing the stream does not restore the earlier mode. A new drive resets the parking
+choice, while the livestream toggle and preferred mode persist. Sentry capture still pauses
+while livestreaming owns the cameras, then uses normal camera warmup and arming after
+the stream closes. Battery, temperature and the original parking-time budget still apply;
+livestreaming does not extend that budget or wake a powered-off device.
+
+This setting adds two native parameter keys. Use `tools/sentry_update.sh` to rebuild the
+parameter library before rebooting; a plain pull and UI restart cannot load these new keys
+with an older compiled parameter table.
+
 - Low Risk saves events from sudden sound changes or accelerometer/gyroscope activity.
   Both wide cameras are analyzed while idle, retaining five seconds of decaying motion
   evidence for preview selection. A sensor hit favors the strongest current or recent
@@ -536,6 +557,7 @@ through instantaneous power loss.
 | --- | --- |
 | Enable Sentry | On, for an unset first-use setting |
 | Skip Sentry on Wi-Fi | On; green Off is the parking default when connected |
+| Livestream | Action off; preferred mode High Risk; applies once when live video is viewed |
 | Motion sensitivity | 75 / 100 |
 | Audio sensitivity | 25 / 100; higher detects quieter sounds and knocks |
 | Gyro sensitivity | 50 / 100; higher detects lighter shakes |
@@ -550,7 +572,7 @@ through instantaneous power loss.
 | Red eye | On |
 | Video watermark | On: local timestamp with UTC offset, camera name and known parking coordinates |
 
-The row order is Sentry status/STOP, Enable Sentry with all three parking modes, Skip Sentry on Wi-Fi, Arming delay, Pre-event buffer,
+The row order is Sentry status/STOP, Enable Sentry with all three parking modes, Skip Sentry on Wi-Fi, Livestream, Arming delay, Pre-event buffer,
 Record after motion stops, Motion sensitivity, Audio sensitivity, Gyro sensitivity, Battery cutoff, Maximum parked time,
 Pause capture above, Red eye, Video watermark, then Buffered footage and Current time.
 Sensitivity is the first slider. Battery cutoff includes the current voltage inline; stale

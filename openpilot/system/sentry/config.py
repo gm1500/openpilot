@@ -19,6 +19,7 @@ DURATION_KEYS = ('SentryArmDelay', 'SentryPreSeconds', 'SentryPostSeconds')
 LOW_RISK, HIGH_RISK = 0, 1
 DEFAULTS = {
   'SentryRiskMode': LOW_RISK, 'SentrySkipOnWifi': True,
+  'SentryLivestreamOverride': False, 'SentryLivestreamMode': HIGH_RISK,
   'SentryEnabled': True, 'SentrySensitivity': 75, 'SentryAudioSensitivity': 25, 'SentryGyroSensitivity': 50, 'SentryArmDelay': 30,
   'SentryPreSeconds': 60, 'SentryPostSeconds': 60,
   'SentryCutoffVoltage': 11.8, 'SentryMaxHours': 4, 'SentryShutdownOnTimeLimit': True,
@@ -27,6 +28,7 @@ DEFAULTS = {
 }
 RANGES = {
   'SentryRiskMode': (LOW_RISK, HIGH_RISK),
+  'SentryLivestreamMode': (LOW_RISK, 2),  # 2 skips this parking session.
   'SentrySensitivity': (1, 100), 'SentryAudioSensitivity': (0, 100), 'SentryGyroSensitivity': (0, 100), 'SentryCutoffVoltage': (11.0, 11.8),
   'SentryMaxHours': (1, 12), 'SentryMaxTemp': (55, 75),
 }
@@ -104,6 +106,21 @@ def apply_parking_default(params, sm, now):
       if source == 'wifi':
         params.put_bool('SentryOffThisDrive', True, block=True)
     params.put('SentryParkingModeSource', source, block=True)
+
+
+def apply_livestream_mode(params):
+  # Called once when a viewer actually enables video on a connected session,
+  # never for Connect's background prewarm. Use the same parking choice as the UI.
+  if not setting(params, 'SentryLivestreamOverride') or not setting(params, 'SentryEnabled'):
+    return None
+  if not params.get_bool('IsOffroad') or not params.get_bool('IsLiveStreaming'):
+    return None
+  if any(params.get_bool(k) for k in ('DoShutdown', 'DoReboot', 'DoUninstall')):
+    return None
+  mode = setting(params, 'SentryLivestreamMode')
+  mode = mode if mode < 2 else 'off'
+  select_parking_mode(params, mode)
+  return mode
 
 
 def read_runtime(now=None):

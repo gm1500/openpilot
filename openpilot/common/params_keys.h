@@ -8,6 +8,8 @@
 inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SentryEnabled", {PERSISTENT, BOOL, "1"}},
     {"SentrySkipOnWifi", {PERSISTENT, BOOL, "1"}},
+    {"SentryLivestreamOverride", {PERSISTENT, BOOL, "0"}},
+    {"SentryLivestreamMode", {PERSISTENT, INT, "1"}},
     {"SentryRiskMode", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, INT, "0"}},
     {"SentryOffThisDrive", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
     {"SentryModePrompted", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},

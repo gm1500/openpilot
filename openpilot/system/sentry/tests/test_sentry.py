@@ -632,7 +632,7 @@ def test_settings_remain_editable_in_all_vehicle_states(monkeypatch, tmp_path, s
   monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*20, 40))
   layout = ui.SentryLayout()
   assert [row.title for row in layout.scroller._items] == [
-    'Sentry', 'Enable Sentry', 'Skip Sentry on Wi-Fi', 'Arming delay', 'Pre-event buffer', 'Record after motion stops',
+    'Sentry', 'Enable Sentry', 'Skip Sentry on Wi-Fi', 'Livestream', 'Arming delay', 'Pre-event buffer', 'Record after motion stops',
     'Motion sensitivity', 'Audio sensitivity', 'Gyro sensitivity', 'Battery cutoff', 'Maximum parked time', 'Pause capture above',
     'Red eye', 'Video watermark', 'Buffered footage', 'Current time',
   ]
@@ -685,7 +685,8 @@ def test_settings_remain_editable_in_all_vehicle_states(monkeypatch, tmp_path, s
   assert not modes._touch_valid() and not layout._enable_toggle.action_item.toggle._touch_valid()
 
 
-def test_enable_switch_and_three_coloured_parking_modes_fit_one_row(monkeypatch, tmp_path):
+@pytest.mark.parametrize('livestream', [False, True])
+def test_enable_switch_and_three_coloured_parking_modes_fit_one_row(monkeypatch, tmp_path, livestream):
   import pyray as rl
   from openpilot.common.params import Params
   from openpilot.selfdrive.ui.layouts.settings import sentry as ui
@@ -698,11 +699,14 @@ def test_enable_switch_and_three_coloured_parking_modes_fit_one_row(monkeypatch,
   labels, fills = [], []
   monkeypatch.setattr(ui, 'gui_label', lambda rect, text, size, *args, **kwargs: labels.append((rect, text)))
   monkeypatch.setattr(rl, 'draw_rectangle_rounded', lambda rect, rounding, segments, color: fills.append((color.r, color.g, color.b)))
-  action = ui.SentryEnableAction(params, lambda enabled: params.put_bool('SentryEnabled', enabled, block=True))
-  row = ui.ListItem('Enable Sentry', action_item=action)
+  key = 'SentryLivestreamOverride' if livestream else 'SentryEnabled'
+  title = 'Livestream' if livestream else 'Enable Sentry'
+  action = ui.SentryEnableAction(params, lambda enabled: params.put_bool(key, enabled, block=True),
+                                key=key, mode_key='SentryLivestreamMode' if livestream else None)
+  row = ui.ListItem(title, action_item=action)
   # 2160px display, 500px sidebar and 50px panel margins on both sides.
   rect = row.get_right_item_rect(rl.Rectangle(550, 25, 1560, 170))
-  assert rect.x >= 550+20+len('Enable Sentry')*30
+  assert rect.x >= 550+20+len(title)*30
   action._render(rect)
   toggle = action.toggle.rect
   assert len(labels) == 3 and toggle.x+toggle.width < labels[0][0].x
@@ -716,7 +720,15 @@ def test_enable_switch_and_three_coloured_parking_modes_fit_one_row(monkeypatch,
     assert fills[i] == color
     assert [action.modes.is_button_selected(n) for n in range(3)] == [n == i for n in range(3)]
     assert params.get_bool('SentryEnabled')
-  assert params.get_bool('SentryOffThisDrive')
+  if livestream:
+    assert not params.get_bool('SentryOffThisDrive')
+    assert params.get('SentryArmResetAt') is None  # Configure the future action, without applying it now.
+    assert not params.get_bool(key)
+    action.toggle._handle_mouse_release(rl.Vector2())
+    assert params.get_bool(key)
+    assert params.get('SentryLivestreamMode') == 2
+  else:
+    assert params.get_bool('SentryOffThisDrive')
 
 
 @pytest.mark.parametrize('key,shutdown_key', [('SentryMaxHours', 'SentryShutdownOnTimeLimit'), ('SentryMaxTemp', 'SentryShutdownOnOverheat')])

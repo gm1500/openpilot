@@ -94,16 +94,21 @@ class SentryDurationButtons(MultipleButtonAction):
 
 
 class SentryModeButtons(MultipleButtonAction):
-  def __init__(self, params):
+  def __init__(self, params, key=None):
     super().__init__(['Low Risk', 'High Risk', 'Off this parking'], button_width=280)
-    self.params = params
+    self.params, self.key = params, key
 
   def is_button_selected(self, index):
+    if self.key:
+      return setting(self.params, self.key) == index
     return parking_mode(self.params) == (index if index < 2 else 'off')
 
   def select_button(self, index):
     if self.enabled:
-      select_parking_mode(self.params, index if index < 2 else 'off')
+      if self.key:
+        self.params.put(self.key, index, block=True)
+      else:
+        select_parking_mode(self.params, index if index < 2 else 'off')
 
   def _render(self, rect):
     self.button_width = (rect.width-40)/3
@@ -118,10 +123,10 @@ class SentryModeButtons(MultipleButtonAction):
 
 
 class SentryEnableAction(ToggleAction):
-  def __init__(self, params, callback):
-    super().__init__(initial_state=setting(params, 'SentryEnabled'), width=1080, callback=callback)
+  def __init__(self, params, callback, key='SentryEnabled', mode_key=None):
+    super().__init__(initial_state=setting(params, key), width=1080, callback=callback)
     self._child(self.toggle)
-    self.modes = self._child(SentryModeButtons(params))
+    self.modes = self._child(SentryModeButtons(params, mode_key))
 
   def set_touch_valid_callback(self, callback):
     super().set_touch_valid_callback(callback)
@@ -151,12 +156,20 @@ class SentryLayout(Widget):
                                    callback=lambda: self._set_sentry_enabled(False),
                                    enabled=lambda: setting(self.params, 'SentryEnabled'))
     self._stop_button.action_item.set_value(self.phase_status)
+    self._livestream_toggle = ListItem('Livestream',
+      description='When enabled, opening live video in Connect forces the selected mode for this parking session. ' +
+                  'Overrides the Wi-Fi skip; Enable Sentry must remain on. Choosing a mode here only configures this action. ' +
+                  'Capture pauses during live viewing and rearms after it closes. Battery, temperature and parking-time limits still apply.',
+      action_item=SentryEnableAction(self.params,
+        lambda value: self.params.put_bool('SentryLivestreamOverride', value, block=True),
+        key='SentryLivestreamOverride', mode_key='SentryLivestreamMode'))
     items = [
       self._stop_button,
       self._enable_toggle,
       self.toggle('SentrySkipOnWifi', 'Skip Sentry on Wi-Fi',
                   'Defaults to Off this parking when parked on Wi-Fi, even with the screen off or no prompt. ' +
                   'Select Low Risk or High Risk above to override it for this parking session.'),
+      self._livestream_toggle,
       ListItem('Arming delay', description=f'Includes {CAMERA_WARMUP_SECONDS:g} seconds of camera warmup once video is available. ' +
                'Footage buffers throughout; motion saves and the eye wait until the total delay finishes.',
                action_item=SentryDurationButtons(self.params, 'SentryArmDelay')),
@@ -196,6 +209,7 @@ class SentryLayout(Widget):
 
   def _update_state(self):
     self._enable_toggle.action_item.set_state(setting(self.params, 'SentryEnabled'))
+    self._livestream_toggle.action_item.set_state(setting(self.params, 'SentryLivestreamOverride'))
 
   def toggle(self, key, title, description=None):
     return toggle_item(title, description, initial_state=setting(self.params, key),

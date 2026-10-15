@@ -4,7 +4,7 @@ import pytest
 
 from openpilot.cereal import log
 from openpilot.common.params import Params, ParamKeyFlag
-from openpilot.system.sentry.config import apply_parking_default, parking_mode, select_parking_mode, LOW_RISK, HIGH_RISK
+from openpilot.system.sentry.config import apply_parking_default, apply_livestream_mode, parking_mode, select_parking_mode, LOW_RISK, HIGH_RISK
 
 
 @pytest.fixture
@@ -41,6 +41,48 @@ def test_prompt_dismissal_does_not_skip_the_controller_wifi_default(parking):
   params.put_bool('SentryModePrompted', True, block=True)
   apply_parking_default(params, sm, 100.)
   assert parking_mode(params) == 'off' and params.get('SentryParkingModeSource') == 'wifi'
+
+
+@pytest.mark.parametrize('choice', [LOW_RISK, HIGH_RISK, 2])
+def test_livestream_choice_overrides_wifi_only_for_this_parking(parking, choice):
+  params, sm = parking
+  params.put_bool('IsLiveStreaming', True, block=True)
+  params.put_bool('SentryLivestreamOverride', True, block=True)
+  params.put('SentryLivestreamMode', choice, block=True)
+  params.put('SentryCutoffVoltage', 11.5, block=True)
+  params.put('SentryMaxHours', 2, block=True)
+  apply_parking_default(params, sm, 100.)
+  assert parking_mode(params) == 'off'
+  expected = choice if choice < 2 else 'off'
+  assert apply_livestream_mode(params) == expected
+  assert parking_mode(params) == expected
+  assert params.get('SentryArmResetAt') > 0
+  apply_parking_default(params, sm, 100.)
+  assert parking_mode(params) == expected
+  assert params.get_bool('SentryEnabled')
+  assert params.get('SentryCutoffVoltage') == 11.5 and params.get('SentryMaxHours') == 2
+  params.put_bool('IsLiveStreaming', False, block=True)
+  assert parking_mode(params) == expected  # Disconnect never reverts the choice.
+  params.clear_all(ParamKeyFlag.CLEAR_ON_ONROAD_TRANSITION)
+  assert parking_mode(params) == LOW_RISK
+  assert params.get_bool('SentryLivestreamOverride') and params.get('SentryLivestreamMode') == choice
+
+
+@pytest.mark.parametrize('blocker', ['default', 'disabled', 'master_off', 'onroad', 'no_stream', 'DoShutdown', 'DoReboot', 'DoUninstall'])
+def test_livestream_does_not_change_mode_when_blocked(parking, blocker):
+  params, _ = parking
+  params.put_bool('IsLiveStreaming', True, block=True)
+  if blocker != 'default':
+    params.put_bool('SentryLivestreamOverride', True, block=True)
+  if blocker in ('disabled', 'master_off', 'onroad', 'no_stream'):
+    key = {'disabled': 'SentryLivestreamOverride', 'master_off': 'SentryEnabled',
+           'onroad': 'IsOffroad', 'no_stream': 'IsLiveStreaming'}[blocker]
+    params.put_bool(key, False, block=True)
+  elif blocker.startswith('Do'):
+    params.put_bool(blocker, True, block=True)
+  assert apply_livestream_mode(params) is None
+  assert parking_mode(params) == LOW_RISK
+  assert params.get('SentryArmResetAt') is None and params.get('SentryParkingModeSource') is None
 
 
 @pytest.mark.parametrize('blocker', ['onroad', 'started', 'ignition_line', 'ignition_can', 'no_panda',
