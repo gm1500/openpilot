@@ -50,8 +50,8 @@ class SentryPrompt(Widget):
     voltage_valid = sm.valid['peripheralState'] and 0 <= now-sm.recv_time['peripheralState'] < 3. and 6 < voltage < 20
     self.battery_status = f'Battery {voltage:.1f} V' if voltage_valid else 'Battery unavailable'
     if self.params.get_bool('SentryOffThisDrive'):
-      prefix = 'Wi-Fi · ' if self.wifi_default else ''
-      self.status = f'{prefix}Sentry off · Closing in {max(0, math.ceil(self.close_at-now))} s'
+      prefix = 'Wi-Fi: ' if self.wifi_default else ''
+      self.status = f'{prefix}Sentry off, closing in {max(0, math.ceil(self.close_at-now))} s'
       if self.opened and now >= self.close_at:
         self.choose(None)
       return
@@ -110,7 +110,7 @@ class SentryPrompt(Widget):
     gui_label(rl.Rectangle(rect.x+40, rect.y+40, status_width, 90), self.status, 36,
               rl.WHITE, font_weight=FontWeight.MEDIUM)
     gui_label(rl.Rectangle(rect.x+40+status_width+gap, rect.y+40, battery_width, 90),
-              f'{self.battery_status} · Cutoff {setting(self.params, "SentryCutoffVoltage"):.1f} V', 32, rl.LIGHTGRAY)
+              f'{self.battery_status} / Cutoff {setting(self.params, "SentryCutoffVoltage"):.1f} V', 32, rl.LIGHTGRAY)
     gui_label(rl.Rectangle(rect.x+40+header_width-cutoff_width, rect.y+40, cutoff_width, 90),
               f'Time cutoff {setting(self.params, "SentryMaxHours")} h', 36, rl.WHITE,
               font_weight=FontWeight.MEDIUM, alignment=TextAlignment.RIGHT)

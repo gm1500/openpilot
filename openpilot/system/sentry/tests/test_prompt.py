@@ -90,7 +90,7 @@ def test_wifi_default_off_can_be_overridden_and_network_changes_do_not_reselect(
   sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi
   view.update(True)
   assert view.wifi_default and params.get_bool('SentryOffThisDrive')
-  assert view.status == 'Wi-Fi · Sentry off · Closing in 30 s'
+  assert view.status == 'Wi-Fi: Sentry off, closing in 30 s'
   view.choose(mode)
   assert params.get_bool('SentryOffThisDrive') == (mode in (None, 'off'))
   if mode in (LOW_RISK, HIGH_RISK):
@@ -115,7 +115,7 @@ def test_switching_off_keeps_original_deadline_and_can_be_changed_again(prompt, 
     assert view.opened and device.sentry_prompt_visible
     assert view.close_at == 130.
     assert params.get_bool('SentryOffThisDrive') == (mode == 'off')
-  assert view.status == 'Sentry off · Closing in 5 s'
+  assert view.status == 'Sentry off, closing in 5 s'
   monkeypatch.setattr(ui.time, 'monotonic', lambda: 130.)
   view.update(True)
   assert not view.opened and params.get_bool('SentryModePrompted')
@@ -224,7 +224,7 @@ def test_render_bindings_and_countdown_header_alignment(prompt, monkeypatch):
   assert header.y+header.height/2 == close.y+close.height/2
   assert header.x+header.width < close.x
   battery, text, _ = labels[1]
-  assert text == 'Battery 12.4 V · Cutoff 11.8 V'
+  assert text == 'Battery 12.4 V / Cutoff 11.8 V'
   cutoff, text, size = labels[2]
   assert text == 'Time cutoff 4 h' and size == font_size
   assert battery.y == cutoff.y == header.y
