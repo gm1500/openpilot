@@ -887,7 +887,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
       results = []
       steps = iter((101., 129., 131., 161., 191., 400., 701., 702.))
 
-      def fetch(fix, calls=calls, clock=clock, fail=fail):
+      def fetch(fix, endpoint, calls=calls, clock=clock, fail=fail):
         calls.append(clock[0])
         if fail:
           raise osm.requests.ConnectionError()
@@ -903,7 +903,8 @@ class TestOSMSpeedLimit(unittest.TestCase):
 
       modules = {'openpilot.common.realtime': SimpleNamespace(drop_realtime=lambda: None),
                  'openpilot.common.swaglog': SimpleNamespace(cloudlog=Mock())}
-      with patch.dict(sys.modules, modules), patch.object(osm, 'fetch_roads', side_effect=fetch), \
+      with patch.dict(sys.modules, modules), patch.object(osm, 'OVERPASS_ENDPOINTS', (osm.OVERPASS_URL,)), \
+           patch.object(osm, 'fetch_roads', side_effect=fetch), \
            patch.object(osm.time, 'monotonic', side_effect=lambda clock=clock: clock[0]), patch.object(service._wake, 'wait', side_effect=sleep):
         with self.assertRaises(StopWorker):
           service._run()
@@ -949,7 +950,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
         # Car advances 1800 m while the download completes. Its current fix is
         # inside the cache but already beyond the movement prefetch threshold.
         latitude = point(0., 1800.)[0]
-        def fetch(fix, calls=calls, clock=clock, service=service, duration=duration, latitude=latitude):
+        def fetch(fix, endpoint, calls=calls, clock=clock, service=service, duration=duration, latitude=latitude):
           calls.append((clock[0], fix.latitude))
           if len(calls) == 2:
             raise StopWorker
@@ -991,7 +992,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
         sample = service.update(fix, clock[0])
         samples.append((clock[0], sample[1] if sample is not None else None))
 
-    def fetch(_):
+    def fetch(_, endpoint):
       calls.append(clock[0])
       advance(duration)
       return roads
@@ -1077,7 +1078,8 @@ class TestOSMSpeedLimit(unittest.TestCase):
 
     modules = {'openpilot.common.realtime': SimpleNamespace(drop_realtime=lambda: None),
                'openpilot.common.swaglog': SimpleNamespace(cloudlog=Mock())}
-    with patch.dict(sys.modules, modules), patch.object(osm, 'fetch_roads', side_effect=lambda fix: fetch('roads', fix)), \
+    with patch.dict(sys.modules, modules), patch.object(osm, 'OVERPASS_ENDPOINTS', (osm.OVERPASS_URL,)), \
+         patch.object(osm, 'fetch_roads', side_effect=lambda fix, endpoint: fetch('roads', fix)), \
          patch.object(osm, 'fetch_zones', side_effect=lambda fix: fetch('zones', fix)), \
          patch.object(osm.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(service._wake, 'wait', side_effect=wait):
       with self.assertRaises(StopWorker):
