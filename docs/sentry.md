@@ -518,14 +518,6 @@ Qlogs and the motion preview use the ordinary route uploader, so Connect can ind
 and display their motion bookmarks. The stock metered-connection policy still applies:
 qlogs upload normally, and previews on metered links require viewing the route in Connect.
 
-File uploads yield to active road-map and municipal-zone downloads. Both the automatic
-uploader and Connect-requested Athena uploads wait before starting and between 16 KiB
-body chunks, then resume when the map request succeeds or fails. Retry backoff and cached
-map matching do not pause uploads. Bytes already buffered by the network can still drain;
-if a storage server closes an idle upload, the existing upload retry path retries the file.
-The shared signal lives in RAM, releases when mapd exits, and expires after 120 seconds
-if a request hangs. SSH, Connect commands and livestream traffic are not paused.
-
 Full logs (`rlog.zst`) and all three camera videos (`fcamera.hevc`, `ecamera.hevc`,
 `dcamera.hevc`) stay on the device until requested manually from Connect. Open the event
 route and use its upload controls to request the camera footage or all files. These requests

@@ -888,16 +888,12 @@ class TestOSMSpeedLimit(unittest.TestCase):
       steps = iter((101., 129., 131., 161., 191., 400., 701., 702.))
 
       def fetch(fix, calls=calls, clock=clock, fail=fail):
-        from openpilot.common.upload_priority import map_download_active
-        self.assertTrue(map_download_active())
         calls.append(clock[0])
         if fail:
           raise osm.requests.ConnectionError()
         return (road(),)
 
       def sleep(_, results=results, service=service, clock=clock, steps=steps):
-        from openpilot.common.upload_priority import map_download_active
-        self.assertFalse(map_download_active())
         results.append(service.update(service._fix, clock[0]))
         try:
           clock[0] = next(steps)

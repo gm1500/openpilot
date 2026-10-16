@@ -14,7 +14,6 @@ import openpilot.cereal.messaging as messaging
 from openpilot.system.sentry.storage import live_sentry_lock, remove_legacy_upload_authorization
 from openpilot.common.api import Api
 from openpilot.common.utils import get_upload_stream
-from openpilot.common.upload_priority import MapAwareReader, map_download_active, wait_for_map_download, POLL_INTERVAL
 from openpilot.common.params import Params
 from openpilot.common.realtime import set_core_affinity
 from openpilot.common.hardware.hw import Paths
@@ -155,7 +154,6 @@ class Uploader:
     return None
 
   def do_upload(self, key: str, fn: str):
-    wait_for_map_download()
     sentry = is_sentry_file(fn)
     url_resp = self.api.get("v1.4/" + self.dongle_id + "/upload_url/", timeout=10, path=key, access_token=self.api.get_token())
     if url_resp.status_code == 412 or (sentry and url_resp.status_code != 200):
@@ -175,7 +173,7 @@ class Uploader:
     try:
       compress = key.endswith('.zst') and not fn.endswith('.zst')
       stream, _ = get_upload_stream(fn, compress)
-      response = requests.put(url, data=MapAwareReader(stream), headers=headers, timeout=10)
+      response = requests.put(url, data=stream, headers=headers, timeout=10)
       if sentry and response.status_code not in (200, 201):
         cloudlog.event("sentry.upload_put_failed", key=key, status_code=response.status_code)
       return response
@@ -279,9 +277,6 @@ def main(exit_event: threading.Event | None = None) -> None:
 
   backoff = 0.1
   while not exit_event.is_set():
-    if map_download_active():
-      exit_event.wait(POLL_INTERVAL)
-      continue
     sm.update(0)
     offroad = params.get_bool("IsOffroad")
     network_type = sm['deviceState'].networkType if not force_wifi else NetworkType.wifi

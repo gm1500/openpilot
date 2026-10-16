@@ -9,7 +9,6 @@ from itertools import pairwise
 
 import requests
 
-from openpilot.common.upload_priority import map_download_priority
 from openpilot.selfdrive.mapd.speed_rules import parse_speed as parse_speed, road_speed, road_zone
 from openpilot.selfdrive.mapd.zone_time import ZoneClock
 from openpilot.selfdrive.mapd.municipal_zones import fetch_zones, zone_limit, ZONE_TTL, ZONE_RADIUS
@@ -812,8 +811,7 @@ class OSMSpeedLimit:
         if now >= next_query and (distance >= 700 or now - fetched_at >= CACHE_TTL):
           query_started = time.monotonic()
           try:
-            with map_download_priority():
-              roads = fetch_roads(fix)
+            roads = fetch_roads(fix)
           except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as error:
             # Do not log coordinates or response bodies; retain only the bounded cache.
             status = getattr(getattr(error, 'response', None), 'status_code', None)
@@ -836,8 +834,7 @@ class OSMSpeedLimit:
         zone_distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, zone_centre)) if zone_centre is not None else math.inf
         if now >= next_zone_query and (zone_distance >= 700 or now - zones_at >= ZONE_TTL):
           try:
-            with map_download_priority():
-              zones = fetch_zones(fix)
+            zones = fetch_zones(fix)
           except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as error:
             status = getattr(getattr(error, 'response', None), 'status_code', None)
             cloudlog.warning(f"Municipal speed zones unavailable: {type(error).__name__}, HTTP {status}")
