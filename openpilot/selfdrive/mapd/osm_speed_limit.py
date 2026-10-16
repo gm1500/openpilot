@@ -14,7 +14,8 @@ from openpilot.selfdrive.mapd.zone_time import ZoneClock
 from openpilot.selfdrive.mapd.municipal_zones import fetch_zones, zone_limit, ZONE_TTL, ZONE_RADIUS
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-QUERY_RADIUS = 1500.0  # metres; prefetch again after travelling 700 m
+QUERY_RADIUS = 3000.0  # metres; a highway-speed download must leave useful coverage on arrival
+ROAD_CACHE_MARGIN = 50.0
 QUERY_INTERVAL = 30.0
 MAX_RETRY_INTERVAL = 60.0
 NETWORK_RETRY_INTERVAL = 5.0  # reconnect promptly, but bound requests during network flapping
@@ -23,9 +24,10 @@ GPS_MAX_AGE = 3.0
 ACQUIRE_RADIUS = 25.0
 TRACK_RADIUS = 45.0
 QCOM_UNKNOWN_ACCURACY = 15.0  # Matching allowance, not a measured GPS uncertainty
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024  # bounded allowance for four times the query area
 OVERPASS_READ_TIMEOUT = 35.0  # allow the server's 15 s queue plus 10 s query budget and transfer margin
 OVERPASS_RESPONSE_DEADLINE = 45.0
+PREFETCH_LEAD_TIME = OVERPASS_RESPONSE_DEADLINE + 15.0  # include time spent fetching municipal zones
 ROAD_TYPES = ("motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street", "service", "road",
               "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link")
 EARTH_RADIUS = 6371000.0
@@ -730,7 +732,7 @@ class OSMSpeedLimit:
     distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, centre)) if centre is not None else math.inf
     # A fetch may complete just after the caller sampled `now`, before this
     # snapshot was read. Its internal completion timestamp is still fresh.
-    if now - fetched_at >= CACHE_TTL or distance >= QUERY_RADIUS - 50:
+    if now - fetched_at >= CACHE_TTL or distance >= QUERY_RADIUS - ROAD_CACHE_MARGIN:
       self._tracker.reset()
       self.control_reason = 'cacheUnavailable'
       return None
@@ -808,7 +810,11 @@ class OSMSpeedLimit:
           zone_retry = QUERY_INTERVAL
       if fix is not None and 0 <= now - fix.timestamp <= GPS_MAX_AGE:
         distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, centre)) if centre is not None else math.inf
-        if now >= next_query and (distance >= 700 or now - fetched_at >= CACHE_TTL):
+        # Refresh halfway through the area at city speeds, earlier on highways.
+        # At 120 km/h the old 1.5 km cache had only ~10 s of coverage left after
+        # a 35 s download. Keep using the current area while its successor loads.
+        refresh_distance = max(0., min(QUERY_RADIUS / 2, QUERY_RADIUS - ROAD_CACHE_MARGIN - fix.speed * PREFETCH_LEAD_TIME))
+        if now >= next_query and (distance >= refresh_distance or now - fetched_at >= CACHE_TTL - PREFETCH_LEAD_TIME):
           query_started = time.monotonic()
           try:
             roads = fetch_roads(fix)

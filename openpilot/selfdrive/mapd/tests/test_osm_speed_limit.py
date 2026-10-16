@@ -807,7 +807,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
     self.assertAlmostEqual(self.update_service(service, self.fix, 100.), 40 / 3.6)
     self.assertIsNone(self.update_service(service, replace(self.fix, timestamp=701.), 701.))
     self.assertIsNone(service._tracker.match)
-    service._cache = (road(),), replace(self.fix, latitude=.02), 702.
+    service._cache = (road(),), replace(self.fix, latitude=.04), 702.
     self.assertIsNone(self.update_service(service, replace(self.fix, timestamp=702.), 702.))
     self.assertIsNone(service._tracker.match)
 
@@ -946,9 +946,9 @@ class TestOSMSpeedLimit(unittest.TestCase):
         service._fix = self.fix
         clock = [100.]
         calls = []
-        # Car advances 900 m while the download completes. Its current fix is
+        # Car advances 1800 m while the download completes. Its current fix is
         # inside the cache but already beyond the movement prefetch threshold.
-        latitude = point(0., 900.)[0]
+        latitude = point(0., 1800.)[0]
         def fetch(fix, calls=calls, clock=clock, service=service, duration=duration, latitude=latitude):
           calls.append((clock[0], fix.latitude))
           if len(calls) == 2:
@@ -969,6 +969,82 @@ class TestOSMSpeedLimit(unittest.TestCase):
           with self.assertRaises(StopWorker):
             service._run()
         self.assertEqual(calls, [(100., 0.), (max(130., 100.2 + duration), latitude)])
+
+  def simulate_cache_downloads(self, speed, duration, end, warm_cache=False):
+    """Advance live GPS/matching while the serial road/zone fetches are blocked."""
+    class StopWorker(Exception):
+      pass
+    service = osm.OSMSpeedLimit()
+    service._thread = Mock()
+    service._fix = replace(self.fix, speed=speed)
+    roads = (polyline([(0, -100), (0, 20000)], '100', way_id=1),)
+    if warm_cache:
+      service._cache = roads, service._fix, 100.
+    clock = [100.]
+    calls, samples = [], []
+
+    def advance(seconds):
+      target = clock[0] + seconds
+      while clock[0] < target - 1e-6:
+        clock[0] = round(min(target, clock[0] + .2), 6)
+        fix = replace(self.fix, latitude=point(0, (clock[0] - 100.) * speed)[0], speed=speed, timestamp=clock[0])
+        sample = service.update(fix, clock[0])
+        samples.append((clock[0], sample[1] if sample is not None else None))
+
+    def fetch(_):
+      calls.append(clock[0])
+      advance(duration)
+      return roads
+
+    def zones(_):
+      advance(8.)  # municipal requests share the worker and can delay road refreshes
+      return ()
+
+    def wait(_):
+      if clock[0] >= end:
+        raise StopWorker
+      advance(.2)
+
+    modules = {'openpilot.common.realtime': SimpleNamespace(drop_realtime=lambda: None),
+               'openpilot.common.swaglog': SimpleNamespace(cloudlog=Mock())}
+    with patch.dict(sys.modules, modules), patch.object(osm, 'fetch_roads', side_effect=fetch), \
+         patch.object(osm, 'fetch_zones', side_effect=zones), patch.object(osm.time, 'monotonic', side_effect=lambda: clock[0]), \
+         patch.object(service._wake, 'wait', side_effect=wait):
+      with self.assertRaises(StopWorker):
+        service._run()
+    return calls, samples
+
+  def test_highway_cache_stays_available_through_slow_downloads(self):
+    # Drive logs showed 34-36 s downloads and only 9-11 s of usable coverage.
+    # Matching must continue across several downloads, including zone work.
+    for duration in (35., 37.):
+      with self.subTest(duration=duration):
+        calls, samples = self.simulate_cache_downloads(120 / 3.6, duration, 350.)
+        self.assertGreaterEqual(len(calls), 5)
+        self.assertTrue(all(b - a >= 30. for a, b in zip(calls, calls[1:], strict=False)))
+        available = [(t, speed) for t, speed in samples if t > 100. + duration]
+        self.assertTrue(available)
+        self.assertTrue(all(speed == 100 / 3.6 for _, speed in available))
+
+  def test_city_cache_uses_larger_area_before_downloading_again(self):
+    calls, samples = self.simulate_cache_downloads(50 / 3.6, 5., 350.)
+    self.assertGreaterEqual(len(calls), 3)
+    self.assertTrue(all(b - a >= 100. for a, b in zip(calls, calls[1:], strict=False)))
+    self.assertTrue(all(speed == 100 / 3.6 for t, speed in samples if t > 105.))
+
+  def test_stationary_cache_refresh_finishes_before_ttl(self):
+    calls, samples = self.simulate_cache_downloads(0., 35., 750., warm_cache=True)
+    self.assertEqual(len(calls), 1)
+    self.assertLess(calls[0] + 35., 700.)
+    self.assertTrue(all(speed == 100 / 3.6 for _, speed in samples))
+
+  def test_expanded_cache_still_rejects_coverage_edge(self):
+    service = self.cached_service((polyline([(0, -100), (0, 4000)], '100', way_id=1),))
+    for metres in (1500., 2949.):
+      fix = replace(self.fix, latitude=point(0, metres)[0])
+      self.assertAlmostEqual(service.update(fix, 100.)[1], 100 / 3.6)
+    self.assertIsNone(service.update(replace(self.fix, latitude=point(0, 2951.)[0]), 100.))
+    self.assertEqual(service.control_reason, 'cacheUnavailable')
 
   def run_network_recovery(self, steps, successful_at, change_during_fetch=False):
     class StopWorker(Exception):
