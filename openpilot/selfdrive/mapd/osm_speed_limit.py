@@ -5,7 +5,6 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from email.utils import parsedate_to_datetime
 from itertools import pairwise
 
 import requests
@@ -15,21 +14,14 @@ from openpilot.selfdrive.mapd.zone_time import ZoneClock
 from openpilot.selfdrive.mapd.municipal_zones import fetch_zones, zone_limit, ZONE_TTL, ZONE_RADIUS
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-OVERPASS_ENDPOINTS = (OVERPASS_URL, "https://overpass.private.coffee/api/interpreter")
-QUERY_RADIUS = 3000.0  # metres; a highway-speed download must leave useful coverage on arrival
-ROAD_CACHE_MARGIN = 50.0
+QUERY_RADIUS = 1500.0  # metres; prefetch again after travelling 700 m
 QUERY_INTERVAL = 30.0
-MAX_RETRY_INTERVAL = 60.0
-NETWORK_RETRY_INTERVAL = 5.0  # reconnect promptly, but bound requests during network flapping
 CACHE_TTL = 600.0
 GPS_MAX_AGE = 3.0
 ACQUIRE_RADIUS = 25.0
 TRACK_RADIUS = 45.0
 QCOM_UNKNOWN_ACCURACY = 15.0  # Matching allowance, not a measured GPS uncertainty
-MAX_RESPONSE_BYTES = 8 * 1024 * 1024  # bounded allowance for four times the query area
-OVERPASS_READ_TIMEOUT = 35.0  # allow the server's 15 s queue plus 10 s query budget and transfer margin
-OVERPASS_RESPONSE_DEADLINE = 45.0
-PREFETCH_LEAD_TIME = OVERPASS_RESPONSE_DEADLINE + 15.0  # include time spent fetching municipal zones
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ROAD_TYPES = ("motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street", "service", "road",
               "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link")
 EARTH_RADIUS = 6371000.0
@@ -644,15 +636,13 @@ class RoadTracker:
     return result
 
 
-def fetch_roads(fix: GpsFix, endpoint: str = OVERPASS_URL) -> tuple[Road, ...]:
+def fetch_roads(fix: GpsFix) -> tuple[Road, ...]:
   query = f'[out:json][timeout:10][maxsize:16777216];way(around:{QUERY_RADIUS:.0f},{fix.latitude:.6f},{fix.longitude:.6f})'
   query += f'["highway"~"^({"|".join(ROAD_TYPES)})$"]->.roads;.roads out body geom;'
-  started = time.monotonic()
-  deadline = started + OVERPASS_RESPONSE_DEADLINE
+  deadline = time.monotonic() + 20
   # One request at a time, bounded response size, no identifiers or route history.
-  with requests.post(endpoint, data={"data": query}, timeout=(5., OVERPASS_READ_TIMEOUT), stream=True,
+  with requests.post(OVERPASS_URL, data={"data": query}, timeout=(3.05, 12), stream=True,
                      headers={"User-Agent": "boat-anchor-speed-limit/1.0 (https://github.com/gm1500/openpilot)"}) as response:
-    headers_at = time.monotonic()
     response.raise_for_status()
     body = bytearray()
     for chunk in response.iter_content(65536):
@@ -661,9 +651,6 @@ def fetch_roads(fix: GpsFix, endpoint: str = OVERPASS_URL) -> tuple[Road, ...]:
         raise ValueError("OSM response deadline exceeded")
       if len(body) > MAX_RESPONSE_BYTES:
         raise ValueError("OSM response too large")
-  from openpilot.common.swaglog import cloudlog
-  cloudlog.event('mapd.road_response', endpoint=endpoint, bytes=len(body),
-                 header_wait=round(headers_at - started, 2), body_time=round(time.monotonic() - headers_at, 2))
   data = json.loads(body)
   if not isinstance(data, dict) or "remark" in data or not isinstance(data.get("elements"), list):
     raise ValueError("Incomplete OSM response")
@@ -683,28 +670,6 @@ def fetch_roads(fix: GpsFix, endpoint: str = OVERPASS_URL) -> tuple[Road, ...]:
   return tuple(roads)
 
 
-def overpass_failover_allowed(error: Exception) -> bool:
-  # Alternate public providers are an outage fallback, never a way around an
-  # authentication refusal, rate limit, certificate failure, or invalid query.
-  if isinstance(error, requests.exceptions.SSLError):
-    return False
-  if isinstance(error, (requests.Timeout, requests.ConnectionError)):
-    return True
-  return isinstance(error, requests.HTTPError) and error.response is not None and error.response.status_code in (500, 502, 503, 504)
-
-
-def overpass_retry_after(error: Exception) -> float:
-  response = getattr(error, 'response', None)
-  value = response.headers.get('Retry-After') if response is not None else None
-  if not isinstance(value, str):
-    return 0.
-  try:
-    delay = float(value) if value.strip().isdigit() else parsedate_to_datetime(value).timestamp() - time.time()  # noqa: TID251
-    return max(0., delay) if math.isfinite(delay) else 0.
-  except (ValueError, TypeError, OverflowError):
-    return 0.
-
-
 class OSMSpeedLimit:
   """Match cached roads on the map thread; only downloads run in the background."""
   def __init__(self):
@@ -718,24 +683,11 @@ class OSMSpeedLimit:
     self.clock = ZoneClock()
     self._thread: threading.Thread | None = None
     self._wake = threading.Event()
-    self._network_type: str | None = None
-    self._network_generation = 0
     self.control: Junction | None = None
     self.control_match: RoadMatch | None = None
     self.control_reason = 'noPosition'
     self.zone_type = 'none'
     self.zone_source = ''
-
-  def update_network(self, network_type: str):
-    # Signal-strength updates are not connection changes. Losing a connection
-    # doesn't help a failed fetch; a newly selected Wi-Fi/cellular path can.
-    with self._lock:
-      changed = network_type != self._network_type
-      self._network_type = network_type
-      if changed and network_type != 'none':
-        self._network_generation += 1
-    if changed:
-      self._wake.set()
 
   def update(self, fix: GpsFix | None, now: float) -> tuple[GpsFix, float | None, float | None, float] | None:
     self.control = self.control_match = None
@@ -761,7 +713,7 @@ class OSMSpeedLimit:
     distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, centre)) if centre is not None else math.inf
     # A fetch may complete just after the caller sampled `now`, before this
     # snapshot was read. Its internal completion timestamp is still fresh.
-    if now - fetched_at >= CACHE_TTL or distance >= QUERY_RADIUS - ROAD_CACHE_MARGIN:
+    if now - fetched_at >= CACHE_TTL or distance >= QUERY_RADIUS - 50:
       self._tracker.reset()
       self.control_reason = 'cacheUnavailable'
       return None
@@ -817,110 +769,41 @@ class OSMSpeedLimit:
     next_query = next_zone_query = 0.
     zone_retry = QUERY_INTERVAL
     retry_interval = QUERY_INTERVAL
-    network_generation = 0
-    last_query = last_zone_query = -math.inf
-    query_failed = zone_failed = False
-    road_endpoint = 0
-    endpoint_failed_at = [-math.inf] * len(OVERPASS_ENDPOINTS)
-    road_retry_not_before = 0.
     while True:
       now = time.monotonic()
       with self._lock:
         fix = self._fix
         _, centre, fetched_at = self._cache
         _, zone_centre, zones_at = self._zone_cache
-        network_changed = network_generation != self._network_generation
-        network_generation = self._network_generation
-      if network_changed:
-        # Don't carry a failed Wi-Fi request's long backoff onto working
-        # cellular. Keep successful-cache refreshes on their usual schedule.
-        if query_failed:
-          next_query = max(road_retry_not_before, min(next_query, last_query + NETWORK_RETRY_INTERVAL))
-          retry_interval = QUERY_INTERVAL
-        if zone_failed:
-          next_zone_query = min(next_zone_query, last_zone_query + NETWORK_RETRY_INTERVAL)
-          zone_retry = QUERY_INTERVAL
       if fix is not None and 0 <= now - fix.timestamp <= GPS_MAX_AGE:
         distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, centre)) if centre is not None else math.inf
-        # Refresh halfway through the area at city speeds, earlier on highways.
-        # At 120 km/h the old 1.5 km cache had only ~10 s of coverage left after
-        # a 35 s download. Keep using the current area while its successor loads.
-        refresh_distance = max(0., min(QUERY_RADIUS / 2, QUERY_RADIUS - ROAD_CACHE_MARGIN - fix.speed * PREFETCH_LEAD_TIME))
-        if now >= next_query and (distance >= refresh_distance or now - fetched_at >= CACHE_TTL - PREFETCH_LEAD_TIME):
-          # A healthy upload connection cannot fix an overloaded map server.
-          # Try one alternate on transport/5xx failure, then use normal backoff
-          # if both fail. Stay on the successful provider for future refreshes.
-          for attempt in range(len(OVERPASS_ENDPOINTS)):
-            query_started = time.monotonic()
-            if attempt:
-              # A timeout can consume 35 seconds of travel. Never centre the
-              # backup request at the old position, or overwrite newer coverage
-              # with a cache fetched for a position that has already gone stale.
-              with self._lock:
-                fix = self._fix
-              if fix is None or not 0 <= query_started - fix.timestamp <= GPS_MAX_AGE:
-                break
-            endpoint = OVERPASS_ENDPOINTS[road_endpoint]
-            try:
-              roads = fetch_roads(fix, endpoint)
-            except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as error:
-              # Do not log coordinates or response bodies.
-              status = getattr(getattr(error, 'response', None), 'status_code', None)
-              failed_at = time.monotonic()
-              endpoint_failed_at[road_endpoint] = failed_at
-              server_delay = overpass_retry_after(error)
-              road_retry_not_before = max(road_retry_not_before, failed_at + server_delay)
-              cloudlog.event('mapd.road_request_failed', endpoint=endpoint, error=type(error).__name__,
-                             status_code=status, duration=round(failed_at - query_started, 2))
-              query_failed = True
-              next_query = max(road_retry_not_before, failed_at + retry_interval)
-              alternate = (road_endpoint + 1) % len(OVERPASS_ENDPOINTS)
-              if (attempt == 0 and server_delay == 0 and overpass_failover_allowed(error) and
-                  failed_at - endpoint_failed_at[alternate] >= MAX_RETRY_INTERVAL):
-                road_endpoint = alternate
-                continue
-              break
-            else:
-              fetched_at = time.monotonic()
-              with self._lock:
-                self._cache = roads, fix, fetched_at
-              retry_interval = QUERY_INTERVAL
-              query_failed = False
-              # A slow download may have used the entire prefetch interval while
-              # the car travelled towards the cache edge. Don't wait another 30 s
-              # before fetching at the latest position. Still one request at a time.
-              next_query = max(fetched_at, query_started + QUERY_INTERVAL)
-              cloudlog.event('mapd.roads_fetched', endpoint=endpoint, roads=len(roads), duration=round(fetched_at - query_started, 2))
-              break
-          if query_failed:
-            retry_interval = min(MAX_RETRY_INTERVAL, retry_interval * 2)
-          last_query = time.monotonic()
-        # Road I/O may take tens of seconds. Municipal queries must also use
-        # the current position instead of spending their budget behind the car.
-        with self._lock:
-          fix = self._fix
-        if fix is None or not 0 <= time.monotonic() - fix.timestamp <= GPS_MAX_AGE:
-          self._wake.wait(0.2)
-          self._wake.clear()
-          continue
-        now = time.monotonic()
+        if now >= next_query and (distance >= 700 or now - fetched_at >= CACHE_TTL):
+          try:
+            roads = fetch_roads(fix)
+          except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as error:
+            # Do not log coordinates or response bodies; retain only the bounded cache.
+            cloudlog.warning(f"OSM speed limit unavailable: {type(error).__name__}")
+            next_query = time.monotonic() + retry_interval
+            retry_interval = min(300., retry_interval * 2)
+          else:
+            fetched_at = time.monotonic()
+            with self._lock:
+              self._cache = roads, fix, fetched_at
+            retry_interval = QUERY_INTERVAL
+            next_query = fetched_at + QUERY_INTERVAL
         zone_distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, zone_centre)) if zone_centre is not None else math.inf
         if now >= next_zone_query and (zone_distance >= 700 or now - zones_at >= ZONE_TTL):
           try:
             zones = fetch_zones(fix)
           except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as error:
-            status = getattr(getattr(error, 'response', None), 'status_code', None)
-            cloudlog.warning(f"Municipal speed zones unavailable: {type(error).__name__}, HTTP {status}")
-            zone_failed = True
+            cloudlog.warning(f"Municipal speed zones unavailable: {type(error).__name__}")
             next_zone_query = time.monotonic() + zone_retry
-            zone_retry = min(MAX_RETRY_INTERVAL, zone_retry * 2)
+            zone_retry = min(300., zone_retry * 2)
           else:
             zones_at = time.monotonic()
             with self._lock:
               self._zone_cache = zones, fix, zones_at
             zone_retry = QUERY_INTERVAL
-            zone_failed = False
             next_zone_query = zones_at + QUERY_INTERVAL
-          last_zone_query = time.monotonic()
       self._wake.wait(0.2)
       self._wake.clear()

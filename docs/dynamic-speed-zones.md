@@ -63,25 +63,8 @@ OSM; additional municipal feeds require verified adapters. No city timetable is
 used as a worldwide default.
 
 Downloads share the background map worker with independent refresh/backoff.
-Failed downloads retry after 30 seconds, then with delays capped at 60 seconds.
-A Wi-Fi/cellular handoff or reconnection brings pending failed requests forward,
-with at least five seconds between attempts. Signal-strength changes do not reset
-the backoff. This prevents an initial Wi-Fi failure from suppressing map downloads
-for several minutes after cellular returns. Valid GPS alone cannot supply a road's
-speed limit when no map data has downloaded.
-
-Overpass can queue a query for 15 seconds before starting its 10-second execution
-budget. The downloader therefore allows a 35-second read wait and a 45-second
-response deadline, with the same 2 MB size guard. These waits run only in the
-background fetch thread. After a slow successful download, movement-based
-prefetch can run immediately if the normal 30-second request interval has already
-elapsed; it does not add another 30-second wait as the car approaches the cache edge.
-Successful downloads log the road count and duration without coordinates.
-See the [Overpass queue documentation](https://dev.overpass-api.de/overpass-doc/en/preface/commons.html).
-
-Road and municipal responses are capped at 2 MB; municipal queries additionally
-require fewer than 1,000 records. Cache lifetime is ten minutes, with movement-based
-prefetch. No files or route history accumulate.
+Each response is capped at 2 MB and fewer than 1,000 records; cache lifetime is
+ten minutes, with movement-based prefetch. No files or route history accumulate.
 A known matched zone with missing time, unsupported hours, conflicting limits or
 expired cached data remains unresolved. A municipal limit cannot relax a lower
 OSM limit or resolve an unknown OSM legal condition.

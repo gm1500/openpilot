@@ -13,7 +13,7 @@ from openpilot.selfdrive.mapd.position import MapPosition
 
 def main():
   sm = messaging.SubMaster(['gpsLocationExternal', 'gpsLocation', 'carState', 'controlsState', 'vehicleParameters',
-                           'deviceMotion', 'extrinsicsCalibration', 'deviceState'])
+                           'deviceMotion', 'extrinsicsCalibration'])
   pm = messaging.PubMaster(['mapSpeedLimit', 'mapTrafficControl'])
   provider = OSMSpeedLimit()
   provider.clock.prepare()  # load timezone polygons before the publication loop
@@ -27,8 +27,6 @@ def main():
   while True:
     sm.update(0)
     now = time.monotonic()
-    if sm.updated['deviceState'] and sm.valid['deviceState'] and 0 <= now - sm.recv_time['deviceState'] < 2.:
-      provider.update_network(str(sm['deviceState'].networkType))
     raw_fix = gps_fix(sm, 1, now)
     provider.clock.observe(raw_fix, now)
     fix = position.update(raw_fix, vehicle_motion(sm, now, signed_speed), now, time.time())  # noqa: TID251

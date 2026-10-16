@@ -807,7 +807,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
     self.assertAlmostEqual(self.update_service(service, self.fix, 100.), 40 / 3.6)
     self.assertIsNone(self.update_service(service, replace(self.fix, timestamp=701.), 701.))
     self.assertIsNone(service._tracker.match)
-    service._cache = (road(),), replace(self.fix, latitude=.04), 702.
+    service._cache = (road(),), replace(self.fix, latitude=.02), 702.
     self.assertIsNone(self.update_service(service, replace(self.fix, timestamp=702.), 702.))
     self.assertIsNone(service._tracker.match)
 
@@ -887,7 +887,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
       results = []
       steps = iter((101., 129., 131., 161., 191., 400., 701., 702.))
 
-      def fetch(fix, endpoint, calls=calls, clock=clock, fail=fail):
+      def fetch(fix, calls=calls, clock=clock, fail=fail):
         calls.append(clock[0])
         if fail:
           raise osm.requests.ConnectionError()
@@ -903,8 +903,7 @@ class TestOSMSpeedLimit(unittest.TestCase):
 
       modules = {'openpilot.common.realtime': SimpleNamespace(drop_realtime=lambda: None),
                  'openpilot.common.swaglog': SimpleNamespace(cloudlog=Mock())}
-      with patch.dict(sys.modules, modules), patch.object(osm, 'OVERPASS_ENDPOINTS', (osm.OVERPASS_URL,)), \
-           patch.object(osm, 'fetch_roads', side_effect=fetch), \
+      with patch.dict(sys.modules, modules), patch.object(osm, 'fetch_roads', side_effect=fetch), \
            patch.object(osm.time, 'monotonic', side_effect=lambda clock=clock: clock[0]), patch.object(service._wake, 'wait', side_effect=sleep):
         with self.assertRaises(StopWorker):
           service._run()
@@ -914,199 +913,6 @@ class TestOSMSpeedLimit(unittest.TestCase):
       else:
         self.assertEqual(calls, [100., 701.])
         self.assertTrue(all(result[1] == 40 / 3.6 for result in results))
-
-  def test_overpass_queue_and_slow_response_fit_client_budget(self):
-    element = {'type': 'way', 'tags': {'highway': 'residential', 'maxspeed': '40'},
-               'geometry': [{'lat': -.001, 'lon': 0.}, {'lat': .001, 'lon': 0.}]}
-    body = json.dumps({'elements': [element]}).encode()
-    # Live route query returned valid data after 37.46 s; the former 20 s
-    # deadline rejected that response even if the 12 s read wait didn't expire.
-    for elapsed in (16., 26.85, 37.46, 46.):
-      with self.subTest(elapsed=elapsed):
-        clock = [100.]
-        def chunks(_, clock=clock, elapsed=elapsed):
-          clock[0] += elapsed
-          yield body
-        response = Mock()
-        response.iter_content.side_effect = chunks
-        with patch.object(osm.requests, 'post') as post, patch.object(osm.time, 'monotonic', side_effect=lambda clock=clock: clock[0]):
-          post.return_value.__enter__.return_value = response
-          if elapsed > 45.:
-            with self.assertRaisesRegex(ValueError, 'deadline'):
-              osm.fetch_roads(self.fix)
-          else:
-            self.assertEqual(osm.fetch_roads(self.fix), (road(),))
-          self.assertGreater(post.call_args.kwargs['timeout'][1], 15. + 10.)  # server queue + execution budget
-
-  def test_slow_success_does_not_delay_prefetch_at_new_vehicle_position(self):
-    class StopWorker(Exception):
-      pass
-    for duration in (5., 37.):
-      with self.subTest(duration=duration):
-        service = osm.OSMSpeedLimit()
-        service._fix = self.fix
-        clock = [100.]
-        calls = []
-        # Car advances 1800 m while the download completes. Its current fix is
-        # inside the cache but already beyond the movement prefetch threshold.
-        latitude = point(0., 1800.)[0]
-        def fetch(fix, endpoint, calls=calls, clock=clock, service=service, duration=duration, latitude=latitude):
-          calls.append((clock[0], fix.latitude))
-          if len(calls) == 2:
-            raise StopWorker
-          clock[0] += duration
-          service._fix = replace(self.fix, latitude=latitude, timestamp=clock[0])
-          return (road(),)
-        def wait(_, clock=clock, service=service):
-          if clock[0] > 180.:
-            raise StopWorker
-          clock[0] = round(clock[0] + .2, 1)
-          service._fix = replace(service._fix, timestamp=clock[0])
-        modules = {'openpilot.common.realtime': SimpleNamespace(drop_realtime=lambda: None),
-                   'openpilot.common.swaglog': SimpleNamespace(cloudlog=Mock())}
-        with patch.dict(sys.modules, modules), patch.object(osm, 'fetch_roads', side_effect=fetch), \
-             patch.object(osm, 'fetch_zones', return_value=()), patch.object(osm.time, 'monotonic', side_effect=lambda clock=clock: clock[0]), \
-             patch.object(service._wake, 'wait', side_effect=wait):
-          with self.assertRaises(StopWorker):
-            service._run()
-        self.assertEqual(calls, [(100., 0.), (max(130., 100.2 + duration), latitude)])
-
-  def simulate_cache_downloads(self, speed, duration, end, warm_cache=False):
-    """Advance live GPS/matching while the serial road/zone fetches are blocked."""
-    class StopWorker(Exception):
-      pass
-    service = osm.OSMSpeedLimit()
-    service._thread = Mock()
-    service._fix = replace(self.fix, speed=speed)
-    roads = (polyline([(0, -100), (0, 20000)], '100', way_id=1),)
-    if warm_cache:
-      service._cache = roads, service._fix, 100.
-    clock = [100.]
-    calls, samples = [], []
-
-    def advance(seconds):
-      target = clock[0] + seconds
-      while clock[0] < target - 1e-6:
-        clock[0] = round(min(target, clock[0] + .2), 6)
-        fix = replace(self.fix, latitude=point(0, (clock[0] - 100.) * speed)[0], speed=speed, timestamp=clock[0])
-        sample = service.update(fix, clock[0])
-        samples.append((clock[0], sample[1] if sample is not None else None))
-
-    def fetch(_, endpoint):
-      calls.append(clock[0])
-      advance(duration)
-      return roads
-
-    def zones(_):
-      advance(8.)  # municipal requests share the worker and can delay road refreshes
-      return ()
-
-    def wait(_):
-      if clock[0] >= end:
-        raise StopWorker
-      advance(.2)
-
-    modules = {'openpilot.common.realtime': SimpleNamespace(drop_realtime=lambda: None),
-               'openpilot.common.swaglog': SimpleNamespace(cloudlog=Mock())}
-    with patch.dict(sys.modules, modules), patch.object(osm, 'fetch_roads', side_effect=fetch), \
-         patch.object(osm, 'fetch_zones', side_effect=zones), patch.object(osm.time, 'monotonic', side_effect=lambda: clock[0]), \
-         patch.object(service._wake, 'wait', side_effect=wait):
-      with self.assertRaises(StopWorker):
-        service._run()
-    return calls, samples
-
-  def test_highway_cache_stays_available_through_slow_downloads(self):
-    # Drive logs showed 34-36 s downloads and only 9-11 s of usable coverage.
-    # Matching must continue across several downloads, including zone work.
-    for duration in (35., 37.):
-      with self.subTest(duration=duration):
-        calls, samples = self.simulate_cache_downloads(120 / 3.6, duration, 350.)
-        self.assertGreaterEqual(len(calls), 5)
-        self.assertTrue(all(b - a >= 30. for a, b in zip(calls, calls[1:], strict=False)))
-        available = [(t, speed) for t, speed in samples if t > 100. + duration]
-        self.assertTrue(available)
-        self.assertTrue(all(speed == 100 / 3.6 for _, speed in available))
-
-  def test_city_cache_uses_larger_area_before_downloading_again(self):
-    calls, samples = self.simulate_cache_downloads(50 / 3.6, 5., 350.)
-    self.assertGreaterEqual(len(calls), 3)
-    self.assertTrue(all(b - a >= 100. for a, b in zip(calls, calls[1:], strict=False)))
-    self.assertTrue(all(speed == 100 / 3.6 for t, speed in samples if t > 105.))
-
-  def test_stationary_cache_refresh_finishes_before_ttl(self):
-    calls, samples = self.simulate_cache_downloads(0., 35., 750., warm_cache=True)
-    self.assertEqual(len(calls), 1)
-    self.assertLess(calls[0] + 35., 700.)
-    self.assertTrue(all(speed == 100 / 3.6 for _, speed in samples))
-
-  def test_expanded_cache_still_rejects_coverage_edge(self):
-    service = self.cached_service((polyline([(0, -100), (0, 4000)], '100', way_id=1),))
-    for metres in (1500., 2949.):
-      fix = replace(self.fix, latitude=point(0, metres)[0])
-      self.assertAlmostEqual(service.update(fix, 100.)[1], 100 / 3.6)
-    self.assertIsNone(service.update(replace(self.fix, latitude=point(0, 2951.)[0]), 100.))
-    self.assertEqual(service.control_reason, 'cacheUnavailable')
-
-  def run_network_recovery(self, steps, successful_at, change_during_fetch=False):
-    class StopWorker(Exception):
-      pass
-    service = osm.OSMSpeedLimit()
-    service._thread = Mock()
-    clock = [100.]
-    service._fix = self.fix
-    service.update_network('wifi')
-    steps = iter(steps)
-    calls = {'roads': [], 'zones': []}
-    samples = []
-
-    def fetch(kind, fix):
-      calls[kind].append(clock[0])
-      if change_during_fetch and clock[0] == 100.:
-        service.update_network('cell4G')
-      if clock[0] < successful_at:
-        raise osm.requests.ConnectionError()
-      return (road(),) if kind == 'roads' else ()
-
-    def wait(_):
-      samples.append(service.update(service._fix, clock[0]))
-      try:
-        clock[0], network = next(steps)
-      except StopIteration as error:
-        raise StopWorker from error
-      service._fix = replace(self.fix, timestamp=clock[0])
-      service.update_network(network)
-
-    modules = {'openpilot.common.realtime': SimpleNamespace(drop_realtime=lambda: None),
-               'openpilot.common.swaglog': SimpleNamespace(cloudlog=Mock())}
-    with patch.dict(sys.modules, modules), patch.object(osm, 'OVERPASS_ENDPOINTS', (osm.OVERPASS_URL,)), \
-         patch.object(osm, 'fetch_roads', side_effect=lambda fix, endpoint: fetch('roads', fix)), \
-         patch.object(osm, 'fetch_zones', side_effect=lambda fix: fetch('zones', fix)), \
-         patch.object(osm.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(service._wake, 'wait', side_effect=wait):
-      with self.assertRaises(StopWorker):
-        service._run()
-    self.assertTrue(all(sample is None for sample in samples[:-1]))
-    self.assertAlmostEqual(samples[-1][1], 40 / 3.6)
-    return calls
-
-  def test_cellular_handoff_recovers_failed_maps_without_waiting_for_backoff(self):
-    steps = [(101., 'wifi'), (129., 'wifi'), (130., 'wifi'), (140., 'none'), (145., 'cell4G')]
-    calls = self.run_network_recovery(steps, successful_at=145.)
-    self.assertEqual(calls, dict.fromkeys(('roads', 'zones'), [100., 130., 145.]))
-
-  def test_failed_maps_retry_within_one_minute_when_network_type_stays_the_same(self):
-    # A selected Wi-Fi path can regain internet without changing networkType.
-    steps = [(t, 'wifi') for t in (101., 129., 130., 189., 190., 249., 250., 309., 310., 369., 370.)]
-    calls = self.run_network_recovery(steps, successful_at=370.)
-    self.assertEqual(calls, dict.fromkeys(('roads', 'zones'), [100., 130., 190., 250., 310., 370.]))
-
-  def test_network_flapping_and_inflight_handoff_do_not_burst_requests(self):
-    steps = [(101., 'none'), (102., 'cell4G'), (103., 'wifi'), (104., 'none'), (105., 'cell4G'),
-             (106., 'wifi'), (107., 'cell4G'), (109., 'cell4G'), (110., 'cell4G')]
-    calls = self.run_network_recovery(steps, successful_at=110.)
-    self.assertEqual(calls, dict.fromkeys(('roads', 'zones'), [100., 105., 110.]))
-    calls = self.run_network_recovery([(101., 'cell4G'), (104., 'cell4G'), (105., 'cell4G')],
-                                      successful_at=105., change_during_fetch=True)
-    self.assertEqual(calls, dict.fromkeys(('roads', 'zones'), [100., 105.]))
 
 
 

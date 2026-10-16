@@ -31,10 +31,9 @@ git submodule update --init --recursive --jobs 2
 rm -f .overlay_init
 git log -1 --oneline
 python - <<'PY'
-from openpilot.selfdrive.mapd.osm_speed_limit import QUERY_RADIUS
 from openpilot.system.loggerd.uploader import SENTRY_DENIED_RETRY_SECONDS
-if QUERY_RADIUS != 3000 or SENTRY_DENIED_RETRY_SECONDS < 300:
-  raise SystemExit('Expected 3 km cache/retry fix missing; no recordings deleted.')
-print('[VERIFY] 3 km map cache and denied-file retry cooldown are installed.')
+if SENTRY_DENIED_RETRY_SECONDS < 300:
+  raise SystemExit('Expected denied-file retry fix missing; no recordings deleted.')
+print('[VERIFY] Denied-file retry cooldown is installed.')
 PY
 python tools/sentry_clear_recordings.py --delete-completed-and-reboot
