@@ -23,6 +23,7 @@ from openpilot.common.swaglog import cloudlog
 NetworkType = log.DeviceState.NetworkType
 UPLOAD_ATTR_NAME = 'user.upload'
 UPLOAD_ATTR_VALUE = b'1'
+SENTRY_DENIED_RETRY_SECONDS = 300.0
 
 MAX_UPLOAD_SIZES = {
   "qlog": 25*1e6,  # can't be too restrictive here since we use qlogs to find
@@ -93,6 +94,7 @@ class Uploader:
     self.immediate_folders = ["crash/", "boot/"]
     self.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
     self.sentry_failed: dict[str, float] = {}
+    self.sentry_denied_until: dict[str, float] = {}
 
   def list_upload_files(self, metered: bool) -> Iterator[tuple[str, str, str]]:
     r = self.params.get("AthenadRecentlyViewedRoutes")
@@ -139,6 +141,9 @@ class Uploader:
     # priority tier. Try untouched files first, then retry failures oldest
     # first. The main loop still applies the normal network backoff.
     self.sentry_failed = {fn: failed_at for fn, failed_at in self.sentry_failed.items() if os.path.isfile(fn)}
+    now = time.monotonic()
+    self.sentry_denied_until = {fn: until for fn, until in self.sentry_denied_until.items() if until > now and os.path.isfile(fn)}
+    upload_files = [candidate for candidate in upload_files if candidate[2] not in self.sentry_denied_until]
     upload_files.sort(key=lambda candidate: self.sentry_failed.get(candidate[2], 0.))
 
     for name, key, fn in upload_files:
@@ -222,6 +227,12 @@ class Uploader:
         success = True
       else:
         success = False
+        if is_sentry_file(fn) and stat is not None and stat.status_code in (401, 403, 412):
+          # Successful new footage resets the main loop's global backoff. Keep
+          # a separate cooldown so denied old files don't restart every minute.
+          self.sentry_denied_until[fn] = time.monotonic() + SENTRY_DENIED_RETRY_SECONDS
+          cloudlog.event("sentry.upload_retry_deferred", key=key, status_code=stat.status_code,
+                         retry_seconds=SENTRY_DENIED_RETRY_SECONDS)
         cloudlog.event("upload_failed", stat=stat, status_code=stat.status_code if stat is not None else None,
                        exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
 
@@ -249,6 +260,7 @@ class Uploader:
     success = self.upload(name, key, fn, network_type, metered)
     if success:
       self.sentry_failed.pop(fn, None)
+      self.sentry_denied_until.pop(fn, None)
     elif is_sentry_file(fn):
       self.sentry_failed[fn] = time.monotonic()
     return success

@@ -127,12 +127,15 @@ def test_preview_keeps_ordinary_device_upload_endpoint(uploader, monkeypatch, se
 
 @pytest.mark.parametrize('status', [401, 403, 412, 500, None])
 def test_failed_preview_does_not_block_remaining_event_segments(uploader, monkeypatch, status):
+  clock = [100.]
+  monkeypatch.setattr(upload.time, 'monotonic', lambda: clock[0])
   directories = [event_files(uploader, segment) for segment in range(3)]
   failed = str(directories[0]/'qlog.zst')
   attempts = []
 
   def response(key, filename):
     attempts.append(filename)
+    clock[0] += .1
     if filename == failed:
       if status is None:
         raise TimeoutError('network unavailable')
@@ -147,9 +150,17 @@ def test_failed_preview_does_not_block_remaining_event_segments(uploader, monkey
   assert set(attempts) == expected
   assert len(attempts) == len(expected)
   assert getxattr(failed, upload.UPLOAD_ATTR_NAME) is None
+  if status in (401, 403, 412):
+    # The five successful uploads above must not reset this file's cooldown.
+    assert uploader.next_file_to_upload(False) is None
+    clock[0] = uploader.sentry_denied_until[failed] - .1
+    assert uploader.next_file_to_upload(False) is None
+    clock[0] = uploader.sentry_denied_until[failed]
   assert uploader.next_file_to_upload(False)[2] == failed
-  monkeypatch.setattr(uploader, 'do_upload', lambda *args: (
-    SimpleNamespace(status_code=201, request=SimpleNamespace(headers={'Content-Length': '7'}))))
+  def recovered(*args):
+    clock[0] += .1
+    return SimpleNamespace(status_code=201, request=SimpleNamespace(headers={'Content-Length': '7'}))
+  monkeypatch.setattr(uploader, 'do_upload', recovered)
   assert uploader.step(upload.NetworkType.wifi, False) is True
   assert uploader.next_file_to_upload(False) is None
   assert all((directory/name).exists() for directory in directories for name in FULL_FILES)
