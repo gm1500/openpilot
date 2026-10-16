@@ -70,6 +70,13 @@ the backoff. This prevents an initial Wi-Fi failure from suppressing map downloa
 for several minutes after cellular returns. Valid GPS alone cannot supply a road's
 speed limit when no map data has downloaded.
 
+Active road and municipal-zone fetches temporarily pause automatic and Connect-requested
+file uploads, including further chunks of an upload already in progress. Uploads resume
+after either success or failure; cache reads and retry backoff do not hold the pause.
+Coordination uses a RAM-only process lock with a 120-second expiry, so an exited or stuck
+map worker cannot leave uploads paused indefinitely. Bytes already in network buffers can
+still drain; pausing further uploads cannot resolve a map server outage or missing road data.
+
 Overpass can queue a query for 15 seconds before starting its 10-second execution
 budget. The downloader therefore allows a 35-second read wait and a 45-second
 response deadline, with the same 2 MB size guard. These waits run only in the

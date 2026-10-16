@@ -36,6 +36,7 @@ from openpilot.cereal.services import SERVICE_LIST
 from openpilot.common.api import Api, get_key_pair
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.utils import CallbackReader, get_upload_stream
+from openpilot.common.upload_priority import MapAwareReader, map_download_active, wait_for_map_download, POLL_INTERVAL
 from openpilot.common.params import Params
 from openpilot.common.realtime import set_core_affinity
 from openpilot.common.hardware import HARDWARE, PC
@@ -276,6 +277,9 @@ def upload_handler(end_event: threading.Event) -> None:
 
   while not end_event.is_set():
     cur_upload_items[tid] = None
+    if map_download_active():
+      end_event.wait(POLL_INTERVAL)
+      continue
 
     try:
       cur_upload_items[tid] = item = replace(upload_queue.get(timeout=1), current=True)
@@ -329,6 +333,7 @@ def upload_handler(end_event: threading.Event) -> None:
 
 
 def _do_upload(upload_item: UploadItem, callback: Callable | None = None) -> requests.Response:
+  wait_for_map_download((lambda: callback(1, 0)) if callback else None)
   path = upload_item.path
   compress = False
 
@@ -340,8 +345,10 @@ def _do_upload(upload_item: UploadItem, callback: Callable | None = None) -> req
   stream = None
   try:
     stream, content_length = get_upload_stream(path, compress)
+    data = CallbackReader(stream, callback, content_length) if callback else stream
+    check = (lambda: callback(content_length, stream.tell())) if callback else None
     response = UPLOAD_SESS.put(upload_item.url,
-                               data=CallbackReader(stream, callback, content_length) if callback else stream,
+                               data=MapAwareReader(data, check),
                                headers={**upload_item.headers, 'Content-Length': str(content_length)},
                                timeout=30)
     return response
