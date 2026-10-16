@@ -83,6 +83,13 @@ municipal record consulted for the matched road; old logs default to no zone.
 Source: https://data.edmonton.ca/Transportation-Infrastructure/Speed-Zones/6vjs-shqe
 No roadwork-to-speed guesses or language-model decisions run onroad.
 
+Active road and municipal downloads take priority over automatic and Connect-requested
+file uploads. A RAM-only process lock pauses new transfers and further upload body
+chunks, releases on success, failure or process exit, and expires after 120 seconds
+if the worker hangs. Uploads continue during cache lookup and map retry backoff.
+Sentry backlog waits until offroad; regular driving uploads resume between map
+requests. This does not change the original 1.5 km radius, endpoint or retry timing.
+
 Edmonton's official daily playground hours are an example, not a global default:
 https://www.edmontonpolice.ca/TrafficVehicles/TrafficSafety/SchoolZones
 

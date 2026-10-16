@@ -518,6 +518,14 @@ Qlogs and the motion preview use the ordinary route uploader, so Connect can ind
 and display their motion bookmarks. The stock metered-connection policy still applies:
 qlogs upload normally, and previews on metered links require viewing the route in Connect.
 
+While driving, all files in `.sentry`-marked segments wait until offroad, including
+previews, qlogs and manually requested Connect uploads. A transfer already in
+progress is deferred at the next body read without marking it uploaded or charging
+a failed attempt. Regular driving uploads remain eligible behind held Sentry files.
+Active road/municipal map requests temporarily pause both upload queues and further
+body chunks. Uploads resume after the request succeeds or fails; map retry backoff
+does not hold bandwidth. SSH, live video and recording are unaffected.
+
 Full logs (`rlog.zst`) and all three camera videos (`fcamera.hevc`, `ecamera.hevc`,
 `dcamera.hevc`) stay on the device until requested manually from Connect. Open the event
 route and use its upload controls to request the camera footage or all files. These requests

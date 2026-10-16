@@ -11,10 +11,11 @@ from collections.abc import Iterator
 
 from openpilot.cereal import log
 import openpilot.cereal.messaging as messaging
-from openpilot.system.sentry.storage import live_sentry_lock, remove_legacy_upload_authorization
+from openpilot.system.sentry.storage import is_sentry_file, live_sentry_lock, remove_legacy_upload_authorization
 from openpilot.common.api import Api
 from openpilot.common.utils import get_upload_stream
 from openpilot.common.params import Params
+from openpilot.common.upload_priority import MapAwareReader, UploadDeferred, POLL_INTERVAL, map_download_active, wait_for_map_download
 from openpilot.common.realtime import set_core_affinity
 from openpilot.common.hardware.hw import Paths
 from openpilot.system.loggerd.xattr_cache import getxattr, setxattr
@@ -45,10 +46,6 @@ class FakeResponse:
   def __init__(self):
     self.status_code = 200
     self.request = FakeRequest()
-
-
-def is_sentry_file(filename: str) -> bool:
-  return os.path.isfile(os.path.join(os.path.dirname(filename), '.sentry'))
 
 
 def get_directory_sort(d: str) -> list[str]:
@@ -97,6 +94,7 @@ class Uploader:
     self.sentry_denied_until: dict[str, float] = {}
 
   def list_upload_files(self, metered: bool) -> Iterator[tuple[str, str, str]]:
+    offroad = self.params.get_bool("IsOffroad")
     r = self.params.get("AthenadRecentlyViewedRoutes")
     requested_routes = [] if r is None else [route for route in r.split(",") if route]
 
@@ -108,6 +106,8 @@ class Uploader:
         continue
 
       if any(name.endswith(".lock") for name in names):
+        continue
+      if not offroad and '.sentry' in names:
         continue
 
       for name in sorted(names, key=lambda n: self.immediate_priority.get(n, 1000)):
@@ -160,6 +160,12 @@ class Uploader:
 
   def do_upload(self, key: str, fn: str):
     sentry = is_sentry_file(fn)
+
+    def check():
+      if sentry and not self.params.get_bool("IsOffroad"):
+        raise UploadDeferred
+
+    wait_for_map_download(check)
     url_resp = self.api.get("v1.4/" + self.dongle_id + "/upload_url/", timeout=10, path=key, access_token=self.api.get_token())
     if url_resp.status_code == 412 or (sentry and url_resp.status_code != 200):
       if sentry:
@@ -178,7 +184,7 @@ class Uploader:
     try:
       compress = key.endswith('.zst') and not fn.endswith('.zst')
       stream, _ = get_upload_stream(fn, compress)
-      response = requests.put(url, data=stream, headers=headers, timeout=10)
+      response = requests.put(url, data=MapAwareReader(stream, check), headers=headers, timeout=10)
       if sentry and response.status_code not in (200, 201):
         cloudlog.event("sentry.upload_put_failed", key=key, status_code=response.status_code)
       return response
@@ -186,7 +192,7 @@ class Uploader:
       if stream:
         stream.close()
 
-  def upload(self, name: str, key: str, fn: str, network_type: int, metered: bool) -> bool:
+  def upload(self, name: str, key: str, fn: str, network_type: int, metered: bool) -> bool | None:
     try:
       sz = os.path.getsize(fn)
     except OSError:
@@ -208,6 +214,10 @@ class Uploader:
       last_exc = None
       try:
         stat = self.do_upload(key, fn)
+      except UploadDeferred:
+        # Driving started during a parked transfer. Leave it pending and let
+        # regular driving files use this worker instead of waiting for offroad.
+        return None
       except Exception as e:
         last_exc = (e, traceback.format_exc())
 
@@ -261,7 +271,7 @@ class Uploader:
     if success:
       self.sentry_failed.pop(fn, None)
       self.sentry_denied_until.pop(fn, None)
-    elif is_sentry_file(fn):
+    elif success is False and is_sentry_file(fn):
       self.sentry_failed[fn] = time.monotonic()
     return success
 
@@ -289,6 +299,9 @@ def main(exit_event: threading.Event | None = None) -> None:
 
   backoff = 0.1
   while not exit_event.is_set():
+    if map_download_active():
+      exit_event.wait(POLL_INTERVAL)
+      continue
     sm.update(0)
     offroad = params.get_bool("IsOffroad")
     network_type = sm['deviceState'].networkType if not force_wifi else NetworkType.wifi

@@ -14,6 +14,7 @@ FULL_FILES = ('rlog.zst', 'fcamera.hevc', 'ecamera.hevc', 'dcamera.hevc')
 @pytest.fixture
 def uploader(tmp_path, monkeypatch):
   params = Params(str(tmp_path/'params'))
+  params.put_bool('IsOffroad', True, block=True)
   monkeypatch.setattr(upload, 'Params', lambda: params)
   monkeypatch.setattr(upload, 'Api', lambda _: None)
   monkeypatch.setattr(upload.Paths, 'persist_root', lambda: str(tmp_path/'persist'))
@@ -52,7 +53,7 @@ def test_only_preview_and_qlog_upload_full_files_remain_local_after_restart(uplo
   for name in order:
     assert getxattr(str(directory/name), upload.UPLOAD_ATTR_NAME) == upload.UPLOAD_ATTR_VALUE
   # Viewing a route permits the stock metered preview policy, never full files.
-  monkeypatch.setattr(restarted, 'params', {'AthenadRecentlyViewedRoutes': 'test-device|00000001--0123456789'})
+  restarted.params.put('AthenadRecentlyViewedRoutes', 'test-device|00000001--0123456789', block=True)
   while restarted.step(upload.NetworkType.wifi, metered):
     pass
   assert order == ['qlog.zst', 'qcamera.ts']
@@ -185,3 +186,36 @@ def test_credential_cleanup_failure_does_not_stop_preview_uploads(uploader, monk
   restarted = upload.Uploader('test-device', uploader.root)
   directory = event_files(restarted)
   assert restarted.next_file_to_upload(False)[2] == str(directory/'qlog.zst')
+
+
+def test_driving_holds_sentry_and_resumes_offroad_without_blocking_regular_files(uploader):
+  sentry = event_files(uploader)
+  regular = event_files(uploader, 1)
+  (regular/'.sentry').unlink()
+  uploader.params.put_bool('IsOffroad', False, block=True)
+  assert uploader.next_file_to_upload(False)[2] == str(regular/'qlog.zst')
+  for name in ('qlog.zst', 'qcamera.ts'):
+    setxattr(str(regular/name), upload.UPLOAD_ATTR_NAME, upload.UPLOAD_ATTR_VALUE)
+  assert uploader.next_file_to_upload(False) is None
+  assert all(getxattr(str(sentry/name), upload.UPLOAD_ATTR_NAME) is None for name in ('qlog.zst', 'qcamera.ts', *FULL_FILES))
+  uploader.params.put_bool('IsOffroad', True, block=True)
+  assert uploader.next_file_to_upload(False)[2] == str(sentry/'qlog.zst')
+
+
+def test_sentry_inflight_upload_defers_when_driving_starts_without_marking_failed(uploader, monkeypatch):
+  directory = event_files(uploader)
+  filename = directory/'qlog.zst'
+  filename.write_bytes(b'x' * 32768)
+  uploader.api = SimpleNamespace(get=lambda *a, **kw: SimpleNamespace(status_code=200,
+    text='{"url":"https://example.invalid/upload","headers":{}}'), get_token=lambda: 'test')
+
+  def put(url, *, data, **kwargs):
+    assert data.read(16384) == b'x' * 16384
+    uploader.params.put_bool('IsOffroad', False, block=True)
+    data.read(16384)
+    pytest.fail('Onroad transition must stop further Sentry bytes')
+
+  monkeypatch.setattr(upload.requests, 'put', put)
+  assert uploader.step(upload.NetworkType.wifi, False) is None
+  assert getxattr(str(filename), upload.UPLOAD_ATTR_NAME) is None
+  assert not uploader.sentry_failed and not uploader.sentry_denied_until

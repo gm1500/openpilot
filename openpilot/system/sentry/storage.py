@@ -7,6 +7,10 @@ from openpilot.common.hardware.hw import Paths
 from openpilot.common.swaglog import cloudlog
 
 
+def is_sentry_file(filename: str) -> bool:
+  return os.path.isfile(os.path.join(os.path.dirname(filename), '.sentry'))
+
+
 def remove_legacy_upload_authorization():
   # Automatic full-file uploads and their account setup have been removed.
   # Delete only their obsolete credential file, without reading it.
