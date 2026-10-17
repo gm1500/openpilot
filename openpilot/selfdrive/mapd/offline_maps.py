@@ -49,9 +49,10 @@ def region_name(region: str) -> str:
 
 
 def region_groups(region: str) -> list[str]:
-  catalog = region_catalog()
   if region == 'region.NA':
-    return sorted(set().union(*(region_groups(x) for x in ('nation.CA', 'nation.US', 'nation.MX', 'us_state.AK', 'us_state.HI'))))
+    # The U.S. country already includes Alaska and Hawaii.
+    return sorted(set().union(*(region_groups(x) for x in ('nation.CA', 'nation.US', 'nation.MX'))))
+  catalog = region_catalog()
   kind, _, code = region.partition('.')
   if kind not in catalog or code not in catalog[kind]:
     raise ValueError('Unknown map region')

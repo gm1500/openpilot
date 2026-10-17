@@ -29,7 +29,7 @@ class SettingButtons(MultipleButtonAction):
 class OffsetButtons(MultipleButtonAction):
   def __init__(self, params):
     self.params = params
-    super().__init__(['−', self.value_label, '+'], button_width=180)
+    super().__init__(['-', self.value_label, '+'], button_width=180)
 
   def value_label(self):
     setting = SLCSettings.read(self.params)
@@ -55,9 +55,8 @@ class SLCLayout(Widget):
       'Use the mapped speed as the cruise target on supported cars. The onroad SLC button controls the same setting.',
       initial_state=self.params.get('MapCruiseEnabled', return_default=True),
       callback=lambda value: self.params.put_bool('MapCruiseEnabled', value, block=True))
-    self.region_buttons = MultipleButtonAction(['North America', 'Country', 'U.S. state'], button_width=310,
-                                               callback=self.select_region)
-    self.region_buttons.is_button_selected = lambda i: self.region().startswith(('region.', 'nation.', 'us_state.')[i])
+    self.region_buttons = MultipleButtonAction(['North America', 'Country'], button_width=310, callback=self.select_region)
+    self.region_buttons.is_button_selected = lambda i: self.region().startswith(('region.', 'nation.')[i])
     self.actions = MultipleButtonAction(['Download', 'Update', 'Delete'], button_width=240, callback=self.map_action)
     self.actions.is_button_selected = lambda i: False
     self.cancel = button_item('Map download', 'CANCEL', callback=lambda: self.request('cancel'))
@@ -65,14 +64,14 @@ class SLCLayout(Widget):
       self.enable,
       ListItem('New speed limit', action_item=SettingButtons(self.params, 'SlcChangePolicy', ['Automatic', 'Lower only', 'SET to accept']),
         description='Automatic applies qualified new limits. Lower only never raises the current target automatically. ' +
-                    'SET to accept waits for an explicit map SET or re-engagement with SET. Ordinary +/− buttons remain manual.'),
+                    'SET to accept waits for an explicit map SET or re-engagement with SET. Ordinary +/- buttons remain manual.'),
       ListItem('After manual override', action_item=SettingButtons(self.params, 'SlcResumePolicy', ['Next limit', 'SET only']),
         description='Next limit allows SLC to resume at a changed road limit, subject to the rule above. ' +
                     'SET only preserves your manual choice until you explicitly select the map target again.'),
       ListItem('Offset type', action_item=SettingButtons(self.params, 'SlcOffsetType', ['Speed units', 'Percent']),
         description='Speed units follow the device km/h or mph selection. Percent scales with the posted limit.'),
       ListItem('Speed offset', action_item=OffsetButtons(self.params),
-        description='Adjust in steps of 5, from −30 to +30. Zero uses the posted limit. Only the cruise target changes; ' +
+        description='Adjust in steps of 5, from -30 to +30. Zero uses the posted limit. Only the cruise target changes; ' +
                     'the displayed road limit stays unchanged. Existing cruise bounds still apply.'),
       ListItem('Map area', action_item=self.region_buttons),
       text_item('Selected area', self.selected_label),
@@ -87,7 +86,7 @@ class SLCLayout(Widget):
         'Keeps at least 5 GB and 10% of storage free for recordings. Interrupted downloads retain completed map groups.'),
       text_item('Last update', self.date_label,
         'This is the download date, not the age of every road in the source database. Use Update to refresh your selected area.'),
-      text_item('Map data', '© OpenStreetMap contributors',
+      text_item('Map data', 'OpenStreetMap contributors',
         'Open Database License: openstreetmap.org/copyright. Regional packages provided by map-data.pfeifer.dev.'),
     ]
     self.scroller = self._child(Scroller(self.items, spacing=0, line_separator=True))
@@ -102,13 +101,11 @@ class SLCLayout(Widget):
     if index == 0:
       self.params.put('OfflineMapRegion', 'region.NA', block=True)
       return
-    kind = 'nation' if index == 1 else 'us_state'
-    options = {v['full_name']: f'{kind}.{k}' for k,v in region_catalog()[kind].items()}
+    options = {v['full_name']: f'nation.{k}' for k,v in region_catalog()['nation'].items()}
     def selected(result):
       if result == DialogResult.CONFIRM and dialog.selection in options:
         self.params.put('OfflineMapRegion', options[dialog.selection], block=True)
-    dialog = MultiOptionDialog('Choose country' if index == 1 else 'Choose U.S. state', sorted(options),
-                               current=self.selected_label(), callback=selected)
+    dialog = MultiOptionDialog('Choose country', sorted(options), current=self.selected_label(), callback=selected)
     gui_app.push_widget(dialog)
 
   def request(self, action):
@@ -129,7 +126,7 @@ class SLCLayout(Widget):
     if self.status.get('error'):
       return phase
     total, completed = self.status.get('total', 0), self.status.get('completed', 0)
-    return f'{phase} · {completed}/{total}' if total else phase
+    return f'{phase}: {completed}/{total}' if total else phase
 
   def date_label(self):
     info = self.status.get('regions', {}).get(self.region(), {})

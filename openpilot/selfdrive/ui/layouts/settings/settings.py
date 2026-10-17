@@ -63,10 +63,10 @@ class SettingsLayout(Widget):
       PanelType.DEVICE: PanelInfo(tr_noop("Device"), DeviceLayout()),
       PanelType.NETWORK: PanelInfo(tr_noop("Network"), NetworkUI(wifi_manager)),
       PanelType.TOGGLES: PanelInfo(tr_noop("Toggles"), TogglesLayout()),
-      PanelType.SLC: PanelInfo(tr_noop("SLC"), SLCLayout()),
       PanelType.SOFTWARE: PanelInfo(tr_noop("Software"), SoftwareLayout()),
       PanelType.FIREHOSE: PanelInfo(tr_noop("Firehose"), FirehoseLayout()),
       PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayout()),
+      PanelType.SLC: PanelInfo(tr_noop("SLC"), SLCLayout()),
       PanelType.SENTRY: PanelInfo(tr_noop("Sentry"), SentryLayout()),
     }
 

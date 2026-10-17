@@ -13,7 +13,7 @@ The comma 3X settings panel provides:
 | After manual override | Resume at the next changed limit; SET only |
 | Offset type | Speed units (km/h or mph); Percent |
 | Speed offset | −/+ buttons, steps of 5, range −30 to +30; default zero |
-| Map area | North America (Canada, U.S., Mexico); individual country; U.S. state |
+| Map area | North America (Canada, U.S., Mexico); individual country |
 | Offline maps | Download, Update, Delete, Cancel; progress, storage and download date |
 
 Offsets affect the cruise target, not the displayed posted limit. Targets keep the existing 8–145 km/h bounds and only operate on cars supporting the existing SLC integration. Ordinary cruise +/− buttons retain manual control. New limits retain the existing two-second qualification and fresh-position checks. SET explicitly accepts a fresh map limit; the existing current-speed floor on explicit SET is unchanged.
@@ -22,7 +22,7 @@ Offsets affect the cruise target, not the displayed posted limit. Targets keep t
 
 ## Persistent downloads
 
-Maps live under `/data/maps/slc`, outside the openpilot checkout. They survive reboots and branch updates. They are not erased by the normal recording deleter. North America includes Alaska and Hawaii; the country catalog determines other geographic coverage. Regions overlap, and shared groups are downloaded once and retained while another installed region uses them.
+Maps live under `/data/maps/slc`, outside the openpilot checkout. They survive reboots and branch updates. They are not erased by the normal recording deleter. Both United States and North America include Alaska and Hawaii; individual U.S. states are not offered in the area picker. The country catalog determines other geographic coverage. Regions overlap, and shared groups are downloaded once and retained while another installed region uses them.
 
 Bulk downloads run only while parked on unmetered Wi-Fi. Completed map groups survive cancellation, Wi-Fi loss and reboot. An interrupted group restarts, while completed groups are reused by **Download**. **Update** refreshes every group in the selected area. Old groups stay usable until their replacements validate and install atomically. **Delete** removes the selected region and groups no other installed region owns.
 
