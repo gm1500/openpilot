@@ -1,0 +1,82 @@
+"""Optional on-road OSM service, independent of the UI and the control loop."""
+import time
+import hashlib
+
+from opendbc.car.structs import car
+from openpilot.cereal import messaging
+from openpilot.common.params import Params
+from openpilot.common.realtime import Ratekeeper
+from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.mapd.osm_speed_limit import OSMSpeedLimit, gps_fix
+from openpilot.selfdrive.mapd.heading import vehicle_motion
+from openpilot.selfdrive.mapd.position import MapPosition
+
+
+def main():
+  sm = messaging.SubMaster(['gpsLocationExternal', 'gpsLocation', 'carState', 'controlsState', 'vehicleParameters',
+                           'deviceMotion', 'extrinsicsCalibration', 'deviceState'])
+  pm = messaging.PubMaster(['mapSpeedLimit', 'mapTrafficControl'])
+  provider = OSMSpeedLimit()
+  provider.clock.prepare()  # load timezone polygons before the publication loop
+  params = Params()
+  with car.CarParams.from_bytes(params.get('CarParams', block=True)) as CP:
+    vehicle_id = hashlib.sha256(f'{CP.carFingerprint}:{CP.carVin}'.encode()).hexdigest()
+    signed_speed = CP.brand == 'gm'  # GM decodes actual wheel direction, independent of the selected gear
+  # Wall time only checks checkpoint age across boots; integration uses monotonic time.
+  position = MapPosition(params, vehicle_id, time.time())  # noqa: TID251
+  rk = Ratekeeper(5, print_delay_threshold=None)
+  previous_speed_source = None
+  while True:
+    sm.update(0)
+    now = time.monotonic()
+    if sm.updated['deviceState'] and sm.valid['deviceState'] and 0 <= now - sm.recv_time['deviceState'] < 2.:
+      provider.update_network(str(sm['deviceState'].networkType))
+    raw_fix = gps_fix(sm, 1, now)
+    provider.clock.observe(raw_fix, now)
+    fix = position.update(raw_fix, vehicle_motion(sm, now, signed_speed), now, time.time())  # noqa: TID251
+    sample = provider.update(fix, now)
+    speed_source = (provider.speed_source, provider.speed_match.road.way_id if provider.speed_match is not None else 0,
+                    sample[1] if sample is not None else None, sample[2] if sample is not None else None)
+    if speed_source != previous_speed_source:
+      source, way_id, speed, advisory = speed_source
+      cloudlog.event('mapd.speed_source', source=source, way_id=way_id,
+                     speed_kph=round(speed * 3.6, 3) if speed is not None else None,
+                     advisory_kph=round(advisory * 3.6, 3) if advisory is not None else None)
+      previous_speed_source = speed_source
+    msg = messaging.new_message('mapSpeedLimit')
+    msg.valid = sample is not None and any(speed is not None for speed in sample[1:3])
+    if sample is not None:
+      fix, limit, advisory, ahead = sample
+      msg.mapSpeedLimit.speedLimit = limit or 0.
+      msg.mapSpeedLimit.zoneType = provider.zone_type
+      msg.mapSpeedLimit.zoneSource = provider.zone_source
+      msg.mapSpeedLimit.advisorySpeed = advisory or 0.
+      msg.mapSpeedLimit.gpsMonoTime = int((fix.gps_timestamp if fix.estimated else fix.timestamp) * 1e9)
+      msg.mapSpeedLimit.positionEstimated = fix.estimated
+      msg.mapSpeedLimit.positionMonoTime = int(fix.timestamp * 1e9)
+      msg.mapSpeedLimit.headingValid = fix.bearing is not None
+      msg.mapSpeedLimit.distanceAhead = ahead
+    pm.send('mapSpeedLimit', msg)
+    # Independent validity: a missing speed limit must not hide a connected
+    # junction, and optional map health never disables ordinary control.
+    control_msg = messaging.new_message('mapTrafficControl')
+    control_msg.valid = sample is not None and provider.control_match is not None
+    control_msg.mapTrafficControl.reason = provider.control_reason
+    if control_msg.valid:
+      control = control_msg.mapTrafficControl
+      control.gpsMonoTime = int((fix.gps_timestamp if fix.estimated else fix.timestamp) * 1e9)
+      control.positionMonoTime = int(fix.timestamp * 1e9)
+      control.positionEstimated = fix.estimated
+      control.matchedWayId = provider.control_match.road.way_id
+      if provider.control is not None:
+        target = provider.control
+        control.kind = target.kind
+        control.nodeId = target.node_id
+        control.wayId = target.way_id
+        control.distance = target.distance
+    pm.send('mapTrafficControl', control_msg)
+    rk.keep_time()
+
+
+if __name__ == '__main__':
+  main()
