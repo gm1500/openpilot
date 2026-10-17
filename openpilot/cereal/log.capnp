@@ -824,6 +824,7 @@ struct SelfdriveState {
   # configurable driving settings
   experimentalMode @10 :Bool;
   personality @11 :LongitudinalPersonality;
+  conditionalExperimental @14 :Bool; # selected map-gated slowing helper; full E2E stays false
 
   enum AudibleAlert {
     none @0;
