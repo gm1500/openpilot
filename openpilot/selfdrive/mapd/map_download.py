@@ -1,4 +1,4 @@
-"""Offroad, unmetered Wi-Fi regional downloads with atomic group installation."""
+"""Offroad, unmetered regional downloads with atomic group installation."""
 import gzip
 import math
 import os
@@ -28,6 +28,18 @@ class DownloadPaused(Exception):
 
 class DownloadCancelled(Exception):
   pass
+
+
+def check_download_allowed(params, sm, now):
+  if not params.get_bool('IsOffroad'):
+    raise DownloadPaused('Waiting until parked')
+  if (not sm.valid['deviceState'] or not 0 <= now-sm.recv_time['deviceState'] <= 5 or
+      sm['deviceState'].networkType == log.DeviceState.NetworkType.none):
+    raise DownloadPaused('Waiting for network connection')
+  # hardwared resolves the active connection's policy, including GsmMetered
+  # for cellular and the selected Wi-Fi network's metered setting.
+  if sm['deviceState'].networkMetered:
+    raise DownloadPaused('Waiting for an unmetered connection')
 
 
 def storage_available(root: Path, needed=0):
@@ -189,11 +201,7 @@ def main():
       params.remove('OfflineMapRequest')
       raise DownloadCancelled
     sm.update(0)
-    if not params.get_bool('IsOffroad'):
-      raise DownloadPaused('Waiting until parked')
-    if (not sm.valid['deviceState'] or now-sm.recv_time['deviceState'] > 5 or
-        sm['deviceState'].networkType != log.DeviceState.NetworkType.wifi or sm['deviceState'].networkMetered):
-      raise DownloadPaused('Waiting for unmetered Wi-Fi')
+    check_download_allowed(params, sm, time.monotonic())
 
   def progress(received, total):
     if time.monotonic() - last_status >= 1:

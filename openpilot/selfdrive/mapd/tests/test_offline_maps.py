@@ -11,6 +11,41 @@ from openpilot.selfdrive.mapd.osm_speed_limit import GpsFix, OSMSpeedLimit
 from openpilot.selfdrive.mapd.tests.test_osm_speed_limit import road
 
 
+class NetworkSM(dict):
+  def __init__(self, network='cell4G', metered=False, valid=True, received_at=100.):
+    state = download.log.DeviceState.new_message(networkType=network, networkMetered=metered)
+    super().__init__(deviceState=state)
+    self.valid = {'deviceState': valid}
+    self.recv_time = {'deviceState': received_at}
+
+
+@pytest.mark.parametrize('network', ['wifi', 'cell2G', 'cell3G', 'cell4G', 'cell5G', 'ethernet'])
+@pytest.mark.parametrize('metered', [False, True])
+def test_download_respects_active_connection_metered_policy(network, metered):
+  params = Mock(get_bool=Mock(return_value=True))
+  sm = NetworkSM(network, metered)
+  if metered:
+    with pytest.raises(download.DownloadPaused, match='unmetered connection'):
+      download.check_download_allowed(params, sm, 100.)
+  else:
+    download.check_download_allowed(params, sm, 100.)
+
+
+@pytest.mark.parametrize('network,valid,received_at', [
+  ('none', True, 100.), ('cell4G', False, 100.), ('cell4G', True, 94.9), ('cell4G', True, 101.),
+])
+def test_unmetered_setting_does_not_bypass_missing_or_stale_connection(network, valid, received_at):
+  params = Mock(get_bool=Mock(return_value=True))
+  with pytest.raises(download.DownloadPaused, match='network connection'):
+    download.check_download_allowed(params, NetworkSM(network, valid=valid, received_at=received_at), 100.)
+
+
+def test_cellular_download_still_requires_parked_vehicle():
+  params = Mock(get_bool=Mock(return_value=False))
+  with pytest.raises(download.DownloadPaused, match='parked'):
+    download.check_download_allowed(params, NetworkSM(), 100.)
+
+
 def archive_bytes(speed=50., conditional='', one_way=True):
   result = io.BytesIO()
   with tarfile.open(fileobj=result, mode='w:gz') as tar:
@@ -147,6 +182,35 @@ def test_onroad_pause_during_download_leaves_installed_maps_unchanged(store, tmp
     download.fetch_archive(store, '0_0', check, lambda *args: None, NS(get=lambda *a, **kw: response))
   assert store.manifest['groups']['0_0'] == previous
   assert (store.root/'downloads/0_0.tar.gz.part').read_bytes() == b'abc'
+
+
+def test_metered_toggle_pauses_transfer_and_unmetered_allows_restart(store, tmp_path):
+  install(store, tmp_path)
+  previous = store.manifest['groups']['0_0'].copy()
+  params = Mock(get_bool=Mock(return_value=True))
+  sm = NetworkSM()
+  response = Mock(headers={'Content-Length': '9'})
+  response.__enter__ = Mock(return_value=response)
+  response.__exit__ = Mock(return_value=False)
+  session = NS(get=lambda *args, **kwargs: response)
+
+  def chunks():
+    yield b'abc'
+    sm['deviceState'].networkMetered = True
+    yield b'def'
+
+  response.iter_content.return_value = chunks()
+  def check():
+    download.check_download_allowed(params, sm, 100.)
+  with pytest.raises(download.DownloadPaused, match='unmetered connection'):
+    download.fetch_archive(store, '0_0', check, lambda *args: None, session)
+  assert (store.root/'downloads/0_0.tar.gz.part').read_bytes() == b'abc'
+  sm['deviceState'].networkMetered = False
+  response.iter_content.return_value = [b'abc', b'def', b'ghi']
+  check()
+  path = download.fetch_archive(store, '0_0', check, lambda *args: None, session)
+  assert path.read_bytes() == b'abcdefghi'
+  assert store.manifest['groups']['0_0'] == previous
 
 
 def test_storage_reserve_checks_both_absolute_and_percentage(tmp_path, monkeypatch):

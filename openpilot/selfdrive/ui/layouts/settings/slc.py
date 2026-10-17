@@ -79,7 +79,7 @@ class SLCLayout(Widget):
       ListItem('Offline maps', action_item=self.actions,
         description='Download once and keep maps across reboots. Installed maps supply speed limits when live map data is unavailable. ' +
                     'Live data still supplies richer junction information. Large regions can require several GB. ' +
-                    'Downloads run only while parked on unmetered Wi-Fi.'),
+                    'Downloads run while parked on an unmetered connection. Turn off Cellular Metered in network settings to allow cellular.'),
       self.cancel,
       text_item('Download status', self.progress_label,
                 lambda: self.status.get('error') or 'Progress counts validated map groups. Download resumes completed groups after interruption.'),
@@ -118,7 +118,8 @@ class SLCLayout(Widget):
     if action == 'delete':
       message = f'Delete downloaded maps for {name}? Map groups shared with other installed areas are kept.'
     else:
-      message = f'{"Update" if action == "update" else "Download"} {name}? This may use several GB and will run while parked on unmetered Wi-Fi.'
+      message = (f'{"Update" if action == "update" else "Download"} {name}? This may use several GB and will run while parked on an unmetered connection. ' +
+                 'Cellular is allowed when Cellular Metered is off.')
     gui_app.push_widget(ConfirmDialog(message, action.capitalize(), callback=lambda result:
                                      self.request(action) if result == DialogResult.CONFIRM else None))
 
