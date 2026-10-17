@@ -2,6 +2,7 @@ import numpy as np
 import pyray as rl
 from openpilot.cereal import log
 from dataclasses import dataclass
+from openpilot.common.git import get_short_branch
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
@@ -20,6 +21,32 @@ DEFAULT_FACE_KPTS_3D = np.array([
   [36.53, 6.40, 8.00], [36.53, -21.03, 8.00], [34.47, -32.00, 8.00], [32.42, -37.49, 8.00],
   [30.36, -40.91, 8.00], [24.19, -46.40, 8.00], [18.02, -49.14, 8.00], [6.36, -51.20, 8.00],
   [-5.98, -51.20, 8.00],
+], dtype=np.float32)
+
+
+def _batmobile_face_keypoints() -> np.ndarray:
+  # Sample the approved rounded ear profile once, outside the drawing loop.
+  def curve(a, b, c, d):
+    t = np.linspace(0., 1., 10, dtype=np.float32)[:, None]
+    a, b, c, d = np.asarray([a, b, c, d], dtype=np.float32)
+    return (1 - t)**3 * a + 3 * (1 - t)**2 * t * b + 3 * (1 - t) * t**2 * c + t**3 * d
+
+  left = np.concatenate((
+    curve((-5.98, -51.2), (-10.5, -51.2), (-14., -49.3), (-18., -51.5)),
+    curve((-18., -51.5), (-22., -53.7), (-29., -64.), (-32., -64.5))[1:],
+    curve((-32., -64.5), (-35.5, -65.), (-36.16, -62.), (-36.16, -57.5))[1:],
+  ))
+  left = np.column_stack((left, np.full(len(left), 8., dtype=np.float32)))
+  right = left[::-1].copy()
+  right[:, 0] = .37 - right[:, 0]
+  return np.concatenate((left, DEFAULT_FACE_KPTS_3D[6:26], right, DEFAULT_FACE_KPTS_3D[:1]))
+
+
+BATMOBILE_FACE_KPTS_3D = _batmobile_face_keypoints()
+# Both eyes face the camera: counterclockwise with screen Y pointing down.
+BATMOBILE_EYE_KPTS_3D = np.array([
+  [[-26.5, -15., 8.], [-22.5, -7.5, 8.], [-8., -6., 8.]],
+  [[8.37, -6., 8.], [22.87, -7.5, 8.], [26.87, -15., 8.]],
 ], dtype=np.float32)
 
 # UI constants
@@ -49,8 +76,12 @@ class ArcData:
 class DriverStateRenderer(Widget):
   def __init__(self):
     super().__init__()
+    batmobile = get_short_branch() == 'batmobile'
+    outline = BATMOBILE_FACE_KPTS_3D if batmobile else DEFAULT_FACE_KPTS_3D
+    # Outline and eyes use one pose/depth transform to stay aligned while turning.
+    self.keypoints_3d = np.concatenate((outline, BATMOBILE_EYE_KPTS_3D.reshape(-1, 3))) if batmobile else outline
     # Initial state with NumPy arrays
-    self.face_kpts_draw = DEFAULT_FACE_KPTS_3D.copy()
+    self.keypoints_draw = self.keypoints_3d.copy()
     self.is_active = False
     self.is_rhd = False
     self.dm_fade_state = 0.0
@@ -58,14 +89,16 @@ class DriverStateRenderer(Widget):
     self.driver_pose_diff = np.zeros(3, dtype=np.float32)
     self.driver_pose_sins = np.zeros(3, dtype=np.float32)
     self.driver_pose_coss = np.zeros(3, dtype=np.float32)
-    self.face_keypoints_transformed = np.zeros((DEFAULT_FACE_KPTS_3D.shape[0], 2), dtype=np.float32)
+    self.keypoints_transformed = np.zeros((len(self.keypoints_3d), 2), dtype=np.float32)
     self.position_x: float = 0.0
     self.position_y: float = 0.0
     self.h_arc_data = None
     self.v_arc_data = None
 
     # Pre-allocate drawing arrays
-    self.face_lines = [rl.Vector2(0, 0) for _ in range(len(DEFAULT_FACE_KPTS_3D))]
+    self.face_lines = [rl.Vector2(0, 0) for _ in outline]
+    self.eye_triangles = [[rl.Vector2(0, 0) for _ in eye] for eye in BATMOBILE_EYE_KPTS_3D] if batmobile else []
+    self.keypoint_vertices = self.face_lines + [point for eye in self.eye_triangles for point in eye]
     self.h_arc_lines = [rl.Vector2(0, 0) for _ in range(ARC_POINT_COUNT)]
     self.v_arc_lines = [rl.Vector2(0, 0) for _ in range(ARC_POINT_COUNT)]
 
@@ -95,6 +128,8 @@ class DriverStateRenderer(Widget):
     # Draw face outline
     self.white_color.a = int(255 * opacity)
     rl.draw_spline_linear(self.face_lines, len(self.face_lines), 5.2, self.white_color)
+    for eye in self.eye_triangles:
+      rl.draw_triangle(*eye, self.white_color)
 
     # Set arc color based on engaged state
     self.arc_color = self.engaged_color if ui_state.engaged else self.disengaged_color
@@ -149,13 +184,13 @@ class DriverStateRenderer(Widget):
       ]
     )
 
-    # Transform face keypoints using vectorized matrix multiplication
-    self.face_kpts_draw = DEFAULT_FACE_KPTS_3D @ r_xyz.T
-    self.face_kpts_draw[:, 2] = self.face_kpts_draw[:, 2] * (1.0 - self.dm_fade_state) + 8 * self.dm_fade_state
+    # Transform outline and eye keypoints using vectorized matrix multiplication
+    self.keypoints_draw = self.keypoints_3d @ r_xyz.T
+    self.keypoints_draw[:, 2] = self.keypoints_draw[:, 2] * (1.0 - self.dm_fade_state) + 8 * self.dm_fade_state
 
     # Pre-calculate the transformed keypoints
-    kp_depth = (self.face_kpts_draw[:, 2] - 8) / 120.0 + 1.0
-    self.face_keypoints_transformed = self.face_kpts_draw[:, :2] * kp_depth[:, None]
+    kp_depth = (self.keypoints_draw[:, 2] - 8) / 120.0 + 1.0
+    self.keypoints_transformed = self.keypoints_draw[:, :2] * kp_depth[:, None]
 
     # Pre-calculate all drawing elements
     self._pre_calculate_drawing_elements()
@@ -168,11 +203,11 @@ class DriverStateRenderer(Widget):
     self.position_x = self._rect.x + (width - offset if self.is_rhd else offset)
     self.position_y = self._rect.y + height - offset
 
-    # Pre-calculate the face lines positions
-    positioned_keypoints = self.face_keypoints_transformed + np.array([self.position_x, self.position_y])
-    for i in range(len(positioned_keypoints)):
-      self.face_lines[i].x = positioned_keypoints[i][0]
-      self.face_lines[i].y = positioned_keypoints[i][1]
+    # Pre-calculate the outline and eye positions without allocating drawing vertices.
+    positioned_keypoints = self.keypoints_transformed + np.array([self.position_x, self.position_y])
+    for point, (x, y) in zip(self.keypoint_vertices, positioned_keypoints, strict=True):
+      point.x = x
+      point.y = y
 
     # Calculate arc dimensions based on head rotation
     delta_x = -self.driver_pose_sins[1] * ARC_LENGTH / 2.0  # Horizontal movement

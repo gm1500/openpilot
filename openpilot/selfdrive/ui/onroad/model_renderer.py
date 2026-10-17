@@ -10,7 +10,7 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.onroad.e2e_assist import slowing_assist_color
-from openpilot.selfdrive.ui.onroad.lead_geometry import lead_fill_alpha
+from openpilot.selfdrive.ui.onroad.lead_geometry import lead_fill_alpha, rounded_triangle
 from openpilot.selfdrive.ui.onroad.model_stop import ModelStop, PATH_HALF_WIDTH
 from openpilot.selfdrive.ui.onroad.stop_bar import draw_stop_bar
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -258,7 +258,7 @@ class ModelRenderer(Widget):
     glow = [(x + (sz * 1.35) + g_xo, y + sz + g_yo), (x, y - g_yo), (x - (sz * 1.35) - g_xo, y + sz + g_yo)]
     chevron = [(x + (sz * 1.25), y + sz), (x, y), (x - (sz * 1.25), y + sz)]
 
-    return LeadVehicle(glow=glow, chevron=chevron, fill_alpha=int(fill_alpha))
+    return LeadVehicle(glow=rounded_triangle(glow), chevron=rounded_triangle(chevron), fill_alpha=int(fill_alpha))
 
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""
