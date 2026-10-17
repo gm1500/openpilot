@@ -2,6 +2,7 @@
 import math
 
 from openpilot.common.constants import CV
+from openpilot.selfdrive.car.slc_settings import SLCSettings
 
 MAP_MESSAGE_MAX_AGE = 0.8
 MAP_GPS_MAX_AGE = 3.0
@@ -74,12 +75,20 @@ class MapCruise:
     self._last_qualified: float | None = None
     self.automatic_e2e = self.e2e_fallback = self.fallback_set_pending = False
     self._missing_since: float | None = None
+    self.settings = SLCSettings()
+    self._previous_settings = self.settings
+    self.metric = True
+    self._previous_metric = self.metric
+    self._manual_override = False
+    self.current_kph = 255.
 
   def update(self, enabled: bool, speed_ms: float | None, gps_time: float, now: float, automatic_e2e: bool = False):
     previous_target = self.target_kph
+    settings_changed = self.settings != self._previous_settings or self.metric != self._previous_metric
     enabled = enabled and self.supported
     if enabled and not self.enabled:
       self.tracking = True
+      self._manual_override = False
     self.enabled = enabled
     speed = speed_ms * CV.MS_TO_KPH if speed_ms is not None else math.nan
     # Do not turn an unsupported walking-zone/highway limit into a different limit
@@ -94,9 +103,16 @@ class MapCruise:
     self._last_fix = gps_time
     # A single frozen GPS fix cannot qualify a new target merely by waiting.
     if candidate is not None and now - self._since >= MAP_STABLE_TIME and gps_time > self._first_fix:
-      self.target_kph = candidate
+      self.target_kph = self.settings.target(candidate, self.metric)
+      if settings_changed and not self.settings.accepts(self.target_kph, self.current_kph):
+        self.tracking = False
+      self._previous_settings, self._previous_metric = self.settings, self.metric
       if self.enabled and candidate != self._last_qualified:
-        self.tracking = True
+        permitted = self.settings.accepts(self.target_kph, self.current_kph)
+        if not self._manual_override or self.settings.resume_policy == 0:
+          self.tracking = permitted
+          if permitted:
+            self._manual_override = False
       # A brief map gap recovering the SAME limit is not a new speed zone.
       # Preserve manual selection unless the no-speed E2E fallback recovers.
       self._last_qualified = candidate
@@ -116,7 +132,8 @@ class MapCruise:
       if self.e2e_fallback and previous_target is None and self.target_kph is not None:
         # A real recovery resumes SLC even if it is the same pre-outage limit.
         # Buttons processed after this update can still override it explicitly.
-        self.tracking = True
+        self.tracking = (self.settings.accepts(self.target_kph, self.current_kph) and
+                         (not self._manual_override or self.settings.resume_policy == 0))
 
   def request_fallback(self):
     if self.automatic_e2e:
@@ -133,19 +150,23 @@ class MapCruise:
   def pending_kph(self) -> float | None:
     """Preview qualification without changing tracking or the cruise target."""
     if self.enabled and self.target_kph is None and (self.tracking or self._candidate != self._last_qualified):
-      return self._candidate
+      return self.settings.target(self._candidate, self.metric) if self._candidate is not None else None
     return None
 
   def select_current(self):
     """An explicit SET accepts a fresh match without the automatic debounce."""
     if self.enabled:
       self.tracking = True
+      self._manual_override = False
+      self._previous_settings, self._previous_metric = self.settings, self.metric
       if self._candidate is not None:
-        self.target_kph = self._last_qualified = self._candidate
+        self._last_qualified = self._candidate
+        self.target_kph = self.settings.target(self._candidate, self.metric)
 
   def pause(self):
     """A manual selection also wins over this limit's pending qualification."""
     self.tracking = False
+    self._manual_override = True
     self.fallback_set_pending = False
     if self._candidate is not None:
       self._last_qualified = self._candidate

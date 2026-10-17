@@ -20,6 +20,7 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.map_cruise import read_map_speed, fallback_e2e_ready
+from openpilot.selfdrive.car.slc_settings import SLCSettings
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.controls.lib.longitudinal_mode import automatic_e2e_selected
 
@@ -154,6 +155,7 @@ class Car:
     self.v_cruise_helper = VCruiseHelper(self.CP)
 
     self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
+    self.slc_settings = SLCSettings.read(self.params)
     self.is_metric = self.params.get_bool("IsMetric")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
     self.automatic_e2e = automatic_e2e_selected(self.params, self.CP, self.experimental_mode)
@@ -191,7 +193,8 @@ class Car:
     map_enabled = self.map_cruise_enabled and (not REPLAY or self.sm.seen['mapSpeedLimit'])
     self.v_cruise_helper.update_v_cruise(CS, self.sm['carControl'].enabled, self.is_metric,
                                       map_enabled=map_enabled, map_speed=map_speed, map_gps_time=gps_time, now=now,
-                                      automatic_e2e=self.automatic_e2e, e2e_ready=fallback_e2e_ready(self.sm, now, replay=REPLAY))
+                                      automatic_e2e=self.automatic_e2e, e2e_ready=fallback_e2e_ready(self.sm, now, replay=REPLAY),
+                                      slc_settings=self.slc_settings)
     if self.sm['carControl'].enabled and not self.CC_prev.enabled:
       # Use CarState w/ buttons from the step selfdrived enables on
       self.v_cruise_helper.initialize_v_cruise(self.CS_prev, self.experimental_mode)
@@ -280,6 +283,7 @@ class Car:
   def params_thread(self, evt):
     while not evt.is_set():
       self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
+      self.slc_settings = SLCSettings.read(self.params)
       self.is_metric = self.params.get_bool("IsMetric")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
       self.automatic_e2e = automatic_e2e_selected(self.params, self.CP, self.experimental_mode)

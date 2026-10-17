@@ -10,6 +10,7 @@ from itertools import pairwise
 import requests
 
 from openpilot.common.upload_priority import map_download_priority
+from openpilot.selfdrive.mapd.offline_maps import OfflineWorker
 from openpilot.selfdrive.mapd.speed_rules import parse_speed as parse_speed, road_speed, road_zone
 from openpilot.selfdrive.mapd.zone_time import ZoneClock
 from openpilot.selfdrive.mapd.municipal_zones import fetch_zones, zone_limit, ZONE_TTL, ZONE_RADIUS
@@ -681,6 +682,8 @@ class OSMSpeedLimit:
     self._timed_roads = None
     self._has_timed_roads = False
     self._tracker = RoadTracker()
+    self._offline_tracker = RoadTracker()
+    self._offline = OfflineWorker()
     self.clock = ZoneClock()
     self._thread: threading.Thread | None = None
     self._wake = threading.Event()
@@ -712,12 +715,18 @@ class OSMSpeedLimit:
       self._thread = threading.Thread(target=self._run, name="osm-fetch", daemon=True)
       self._thread.start()
     distance = math.hypot(*offset_metres(fix.latitude, fix.longitude, centre)) if centre is not None else math.inf
+    offline_roads = self._offline.update(fix, now)
+    using_offline = now - fetched_at >= CACHE_TTL or distance >= QUERY_RADIUS - 50
+    tracker = self._offline_tracker if using_offline else self._tracker
     # A fetch may complete just after the caller sampled `now`, before this
     # snapshot was read. Its internal completion timestamp is still fresh.
-    if now - fetched_at >= CACHE_TTL or distance >= QUERY_RADIUS - 50:
+    if using_offline:
       self._tracker.reset()
       self.control_reason = 'cacheUnavailable'
-      return None
+      if offline_roads is None:
+        self._offline_tracker.reset()
+        return None
+      roads = offline_roads
     # Publish the current match in this mapd cycle. No asynchronous grace period
     # or previous-limit hold is needed when GPS heading changes through a turn.
     # Ordinary roads don't need timezone work. Timed roads anywhere in the
@@ -728,10 +737,10 @@ class OSMSpeedLimit:
     local_time = self.clock.local_time(fix, now) if self._has_timed_roads else None
     if local_time is not None:
       local_time = local_time.replace(second=0, microsecond=0)
-    match = self._tracker.update(roads, fix, local_time)
+    match = tracker.update(roads, fix, local_time)
     gps_time = fix.gps_timestamp if fix.estimated else fix.timestamp
-    self.control_reason = 'noRoadMatch' if match is None else 'gpsStale'
-    if match is not None and match.forward is not None and gps_time > 0 and 0 <= now - gps_time <= GPS_MAX_AGE:
+    self.control_reason = 'cacheUnavailable' if using_offline else 'noRoadMatch' if match is None else 'gpsStale'
+    if not using_offline and match is not None and match.forward is not None and gps_time > 0 and 0 <= now - gps_time <= GPS_MAX_AGE:
       self.control_match = match
       self.control = self._tracker.junction_ahead(match)
       self.control_reason = self._tracker.control_reason
@@ -748,7 +757,7 @@ class OSMSpeedLimit:
         restriction = zone_limit(zones, match, self.clock.utc(now), now - zones_at < ZONE_TTL)
     ahead = 0.
     if match is not None and speed is None and advisory is None and restriction is None:
-      speed, ahead = self._tracker.merge_limit(match, fix)
+      speed, ahead = tracker.merge_limit(match, fix)
     if match is not None and speed is not None and ahead == 0.:
       self.zone_type = road_zone(match.road.tags, match.forward, match.local_time)
     if restriction is not None:

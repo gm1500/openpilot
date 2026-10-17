@@ -4,6 +4,7 @@ import numpy as np
 from opendbc.car.structs import car
 from openpilot.common.constants import CV
 from openpilot.selfdrive.car.map_cruise import MapCruise, MapCruisePulse
+from openpilot.selfdrive.car.slc_settings import SLCSettings
 
 
 # WARNING: this value was determined based on the model's training distribution,
@@ -46,8 +47,11 @@ class VCruiseHelper:
     return self.v_cruise_kph != V_CRUISE_UNSET
 
   def update_v_cruise(self, CS, enabled, is_metric, *, map_enabled=False, map_speed=None, map_gps_time=0., now=0.,
-                      automatic_e2e=False, e2e_ready=False):
+                      automatic_e2e=False, e2e_ready=False, slc_settings=None):
     self.v_cruise_kph_last = self.v_cruise_kph
+    self.map_cruise.settings = slc_settings if slc_settings is not None else SLCSettings()
+    self.map_cruise.metric = is_metric
+    self.map_cruise.current_kph = self.v_cruise_kph
     self.map_cruise.update(map_enabled, map_speed, map_gps_time, now, automatic_e2e)
     map_applied = False
 
