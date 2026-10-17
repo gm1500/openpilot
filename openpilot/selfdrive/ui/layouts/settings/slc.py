@@ -68,8 +68,9 @@ class SLCLayout(Widget):
       ListItem('After manual override', action_item=SettingButtons(self.params, 'SlcResumePolicy', ['Next limit', 'SET only']),
         description='Next limit allows SLC to resume at a changed road limit, subject to the rule above. ' +
                     'SET only preserves your manual choice until you explicitly select the map target again.'),
-      ListItem('Offset type', action_item=SettingButtons(self.params, 'SlcOffsetType', ['Speed units', 'Percent']),
-        description='Speed units follow the device km/h or mph selection. Percent scales with the posted limit.'),
+      ListItem('Offset type', action_item=SettingButtons(self.params, 'SlcOffsetType',
+        [lambda: 'km/h' if self.params.get_bool('IsMetric') else 'mph', 'Percent']),
+        description='Choose a fixed speed offset or a percentage of the posted limit.'),
       ListItem('Speed offset', action_item=OffsetButtons(self.params),
         description='Adjust in steps of 5, from -30 to +30. Zero uses the posted limit. Only the cruise target changes; ' +
                     'the displayed road limit stays unchanged. Existing cruise bounds still apply.'),

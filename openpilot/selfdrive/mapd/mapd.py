@@ -6,6 +6,7 @@ from opendbc.car.structs import car
 from openpilot.cereal import messaging
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
+from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.mapd.osm_speed_limit import OSMSpeedLimit, gps_fix
 from openpilot.selfdrive.mapd.heading import vehicle_motion
 from openpilot.selfdrive.mapd.position import MapPosition
@@ -24,6 +25,7 @@ def main():
   # Wall time only checks checkpoint age across boots; integration uses monotonic time.
   position = MapPosition(params, vehicle_id, time.time())  # noqa: TID251
   rk = Ratekeeper(5, print_delay_threshold=None)
+  previous_speed_source = None
   while True:
     sm.update(0)
     now = time.monotonic()
@@ -33,6 +35,14 @@ def main():
     provider.clock.observe(raw_fix, now)
     fix = position.update(raw_fix, vehicle_motion(sm, now, signed_speed), now, time.time())  # noqa: TID251
     sample = provider.update(fix, now)
+    speed_source = (provider.speed_source, provider.speed_match.road.way_id if provider.speed_match is not None else 0,
+                    sample[1] if sample is not None else None, sample[2] if sample is not None else None)
+    if speed_source != previous_speed_source:
+      source, way_id, speed, advisory = speed_source
+      cloudlog.event('mapd.speed_source', source=source, way_id=way_id,
+                     speed_kph=round(speed * 3.6, 3) if speed is not None else None,
+                     advisory_kph=round(advisory * 3.6, 3) if advisory is not None else None)
+      previous_speed_source = speed_source
     msg = messaging.new_message('mapSpeedLimit')
     msg.valid = sample is not None and any(speed is not None for speed in sample[1:3])
     if sample is not None:

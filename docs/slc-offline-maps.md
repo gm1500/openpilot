@@ -1,6 +1,6 @@
 # SLC preferences and offline maps
 
-This feature is on the `slc-offline-maps` test branch. It includes the `batmobile` upload-priority fix: Sentry route uploads wait while driving, and map requests have priority over upload traffic. Normal driving uploads otherwise retain their existing behavior.
+This feature is integrated into `batmobile`. Sentry route uploads wait while driving, and map requests have priority over upload traffic. Normal driving uploads otherwise retain their existing behavior.
 
 ## Settings → SLC
 
@@ -11,7 +11,7 @@ The comma 3X settings panel provides:
 | SLC this drive | Same enable state as the onroad SLC button |
 | New speed limit | Automatic; Lower only; SET to accept |
 | After manual override | Resume at the next changed limit; SET only |
-| Offset type | Speed units (km/h or mph); Percent |
+| Offset type | km/h or mph, following the device unit setting; Percent |
 | Speed offset | −/+ buttons, steps of 5, range −30 to +30; default zero |
 | Map area | North America (Canada, U.S., Mexico); individual country |
 | Offline maps | Download, Update, Delete, Cancel; progress, storage and download date |
@@ -34,6 +34,10 @@ Installed tiles provide an independent local speed-limit fallback when the norma
 
 Live maps work without installing any regional packages. The live query remains 1.5 km on the original Overpass provider, with the same 2 MiB response limit and fresh-position/coverage checks. A fresh online result takes priority. The bulk format does not contain OSM node IDs or complete junction topology, so offline geometry is not used to invent junction connections. Live data continues to supply richer junction/control information. This version therefore supports offline speed limits, not complete offline replacement of every map-derived feature.
 
+When the car leaves the live query circle, the offline matcher uses recent live speed tags for an identical way ID, complete geometry and allowed direction. Tags expire with the existing ten-minute live cache or are replaced by the next live response. Raw legal/advisory, directional and conditional tags are reconciled before matching, so schedules are reevaluated and removed or unsupported limits do not revive old offline values. Offline geometry and coverage remain required; no junction topology is inferred and nothing is written to the installed tiles. Different ways and changed geometry retain their own offline tags.
+
+Source, matched way ID and published limits are logged on changes as `mapd.speed_source`, including transitions to no match. `offline+live` identifies offline geometry using reconciled live speed tags. A newly fetched map is not proof that its speed tags reflect current signs.
+
 Live retrieval allows 30 seconds of server execution and a 45-second socket read timeout, with a 60-second response budget checked after each chunk (a final blocked read is bounded separately by the socket timeout). Normal failed-request waits are 30, then 60 seconds, capped at 60; a server's longer `Retry-After` is respected. A new Wi-Fi/cellular connection can shorten a failed-request wait to five seconds after the last attempt, without bypassing server cooldowns or triggering needless successful-cache refreshes. Requests remain serial and run outside the map publication/control loop.
 
 A successful slow download counts toward the normal 30-second refresh interval, so a car that has already travelled 700 m does not wait another 30 seconds before querying its current position. Municipal queries also use an updated fix after road downloads. Request start, HTTP/error status, duration, header wait, response bytes and road count are logged without coordinates or response bodies. No live cache is written to disk. Server availability and slow responses can still leave gaps; installed regional maps remain optional fallback coverage.
@@ -42,15 +46,15 @@ Regional packages use the public `map-data.pfeifer.dev` service used by the upst
 
 ## Install / update
 
-Run while parked with stable power. The helper switches to `slc-offline-maps`, updates submodules and LFS assets, rebuilds the native parameter registry without build-cache reuse, verifies the new keys, checks the branch's AGNOS requirement, and reboots only after success. It never changes Sentry enable or shutdown preferences and never deletes footage or installed maps. It refuses tracked local changes or a pending shutdown.
+Run while parked with stable power. The helper defaults to `batmobile` (or accepts `slc-offline-maps` as its first argument), updates submodules and LFS assets, rebuilds the native parameter registry without build-cache reuse, verifies the new keys, checks the branch's AGNOS requirement, and reboots only after success. It never changes Sentry enable or shutdown preferences and never deletes footage or installed maps. It refuses tracked local changes or a pending shutdown.
 
 ```sh
 cd /data/openpilot &&
-git fetch origin slc-offline-maps &&
+git fetch origin batmobile &&
 git show FETCH_HEAD:tools/slc_update.sh > /tmp/slc-update.sh &&
-tmux new-session -s slc-update bash -ic 'bash /tmp/slc-update.sh; exec bash'
+tmux new-session -s slc-update bash -ic 'bash /tmp/slc-update.sh batmobile; exec bash'
 ```
 
 If SSH disconnects during the build, reconnect with `tmux attach -t slc-update`. The log is `/data/slc-update.log`. A successful reboot ends the SSH/tmux session. The native rebuild is required for these new settings; rebooting an unrecompiled old registry is insufficient.
 
-Validation includes packed map decoding, interrupted/corrupt installs, restart persistence, shared-region deletion, storage reserves, map fallback, and cruise override policies. Physical comma 3X download/display behavior and road validation still need device testing before merging this feature into `batmobile`.
+Validation includes packed map decoding, interrupted/corrupt installs, restart persistence, shared-region deletion, storage reserves, map fallback, speed-tag reconciliation, and cruise override policies. Real installed-tile/GPS replay verifies the reported same-way disagreement; future provider data and changed road conditions still require road validation.

@@ -10,7 +10,12 @@ if ! flock -n 9; then
   exit 1
 fi
 exec > >(tee -a /data/slc-update.log) 2>&1
-echo "[START] $(date -Is) — SLC offline maps test branch"
+target="${1:-batmobile}"
+case "$target" in
+  batmobile|slc-offline-maps) ;;
+  *) echo "[ERROR] Unsupported update branch: $target" >&2; exit 1 ;;
+esac
+echo "[START] $(date -Is) - SLC update on $target"
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   echo "[ERROR] Local changes found. Preserve them before updating." >&2
   exit 1
@@ -35,7 +40,6 @@ PY
 }
 check_parked
 
-target=slc-offline-maps
 echo "[UPDATE] Fetching origin/$target..."
 git fetch --no-tags origin "refs/heads/$target:refs/remotes/origin/$target"
 if git show-ref --verify --quiet "refs/heads/$target"; then

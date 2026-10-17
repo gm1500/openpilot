@@ -706,6 +706,9 @@ class OSMSpeedLimit:
     self._tracker = RoadTracker()
     self._offline_tracker = RoadTracker()
     self._offline = OfflineWorker()
+    self._offline_speed_inputs = (None, None)
+    self._offline_speed_roads = ()
+    self._offline_live_ids: set[int] = set()
     self.clock = ZoneClock()
     self._thread: threading.Thread | None = None
     self._wake = threading.Event()
@@ -713,9 +716,38 @@ class OSMSpeedLimit:
     self._network_generation = 0
     self.control: Junction | None = None
     self.control_match: RoadMatch | None = None
+    self.speed_match: RoadMatch | None = None
+    self.speed_source = 'none'
     self.control_reason = 'noPosition'
     self.zone_type = 'none'
     self.zone_source = ''
+
+  def _offline_with_live_speeds(self, offline_roads: tuple[Road, ...], live_roads: tuple[Road, ...]) -> tuple[Road, ...]:
+    if offline_roads is self._offline_speed_inputs[0] and live_roads is self._offline_speed_inputs[1]:
+      return self._offline_speed_roads
+    live_by_id = {road.way_id: road for road in live_roads if road.way_id > 0}
+    combined = []
+    self._offline_live_ids = set()
+    for road in offline_roads:
+      live = live_by_id.get(road.way_id)
+      # Only reconcile the same complete, directed way. Offline packing adds
+      # floating-point noise; OSM coordinates have seven decimal places.
+      if (live is not None and allowed_directions(live) == allowed_directions(road) and
+          len(live.geometry) == len(road.geometry) and
+          all(round(a, 7) == round(b, 7) for p, q in zip(live.geometry, road.geometry, strict=True) for a, b in zip(p, q, strict=True))):
+        keys = {key for key in road.tags.keys() | live.tags.keys()
+                if key == 'maxspeed' or key.startswith('maxspeed:') or key in ('school_zone', 'hazard')}
+        tags = {key: value for key, value in road.tags.items() if key not in keys}
+        tags.update((key, live.tags[key]) for key in keys if key in live.tags)
+        if tags != road.tags:
+          # Preserve raw conditions/directional tags, including removals and
+          # unsupported restrictions. Reevaluate them at the current position/time.
+          road = replace(road, tags=tags)
+          self._offline_live_ids.add(road.way_id)
+      combined.append(road)
+    self._offline_speed_inputs = offline_roads, live_roads
+    self._offline_speed_roads = tuple(combined)
+    return self._offline_speed_roads
 
   def update_network(self, network_type: str):
     # Signal-strength changes are not a new connection. A Wi-Fi/cellular
@@ -729,7 +761,8 @@ class OSMSpeedLimit:
       self._wake.set()
 
   def update(self, fix: GpsFix | None, now: float) -> tuple[GpsFix, float | None, float | None, float] | None:
-    self.control = self.control_match = None
+    self.control = self.control_match = self.speed_match = None
+    self.speed_source = 'none'
     self.control_reason = 'noPosition'
     self.zone_type = 'none'
     self.zone_source = ''
@@ -761,7 +794,10 @@ class OSMSpeedLimit:
       if offline_roads is None:
         self._offline_tracker.reset()
         return None
-      roads = offline_roads
+      # The live coverage circle can expire before the fetched way's geometry
+      # ends. Reconcile speed tags only; offline matching/coverage and the live
+      # ten-minute TTL still apply. Never synthesize junction node IDs.
+      roads = self._offline_with_live_speeds(offline_roads, roads if now - fetched_at < CACHE_TTL else ())
     # Publish the current match in this mapd cycle. No asynchronous grace period
     # or previous-limit hold is needed when GPS heading changes through a turn.
     # Ordinary roads don't need timezone work. Timed roads anywhere in the
@@ -779,6 +815,11 @@ class OSMSpeedLimit:
       self.control_match = match
       self.control = self._tracker.junction_ahead(match)
       self.control_reason = self._tracker.control_reason
+    self.speed_match = match
+    if match is not None:
+      self.speed_source = 'offline' if using_offline else 'live'
+      if using_offline and match.road.way_id in self._offline_live_ids:
+        self.speed_source = 'offline+live'
     speed = match.speed if match is not None else None
     advisory = match.advisory_speed if match is not None else None
     unresolved = match is not None and speed is None and any(k.startswith('maxspeed:') and k.endswith(':conditional') and
