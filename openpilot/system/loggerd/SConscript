@@ -17,3 +17,7 @@ libs.insert(0, logger_lib)
 env.Program('loggerd', ['loggerd.cc'], LIBS=libs, FRAMEWORKS=frameworks)
 env.Program('encoderd', ['encoderd.cc'], LIBS=libs, FRAMEWORKS=frameworks)
 env.Program('bootlog.cc', LIBS=libs, FRAMEWORKS=frameworks)
+
+env.Program('sentry_loggerd', ['sentry_loggerd.cc'], LIBS=libs, FRAMEWORKS=frameworks)
+if GetOption('extras'):
+  env.Program('test_sentry_recorder', ['../sentry/tests/test_session_recorder.cc'], LIBS=libs, FRAMEWORKS=frameworks)

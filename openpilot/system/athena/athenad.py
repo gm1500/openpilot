@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import heapq
 import itertools
 import json
 import math
@@ -37,10 +38,12 @@ from openpilot.common.api import Api, get_key_pair
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.utils import CallbackReader, get_upload_stream
 from openpilot.common.params import Params
+from openpilot.common.upload_priority import MapAwareReader, UploadDeferred, POLL_INTERVAL, map_download_active, wait_for_map_download
 from openpilot.common.realtime import set_core_affinity
 from openpilot.common.hardware import HARDWARE, PC
 from openpilot.system.loggerd.config import CAMERA_FPS, SEGMENT_LENGTH
 from openpilot.system.loggerd.xattr_cache import getxattr, setxattr
+from openpilot.system.sentry.storage import is_sentry_file
 from openpilot.tools.lib.helpers import RE
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.version import get_build_metadata
@@ -270,15 +273,43 @@ def cb(sm, item, tid, end_event: threading.Event, sz: int, cur: int) -> None:
   cur_upload_items[tid] = replace(item, progress=cur / sz if sz else 1)
 
 
+def next_upload_item(offroad: bool) -> UploadItem:
+  # Select under the PriorityQueue mutex so parked-only requests cannot occupy
+  # all workers or starve driving uploads behind them. Held items stay queued,
+  # with their original priority, creation time and retry count.
+  with upload_queue.not_empty:
+    eligible = []
+    sentry_dirs = {}
+    for i, item in enumerate(upload_queue.queue):
+      if not offroad and item.id not in cancelled_uploads:
+        directory = os.path.dirname(item.path)
+        if directory not in sentry_dirs:
+          sentry_dirs[directory] = is_sentry_file(item.path)
+        if sentry_dirs[directory]:
+          continue
+      eligible.append(i)
+    if not eligible:
+      raise queue.Empty
+    i = min(eligible, key=lambda i: upload_queue.queue[i].priority)
+    item = upload_queue.queue.pop(i)
+    heapq.heapify(upload_queue.queue)
+    upload_queue.not_full.notify()
+    return item
+
+
 def upload_handler(end_event: threading.Event) -> None:
   sm = messaging.SubMaster(['deviceState'])
+  params = Params()
   tid = threading.get_ident()
 
   while not end_event.is_set():
     cur_upload_items[tid] = None
+    if map_download_active():
+      end_event.wait(POLL_INTERVAL)
+      continue
 
     try:
-      cur_upload_items[tid] = item = replace(upload_queue.get(timeout=1), current=True)
+      cur_upload_items[tid] = item = replace(next_upload_item(params.get_bool("IsOffroad")), current=True)
 
       if item.id in cancelled_uploads:
         cancelled_uploads.remove(item.id)
@@ -321,9 +352,11 @@ def upload_handler(end_event: threading.Event) -> None:
       except AbortTransferException:
         cloudlog.event("athena.upload_handler.abort", fn=fn, sz=sz, network_type=network_type, metered=metered)
         retry_upload(tid, end_event, False)
+      except UploadDeferred:
+        retry_upload(tid, end_event, False)
 
     except queue.Empty:
-      pass
+      end_event.wait(1)
     except Exception:
       cloudlog.exception("athena.upload_handler.exception")
 
@@ -331,17 +364,28 @@ def upload_handler(end_event: threading.Event) -> None:
 def _do_upload(upload_item: UploadItem, callback: Callable | None = None) -> requests.Response:
   path = upload_item.path
   compress = False
+  sentry = is_sentry_file(path)
+  params = Params() if sentry else None
+  stream = None
+  content_length = 1
+
+  def check():
+    if callback is not None:
+      callback(content_length, stream.tell() if stream is not None else 0)
+    if sentry and not params.get_bool("IsOffroad"):
+      raise UploadDeferred
+
+  wait_for_map_download(check)
 
   # If file does not exist, but does exist without the .zst extension we will compress on the fly
   if not os.path.exists(path) and os.path.exists(strip_zst_extension(path)):
     path = strip_zst_extension(path)
     compress = True
 
-  stream = None
   try:
     stream, content_length = get_upload_stream(path, compress)
     response = UPLOAD_SESS.put(upload_item.url,
-                               data=CallbackReader(stream, callback, content_length) if callback else stream,
+                               data=MapAwareReader(CallbackReader(stream, callback, content_length) if callback else stream, check),
                                headers={**upload_item.headers, 'Content-Length': str(content_length)},
                                timeout=30)
     return response

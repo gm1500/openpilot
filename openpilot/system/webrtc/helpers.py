@@ -5,6 +5,13 @@ from dataclasses import asdict, dataclass, field
 
 WEBRTCD_PORT = 5001
 
+
+def livestream_video_active(params) -> bool:
+  # Connect keeps its peer connected when the viewer closes. Only enabled video
+  # owns the cameras; an idle/prewarmed peer must not prevent parked capture.
+  return params.get_bool("IsLiveStreaming") and params.get_bool("LivestreamVideoActive")
+
+
 @dataclass
 class StreamRequestBody:
   sdp: str
