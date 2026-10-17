@@ -88,7 +88,10 @@ file uploads. A RAM-only process lock pauses new transfers and further upload bo
 chunks, releases on success, failure or process exit, and expires after 120 seconds
 if the worker hangs. Uploads continue during cache lookup and map retry backoff.
 Sentry backlog waits until offroad; regular driving uploads resume between map
-requests. This does not change the original 1.5 km radius, endpoint or retry timing.
+requests. The original 1.5 km radius and endpoint are retained. The live request
+uses a 45-second read timeout; normal failure backoff is capped at 60 seconds,
+with prompt Wi-Fi/cellular handoff recovery and respect for server `Retry-After`.
+See `slc-offline-maps.md` for retrieval timing and diagnostics.
 
 Edmonton's official daily playground hours are an example, not a global default:
 https://www.edmontonpolice.ca/TrafficVehicles/TrafficSafety/SchoolZones
