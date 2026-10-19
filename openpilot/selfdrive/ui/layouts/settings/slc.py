@@ -5,6 +5,7 @@ import time
 from openpilot.common.params import Params
 from openpilot.selfdrive.car.slc_settings import SLCSettings
 from openpilot.selfdrive.mapd.offline_maps import region_catalog, region_name
+from openpilot.selfdrive.mapd.map_schedule import WEEKDAYS
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets import Widget, DialogResult
 from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
@@ -60,6 +61,8 @@ class SLCLayout(Widget):
     self.actions = MultipleButtonAction(['Download', 'Update', 'Delete'], button_width=240, callback=self.map_action)
     self.actions.is_button_selected = lambda i: False
     self.cancel = button_item('Map download', 'CANCEL', callback=lambda: self.request('cancel'))
+    self.update_day = button_item('Weekly update day', self.weekday_label,
+      'If the device is off or away from Wi-Fi, update at the next parked Wi-Fi connection.', callback=self.select_weekday)
     self.items = [
       self.enable,
       ListItem('New speed limit', action_item=SettingButtons(self.params, 'SlcChangePolicy', ['Automatic', 'Lower only', 'SET to accept']),
@@ -81,12 +84,17 @@ class SLCLayout(Widget):
                     'Live data still supplies richer junction information. Large regions can require several GB. ' +
                     'Downloads run while parked on an unmetered connection. Turn off Cellular Metered in network settings to allow cellular.'),
       self.cancel,
+      ListItem('Automatic map updates', action_item=SettingButtons(self.params, 'OfflineMapUpdateSchedule', ['Manual', 'Daily', 'Weekly']),
+        description='Refresh all fully downloaded areas while parked on unmetered Wi-Fi. ' +
+                    'Daily runs once per calendar day; Weekly runs on the selected weekday, or the next available connection. ' +
+                    'Uses your saved local timezone, or UTC until it is known. Manual is the default.'),
+      self.update_day,
       text_item('Download status', self.progress_label,
                 lambda: self.status.get('error') or 'Progress counts validated map groups. Download resumes completed groups after interruption.'),
       text_item('Map storage', lambda: f'{self.status.get("installed_bytes", 0) / 1024**3:.2f} GB',
         'Keeps at least 5 GB and 10% of storage free for recordings. Interrupted downloads retain completed map groups.'),
       text_item('Last update', self.date_label,
-        'This is the download date, not the age of every road in the source database. Use Update to refresh your selected area.'),
+        'This is the last completed download date, not the age of every road in the source database. Update refreshes the selected area.'),
       text_item('Map data', 'OpenStreetMap contributors',
         'Open Database License: openstreetmap.org/copyright. Regional packages provided by map-data.pfeifer.dev.'),
     ]
@@ -111,6 +119,17 @@ class SLCLayout(Widget):
 
   def request(self, action):
     self.params.put('OfflineMapRequest', {'action': action, 'region': self.region(), 'id': time.time_ns()}, block=True)
+
+  def weekday_label(self):
+    day = self.params.get('OfflineMapUpdateWeekday', return_default=True)
+    return WEEKDAYS[day] if day in range(7) else WEEKDAYS[0]
+
+  def select_weekday(self):
+    def selected(result):
+      if result == DialogResult.CONFIRM and dialog.selection in WEEKDAYS:
+        self.params.put('OfflineMapUpdateWeekday', WEEKDAYS.index(dialog.selection), block=True)
+    dialog = MultiOptionDialog('Weekly update day', list(WEEKDAYS), current=self.weekday_label(), callback=selected)
+    gui_app.push_widget(dialog)
 
   def map_action(self, index):
     action = ('download', 'update', 'delete')[index]
@@ -146,6 +165,7 @@ class SLCLayout(Widget):
     self.region_buttons.set_enabled(not busy)
     self.actions.set_enabled(not busy)
     self.cancel.set_visible(busy)
+    self.update_day.set_visible(self.params.get('OfflineMapUpdateSchedule', return_default=True) == 2)
     self.enable.action_item.set_state(self.params.get('MapCruiseEnabled', return_default=True))
 
   def _render(self, rect):

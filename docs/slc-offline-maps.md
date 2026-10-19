@@ -15,6 +15,8 @@ The comma 3X settings panel provides:
 | Speed offset | −/+ buttons, steps of 5, range −30 to +30; default zero |
 | Map area | North America (Canada, U.S., Mexico); individual country |
 | Offline maps | Download, Update, Delete, Cancel; progress, storage and download date |
+| Automatic map updates | Manual (default); Daily; Weekly |
+| Weekly update day | Monday through Sunday; shown when Weekly is selected |
 
 Offsets affect the cruise target, not the displayed posted limit. Targets keep the existing 8–145 km/h bounds and only operate on cars supporting the existing SLC integration. Ordinary cruise +/− buttons retain manual control. New limits retain the existing two-second qualification and fresh-position checks. SET explicitly accepts a fresh map limit; the existing current-speed floor on explicit SET is unchanged.
 
@@ -24,9 +26,17 @@ Offsets affect the cruise target, not the displayed posted limit. Targets keep t
 
 Maps live under `/data/maps/slc`, outside the openpilot checkout. They survive reboots and branch updates. They are not erased by the normal recording deleter. Both United States and North America include Alaska and Hawaii; individual U.S. states are not offered in the area picker. The country catalog determines other geographic coverage. Regions overlap, and shared groups are downloaded once and retained while another installed region uses them.
 
-Bulk downloads and updates run while parked on any connected network reported as unmetered. The existing **Cellular Metered** setting controls cellular eligibility; turn it off to allow cellular downloads. Wi-Fi uses its own metered setting. Eligibility follows `deviceState.networkMetered`, so a toggle change takes effect when hardwared refreshes the network state (normally within about ten seconds). A metered connection, disconnection or driving pauses the job. Completed map groups survive cancellation, connection loss and reboot. An interrupted group restarts, while completed groups are reused by **Download**. **Update** refreshes every group in the selected area. Old groups stay usable until their replacements validate and install atomically. **Delete** removes the selected region and groups no other installed region owns.
+Manual bulk downloads and updates run while parked on any connected network reported as unmetered. The existing **Cellular Metered** setting controls cellular eligibility; turn it off to allow cellular downloads. Wi-Fi uses its own metered setting. Eligibility follows `deviceState.networkMetered`, so a toggle change takes effect when hardwared refreshes the network state (normally within about ten seconds). A metered connection, disconnection or driving pauses the job. Completed map groups survive cancellation, connection loss and reboot. An interrupted group restarts, while completed groups are reused by **Download**. **Update** refreshes every group in the selected area. Old groups stay usable until their replacements validate and install atomically. **Delete** removes the selected region and groups no other installed region owns.
 
-Downloads preserve at least 5 GB **and** 10% of total storage for recordings. A large continent can require several GB; there is no reliable fixed size estimate in the provider catalog. Download status reports installed size. Archive paths, sizes, schema, tile bounds and gzip checksums are checked before installation. An error stops the job instead of repeatedly retrying a bad response; Download can resume the retained groups.
+Downloads preserve at least 5 GB **and** 10% of total storage for recordings. A large continent can require several GB; there is no reliable fixed size estimate in the provider catalog. Download status reports installed size. Archive paths, sizes, schema, tile bounds and gzip checksums are checked before installation. A manual download error stops the job; Download can resume the retained groups. Scheduled jobs keep progress and retry after one hour.
+
+## Automatic refreshes
+
+Choose **Daily** or **Weekly** and a weekday in Settings → SLC. Manual is the initial setting. Automatic updates refresh every fully downloaded region on **unmetered Wi-Fi while offroad**, even if Cellular Metered is off. They pause when driving starts, Wi-Fi disconnects, or the connection becomes metered. Partially downloaded regions still require an explicit Download.
+
+Daily uses the local calendar day. Weekly uses the most recent selected weekday, catching up at the next parked Wi-Fi connection if the device was off or away. The saved geographic timezone handles daylight-saving changes; UTC is used until a local timezone is known. An invalid system clock cannot schedule downloads. A completed manual update satisfies that period too, and overlapping regions reuse groups already refreshed during the period.
+
+Installed maps and their last successful update date remain available during replacement. Progress and the one-hour failure retry survive restart. Cancel suppresses automatic refreshes for all installed areas for the current calendar period; manual Update remains available. Selecting Manual cancels an automatic job without deleting maps. Cancel a running job before requesting another download or deletion; a rejected request never discards its progress.
 
 ## Map behavior
 
@@ -46,7 +56,7 @@ Regional packages use the public `map-data.pfeifer.dev` service used by the upst
 
 ## Install / update
 
-Run while parked with stable power. The helper defaults to `batmobile` (or accepts `slc-offline-maps` as its first argument), updates submodules and LFS assets, rebuilds the native parameter registry without build-cache reuse, verifies the new keys, checks the branch's AGNOS requirement, and reboots only after success. It never changes Sentry enable or shutdown preferences and never deletes footage or installed maps. It refuses tracked local changes or a pending shutdown.
+Run while parked with stable power. The helper updates `batmobile`, updates submodules and LFS assets, rebuilds the native parameter registry without build-cache reuse, verifies the new keys, checks the branch's AGNOS requirement, and reboots only after success. It never changes Sentry enable or shutdown preferences and never deletes footage or installed maps. It refuses tracked local changes or a pending shutdown.
 
 ```sh
 cd /data/openpilot &&
