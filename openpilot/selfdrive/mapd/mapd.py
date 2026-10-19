@@ -31,7 +31,7 @@ def main():
     now = time.monotonic()
     if sm.updated['deviceState'] and sm.valid['deviceState'] and 0 <= now - sm.recv_time['deviceState'] < 2.:
       provider.update_network(str(sm['deviceState'].networkType))
-    raw_fix = gps_fix(sm, 1, now)
+    raw_fix = gps_fix(sm, now)
     provider.clock.observe(raw_fix, now)
     fix = position.update(raw_fix, vehicle_motion(sm, now, signed_speed), now, time.time())  # noqa: TID251
     sample = provider.update(fix, now)
