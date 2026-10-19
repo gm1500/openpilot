@@ -43,6 +43,36 @@ def test_prompt_dismissal_does_not_skip_the_controller_wifi_default(parking):
   assert parking_mode(params) == 'off' and params.get('SentryParkingModeSource') == 'wifi'
 
 
+@pytest.mark.parametrize('prompt_dismissed', [False, True])
+def test_delayed_wifi_skips_untouched_default_and_stays_off(parking, prompt_dismissed):
+  params, sm = parking
+  sm['deviceState'].networkType = log.DeviceState.NetworkType.none
+  apply_parking_default(params, sm, 100., allow_wifi_override=True)
+  params.put_bool('SentryModePrompted', prompt_dismissed, block=True)
+  sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi
+  apply_parking_default(params, sm, 101., allow_wifi_override=True)
+  assert parking_mode(params) == 'off' and params.get('SentryParkingModeSource') == 'wifi'
+  sm['deviceState'].networkType = log.DeviceState.NetworkType.none
+  apply_parking_default(params, sm, 101., allow_wifi_override=True)
+  assert parking_mode(params) == 'off'
+  assert params.get_bool('SentryEnabled')
+
+
+@pytest.mark.parametrize('blocker', ['manual_low', 'manual_high', 'manual_off', 'already_armed', 'skip_disabled', 'stale'])
+def test_delayed_wifi_preserves_explicit_choices_and_requires_fresh_arming_state(parking, blocker):
+  params, sm = parking
+  sm['deviceState'].networkType = log.DeviceState.NetworkType.none
+  apply_parking_default(params, sm, 100., allow_wifi_override=True)
+  if blocker.startswith('manual'):
+    select_parking_mode(params, {'manual_low': LOW_RISK, 'manual_high': HIGH_RISK, 'manual_off': 'off'}[blocker])
+  if blocker == 'skip_disabled':
+    params.put_bool('SentrySkipOnWifi', False, block=True)
+  expected = parking_mode(params)
+  sm['deviceState'].networkType = log.DeviceState.NetworkType.wifi
+  apply_parking_default(params, sm, 103. if blocker == 'stale' else 101., allow_wifi_override=blocker != 'already_armed')
+  assert parking_mode(params) == expected
+
+
 @pytest.mark.parametrize('choice', [LOW_RISK, HIGH_RISK, 2])
 def test_livestream_choice_overrides_wifi_only_for_this_parking(parking, choice):
   params, sm = parking

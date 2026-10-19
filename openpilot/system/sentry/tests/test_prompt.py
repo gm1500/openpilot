@@ -112,7 +112,7 @@ def test_each_mode_tap_restarts_choice_deadline_including_repeated_off(prompt, m
   view, params, sm, device = prompt
   view.update(True)
   for now, mode in ((105., HIGH_RISK), (110., 'off'), (115., LOW_RISK), (120., 'off'), (125., 'off')):
-    monkeypatch.setattr(ui.time, 'monotonic', lambda: now)
+    monkeypatch.setattr(ui.time, 'monotonic', lambda now=now: now)
     view.choose(mode)
     sm.recv_time['sentryState'] = now
     view.update(True)
@@ -141,7 +141,7 @@ def test_overriding_off_follows_resumed_arming_not_off_deadline_or_old_state(pro
   assert view.opened and view.status == 'Starting Sentry'
   assert not params.get_bool('SentryOffThisDrive')
   for now, phase in ((130., 'Arming 15 s (Camera warmup 10 s)'), (140., 'Arming 5 s'), (145., 'Watching')):
-    monkeypatch.setattr(ui.time, 'monotonic', lambda: now)
+    monkeypatch.setattr(ui.time, 'monotonic', lambda now=now: now)
     sm.recv_time['sentryState'] = now
     sm['sentryState'].phase = phase
     view.update(True)

@@ -169,7 +169,8 @@ class SentryLayout(Widget):
       self._enable_toggle,
       self._livestream_toggle,
       self.toggle('SentrySkipOnWifi', 'Skip Sentry on Wi-Fi',
-                  'Defaults to Off this parking when parked on Wi-Fi, even with the screen off or no prompt. ' +
+                  'Defaults to Off this parking if Wi-Fi connects before arming finishes, even with the screen off or no prompt. ' +
+                  'After Sentry has armed, a later Wi-Fi connection does not turn it off. ' +
                   'Select Low Risk or High Risk above to override it for this parking session.'),
       ListItem('Arming delay', description=f'Includes {CAMERA_WARMUP_SECONDS:g} seconds of camera warmup once video is available. ' +
                'Footage buffers throughout; motion saves and the eye wait until the total delay finishes.',
