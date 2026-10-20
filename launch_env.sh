@@ -18,5 +18,11 @@ export QCOM_PRIORITY=12
 if [ -z "$AGNOS_VERSION" ]; then
   export AGNOS_VERSION="19.9"
 fi
+export AGNOS_MANIFEST="openpilot/common/hardware/comma/agnos.json"
+if grep -q '^comma tici' /sys/firmware/devicetree/base/model 2>/dev/null; then
+  # AGNOS 13+ removed the original comma 3 device tree and AR0231 support.
+  export AGNOS_VERSION="12.8"
+  export AGNOS_MANIFEST="openpilot/common/hardware/comma/agnos-tici.json"
+fi
 
 export STAGING_ROOT="/data/safe_staging"

@@ -1,3 +1,5 @@
+**Original comma 3 port candidate:** this is `batmobile-c3`. See [compatibility and hardware validation notes](docs/BATMOBILE_C3.md) before installing.
+
 <div align="center" style="text-align: center;">
 
 <h1>openpilot</h1>

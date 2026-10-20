@@ -63,6 +63,8 @@ elif name == 'sudo':
     (commands/name).symlink_to(fake)
   params = tmp_path/'openpilot/common/params.py'
   params.parent.mkdir(parents=True)
+  (tmp_path/'openpilot/__init__.py').touch()
+  (tmp_path/'openpilot/common/__init__.py').touch()
   params.write_text('''
 import json, os
 from pathlib import Path
@@ -97,7 +99,7 @@ class Params:
     state[key] = value
     self.state.write_text(json.dumps(state))
 ''')
-  (tmp_path/'launch_env.sh').write_text('export AGNOS_VERSION="19.9"\n')
+  (tmp_path/'launch_env.sh').write_text('export AGNOS_VERSION="19.9"\nexport AGNOS_MANIFEST="openpilot/common/hardware/comma/agnos.json"\n')
   (tmp_path/'AGNOS').touch()
   (tmp_path/'VERSION').write_text('19.8\n')
   script = SCRIPT.read_text().replace('cd /data/openpilot', f'cd {shlex.quote(str(tmp_path))}')
@@ -132,7 +134,7 @@ def test_update_failure_never_reboots(updater, stage):
 
 
 @pytest.mark.parametrize('current_os,enabled', [('19.9', '0'), ('19.8', '1')])
-@pytest.mark.parametrize('branch', ['batmobile', 'sentry-session-routes-poc'])
+@pytest.mark.parametrize('branch', ['batmobile', 'batmobile-c3', 'sentry-session-routes-poc'])
 def test_success_builds_before_os_swap_and_reboot(updater, current_os, enabled, branch):
   run, root = updater
   (root/'VERSION').write_text(current_os+'\n')

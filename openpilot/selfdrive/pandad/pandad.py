@@ -13,13 +13,13 @@ from openpilot.common.hardware import HARDWARE
 from openpilot.common.swaglog import cloudlog
 
 
-def get_expected_signature() -> bytes:
-  fn = os.path.join(FW_PATH, McuType.H7.config.app_fn)
+def get_expected_signature(mcu_type: McuType = McuType.H7) -> bytes:
+  fn = os.path.join(FW_PATH, mcu_type.config.app_fn)
   return Panda.get_signature_from_firmware(fn)
 
 def flash_panda(panda_serial: str):
   panda = Panda(panda_serial)
-  fw_signature = get_expected_signature()
+  fw_signature = get_expected_signature(panda.get_mcu_type())
   internal_panda = panda.is_internal()
 
   panda_version = "bootstub" if panda.bootstub else panda.get_version()

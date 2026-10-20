@@ -22,8 +22,8 @@ exec > >(tee -a /data/sentry-update.log) 2>&1
 echo "[START] $(date -Is) — update log: /data/sentry-update.log"
 
 branch="$(git symbolic-ref --quiet --short HEAD)"
-if [[ "$branch" != "batmobile" && "$branch" != "sentry-session-routes-poc" ]]; then
-  echo "[ERROR] This updater requires batmobile or sentry-session-routes-poc; current branch: $branch" >&2
+if [[ "$branch" != "batmobile" && "$branch" != "batmobile-c3" && "$branch" != "sentry-session-routes-poc" ]]; then
+  echo "[ERROR] This updater requires batmobile, batmobile-c3 or sentry-session-routes-poc; current branch: $branch" >&2
   exit 1
 fi
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
@@ -99,11 +99,13 @@ test -x openpilot/system/loggerd/sentry_loggerd
 # Stage/verify the inactive OS slot only after the recorder builds successfully.
 if [[ -f /AGNOS ]]; then
   installed_version="$(cat /VERSION)"
-  required_version="$(unset AGNOS_VERSION; source ./launch_env.sh; printf '%s' "$AGNOS_VERSION")"
+  unset AGNOS_VERSION
+  source ./launch_env.sh
+  required_version="$AGNOS_VERSION"
   test -n "$required_version"
   if [[ "$installed_version" != "$required_version" ]]; then
     echo "[AGNOS] Updating $installed_version to $required_version..."
-    python openpilot/common/hardware/comma/agnos.py --swap openpilot/common/hardware/comma/agnos.json
+    python openpilot/common/hardware/comma/agnos.py --swap "$AGNOS_MANIFEST"
   else
     echo "[AGNOS] Already current ($installed_version)."
   fi

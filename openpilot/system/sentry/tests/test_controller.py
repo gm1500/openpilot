@@ -735,12 +735,13 @@ def test_arming_survives_frame_and_recorder_gaps(monkeypatch, tmp_path, arm_dela
 
 
 @pytest.mark.parametrize('blocker,expected', [
-  ('disabled', 'Off'), ('drive_off', 'Off for this parking'), ('hardware', 'Requires comma 3X'), ('shutdown', 'Shutting down'),
+  ('disabled', 'Off'), ('drive_off', 'Off for this parking'), ('hardware', 'Requires comma 3 or 3X'), ('shutdown', 'Shutting down'),
   ('panda', 'Waiting for panda'), ('unknown', 'Waiting for panda'),
   ('ignition', 'Waiting for ignition off'), ('device', 'Waiting for device state'),
   ('started', 'Waiting for offroad'), ('offroad', 'Waiting for offroad'), ('none', ''),
 ])
-def test_activation_blockers_are_visible(blocker, expected):
+@pytest.mark.parametrize('device', ['tici', 'tizi'])
+def test_activation_blockers_are_visible(blocker, expected, device):
   class State(dict):
     valid = {'pandaStates': True, 'deviceState': True}
     recv_time = {'pandaStates': 100., 'deviceState': 100.}
@@ -755,7 +756,7 @@ def test_activation_blockers_are_visible(blocker, expected):
                                           ignitionLine=blocker == 'ignition', ignitionCan=False)])
   if blocker in ('panda', 'device'):
     sm.recv_time['pandaStates' if blocker == 'panda' else 'deviceState'] = 95.
-  assert sentryd.inactive_reason(params, sm, 100., 'pc' if blocker == 'hardware' else 'tizi') == expected
+  assert sentryd.inactive_reason(params, sm, 100., 'pc' if blocker == 'hardware' else device) == expected
 
 
 @pytest.mark.parametrize('shutdown', [False, True])

@@ -20,12 +20,18 @@ function agnos_init {
   # Check if AGNOS update is required
   if [ "$(< /VERSION)" != "$AGNOS_VERSION" ]; then
     AGNOS_PY="$DIR/openpilot/common/hardware/comma/agnos.py"
-    MANIFEST="$DIR/openpilot/system/hardware/comma/agnos.json"
+    MANIFEST="$DIR/$AGNOS_MANIFEST"
     if "$AGNOS_PY" --verify "$MANIFEST"; then
       sudo reboot
     fi
     while true; do
-      "$DIR/openpilot/common/hardware/comma/updater" "$AGNOS_PY" "$MANIFEST"
+      if [ "$AGNOS_VERSION" = "12.8" ]; then
+        # The current graphical updater requires the newer display stack.
+        "$AGNOS_PY" --swap "$MANIFEST" && sudo reboot
+        sleep 10
+      else
+        "$DIR/openpilot/common/hardware/comma/updater" "$AGNOS_PY" "$MANIFEST"
+      fi
     done
   fi
 }
@@ -85,6 +91,12 @@ function launch {
   # hardware specific init
   if [ -f /AGNOS ]; then
     agnos_init
+    if [ "$AGNOS_VERSION" = "12.8" ]; then
+      "$DIR/tools/c3_setup.sh" || return 1
+      source "$DIR/.venv/bin/activate"
+      # raylib's COMMA backend owns DRM directly; AGNOS 12.8 starts Weston.
+      sudo systemctl stop weston.service || return 1
+    fi
   fi
 
   # write tmux scrollback to a file

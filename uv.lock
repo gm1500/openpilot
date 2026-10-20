@@ -3,7 +3,10 @@ revision = 5
 requires-python = ">=3.12.3, <3.13"
 
 [manifest]
-overrides = [{ name = "opendbc", editable = "opendbc_repo" }]
+overrides = [
+    { name = "libusb1", specifier = "==3.1.0" },
+    { name = "opendbc", editable = "opendbc_repo" },
+]
 
 [[package]]
 name = "certifi"
@@ -488,13 +491,13 @@ wheels = [
 
 [[package]]
 name = "libusb1"
-version = "3.4.0"
+version = "3.1.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/89/35/f9d2a990d092d647b47540cd229e1d68432c0f51183484ca189612a4824c/libusb1-3.4.0.tar.gz", hash = "sha256:9cf5638506d54f21bf36550d97ea63189111a23c4d8078f630103a2052135f45", size = 91206, upload-time = "2026-05-16T20:59:19.315Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/af/19/53ecbfb96d6832f2272d13b84658c360802fcfff7c0c497ab8f6bf15ac40/libusb1-3.1.0.tar.gz", hash = "sha256:4ee9b0a55f8bd0b3ea7017ae919a6c1f439af742c4a4b04543c5fd7af89b828c", size = 83013, upload-time = "2023-10-29T03:14:31.821Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d4/64/d4b59444e4d3b6979aa5eb58840634465a24b41a9ab03dcf8434c9b89551/libusb1-3.4.0-py3-none-any.whl", hash = "sha256:e83d034e44c3efe1c4599c6281d34bca50a38c12cab3b7b6217d583161a01ffd", size = 67373, upload-time = "2026-05-16T20:59:13.142Z" },
-    { url = "https://files.pythonhosted.org/packages/7e/55/a838a4278fac4ee49bf670ddc59d621999a1cb2a3188fb13a23609ea4f06/libusb1-3.4.0-py3-none-win32.whl", hash = "sha256:0a1aa1416034690eb9dc9a895eda0fef44d853bca1053eb1de50a5906684846d", size = 129704, upload-time = "2026-05-16T20:59:15.243Z" },
-    { url = "https://files.pythonhosted.org/packages/5f/08/02aecf6dad627534a5835244ece14d7f187ef430354d9b8551199934d059/libusb1-3.4.0-py3-none-win_amd64.whl", hash = "sha256:b7dcc1f324a895af6aac708bc5513a17373f97349cc2ab8a277519c788bd18ca", size = 141212, upload-time = "2026-05-16T20:59:17.286Z" },
+    { url = "https://files.pythonhosted.org/packages/85/5c/9169aea7690df382b677d9f725accc3ec864849c5ab49991e3823a942392/libusb1-3.1.0-py3-none-any.whl", hash = "sha256:9d9f16e2c199cab91f48ead585d3f5ec7e8e4be428a25ddfed22abf786fa9b3a", size = 62368, upload-time = "2023-10-29T03:14:24.767Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/84/d851eb09565ff72b0dfbb988f4e1c79d3746c16eda5bb8e81ec6ce3bb16e/libusb1-3.1.0-py3-none-win32.whl", hash = "sha256:bc7874302565721f443a27d8182fcc7152e5b560523f12f1377b130f473e4a0c", size = 127838, upload-time = "2023-10-29T03:14:27.327Z" },
+    { url = "https://files.pythonhosted.org/packages/02/a5/620d383ec17051f42a907f21517eb498ddecd45b2b81e46cc42e6ec4038e/libusb1-3.1.0-py3-none-win_amd64.whl", hash = "sha256:77a06ecfb3d002d7c2ce369e28d0138b292fe8db8a3d102b73fda231a716dd35", size = 140380, upload-time = "2023-10-29T03:14:29.583Z" },
 ]
 
 [[package]]

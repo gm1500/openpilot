@@ -1046,7 +1046,8 @@ bool SpectraCamera::openSensor() {
   };
 
   // Figure out which sensor we have
-  if (!init_sensor_lambda(new OS04C10) &&
+  if (!init_sensor_lambda(new AR0231) &&
+      !init_sensor_lambda(new OS04C10) &&
       !init_sensor_lambda(new OX03C10)) {
     LOGE("** sensor %d FAILED bringup, disabling", cc.camera_num);
     enabled = false;
@@ -1513,7 +1514,7 @@ bool SpectraCamera::waitForFrameReady(uint64_t request_id) {
 }
 
 bool SpectraCamera::processFrame(int buf_idx, uint64_t request_id, uint64_t ife_frame_id, uint64_t timestamp) {
-  if (!syncFirstFrame(cc.camera_num, request_id, ife_frame_id, timestamp, cc.staggered_sof)) {
+  if (!syncFirstFrame(cc.camera_num, request_id, ife_frame_id, timestamp, cc.staggered_sof && sensor->image_sensor != cereal::FrameData::ImageSensor::AR0231)) {
     return false;
   }
 

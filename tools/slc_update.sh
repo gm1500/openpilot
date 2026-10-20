@@ -10,11 +10,15 @@ if ! flock -n 9; then
   exit 1
 fi
 exec > >(tee -a /data/slc-update.log) 2>&1
-target="${1:-batmobile}"
+target="${1:-$(git symbolic-ref --quiet --short HEAD)}"
 case "$target" in
-  batmobile) ;;
+  batmobile|batmobile-c3) ;;
   *) echo "[ERROR] Unsupported update branch: $target" >&2; exit 1 ;;
 esac
+if grep -q '^comma tici' /sys/firmware/devicetree/base/model 2>/dev/null && [[ "$target" != "batmobile-c3" ]]; then
+  echo "[ERROR] Original comma 3 requires the batmobile-c3 branch." >&2
+  exit 1
+fi
 echo "[START] $(date -Is) - SLC update on $target"
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   echo "[ERROR] Local changes found. Preserve them before updating." >&2
@@ -70,11 +74,13 @@ PY
 
 if [[ -f /AGNOS ]]; then
   installed_version="$(cat /VERSION)"
-  required_version="$(unset AGNOS_VERSION; source ./launch_env.sh; printf '%s' "$AGNOS_VERSION")"
+  unset AGNOS_VERSION
+  source ./launch_env.sh
+  required_version="$AGNOS_VERSION"
   test -n "$required_version"
   if [[ "$installed_version" != "$required_version" ]]; then
     echo "[AGNOS] Staging $installed_version -> $required_version..."
-    python openpilot/common/hardware/comma/agnos.py --swap openpilot/system/hardware/comma/agnos.json
+    python openpilot/common/hardware/comma/agnos.py --swap "$AGNOS_MANIFEST"
   else
     echo "[AGNOS] Already current ($installed_version)."
   fi

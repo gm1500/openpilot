@@ -28,8 +28,8 @@ def inactive_reason(params, sm, now, device_type):
     return 'Off'
   if params.get_bool('SentryOffThisDrive'):
     return 'Off on Wi-Fi' if params.get('SentryParkingModeSource') == 'wifi' else 'Off for this parking'
-  if device_type != 'tizi':
-    return 'Requires comma 3X'
+  if device_type not in ('tici', 'tizi'):
+    return 'Requires comma 3 or 3X'
   if any(params.get_bool(k) for k in ('DoShutdown', 'DoReboot', 'DoUninstall')):
     return 'Shutting down'
   if not recent(sm, 'pandaStates', now) or not sm['pandaStates'] or any(

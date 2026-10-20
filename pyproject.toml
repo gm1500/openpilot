@@ -154,6 +154,7 @@ unresolved-attribute = "ignore"  # many from capnp and Cython modules
 python-preference = "only-managed"
 default-groups = ["standalone"]
 override-dependencies = [
+  "libusb1==3.1.0",  # AGNOS 12.8 pin: newer bindings caused comma 3 USB crashes
   "opendbc",  # panda pins opendbc from git for standalone use; always use our submodule
 ]
 

@@ -143,6 +143,7 @@ env = Environment(
   CXXFLAGS=["-std=c++1z"],
   CPPPATH=[
     "#openpilot",
+    "#openpilot/third_party/linux/include",
     "#msgq_repo",            # #include "msgq/..."
     "#opendbc_repo",         # #include "opendbc/..."
     "#rednose_repo",         # #include "rednose/..."

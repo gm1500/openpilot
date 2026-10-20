@@ -76,7 +76,7 @@ class ArcData:
 class DriverStateRenderer(Widget):
   def __init__(self):
     super().__init__()
-    batmobile = get_short_branch() == 'batmobile'
+    batmobile = get_short_branch() in ('batmobile', 'batmobile-c3')
     outline = BATMOBILE_FACE_KPTS_3D if batmobile else DEFAULT_FACE_KPTS_3D
     # Outline and eyes use one pose/depth transform to stay aligned while turning.
     self.keypoints_3d = np.concatenate((outline, BATMOBILE_EYE_KPTS_3D.reshape(-1, 3))) if batmobile else outline

@@ -208,6 +208,8 @@ def handle_agnos_update() -> None:
   cur_version = HARDWARE.get_os_version()
   updated_version = run(["bash", "-c", r"unset AGNOS_VERSION && source launch_env.sh && \
                           echo -n $AGNOS_VERSION"], OVERLAY_MERGED).strip()
+  if HARDWARE.get_device_type() == "tici" and updated_version != "12.8":
+    raise RuntimeError("This branch requires an AGNOS version without original comma 3 support")
 
   cloudlog.info(f"AGNOS version check: {cur_version} vs {updated_version}")
   if cur_version == updated_version:
@@ -219,6 +221,8 @@ def handle_agnos_update() -> None:
   cloudlog.info(f"Beginning background installation for AGNOS {updated_version}")
 
   manifest_path = os.path.join(OVERLAY_MERGED, "openpilot/system/hardware/comma/agnos.json")
+  if HARDWARE.get_device_type() == "tici":
+    manifest_path = os.path.join(OVERLAY_MERGED, "openpilot/common/hardware/comma/agnos-tici.json")
   if not os.path.isfile(manifest_path):  # releases before the openpilot/ move
     manifest_path = os.path.join(OVERLAY_MERGED, "system/hardware/tici/agnos.json")
   target_slot_number = get_target_slot_number()

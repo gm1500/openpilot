@@ -1,5 +1,6 @@
 venv/
 .venv/
+.venv-c3-bootstrap/
 .ci_cache
 .env
 .clang-format

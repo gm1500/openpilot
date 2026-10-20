@@ -6,6 +6,7 @@ import unittest
 import numpy as np
 
 from openpilot.common.parameterized import parameterized
+from openpilot.common.hardware import HARDWARE
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.tools.lib.log_time_series import msgs_to_time_series
@@ -118,10 +119,13 @@ class TestCamerad(OpenpilotTestCase):
     laggy_frames = {k: v for k, v in diffs.items() if v > 1.1}
     assert len(laggy_frames) == 0, f"Frames not synced properly: {laggy_frames=}"
 
-    # cabin camera should be staggered ~25ms from road camera
+    # Original comma 3 AR0231 cameras share a pulse; newer sensors stagger cabin.
     for i in n:
       offset_ms = abs(self.logs['cabinCameraState']['timestampSof'][i] - self.logs['narrowRoadCameraState']['timestampSof'][i]) / 1e6
-      assert 20 < offset_ms < 30, f"cabin camera stagger out of range at frame {i}: {offset_ms:.1f}ms (expected ~25ms)"
+      if HARDWARE.get_device_type() == 'tici':
+        assert offset_ms < 1.1, f"cabin camera sync out of range at frame {i}: {offset_ms:.1f}ms"
+      else:
+        assert 20 < offset_ms < 30, f"cabin camera stagger out of range at frame {i}: {offset_ms:.1f}ms (expected ~25ms)"
 
   def test_sanity_checks(self):
     self._sanity_checks(self.logs)
