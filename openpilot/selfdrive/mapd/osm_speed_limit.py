@@ -189,7 +189,8 @@ def allowed_directions(road: Road) -> tuple[bool, ...]:
 
 class RoadTracker:
   """Compare bounded connected paths across fresh fixes before selecting a limit."""
-  def __init__(self):
+  def __init__(self, *, offline_continuity: bool = False):
+    self._offline_continuity = offline_continuity
     self.reset()
 
   def reset(self):
@@ -199,6 +200,7 @@ class RoadTracker:
     self._roads: tuple[Road, ...] = ()
     self._connections: dict[NodeKey, list[tuple[Road, bool, float]]] = {}
     self._nodes: dict[int, list[tuple[NodeKey, float]]] = {}
+    self._continuations: dict[tuple[int, bool], tuple[Road, bool]] = {}
     self._junctions: set[int] = set()
     self._processed: GpsFix | None = None
     self._result: RoadMatch | None = None
@@ -233,6 +235,7 @@ class RoadTracker:
           neighbours.setdefault(first, set()).add(second)
           neighbours.setdefault(second, set()).add(first)
     self._junctions = {node for node, arms in neighbours.items() if len(arms) >= 3}
+    self._set_continuations(roads)
 
     def refresh(previous: RoadMatch, fix: GpsFix) -> RoadMatch | None:
       old = previous.road
@@ -256,6 +259,66 @@ class RoadTracker:
           refreshed.append((projected, score, since, travelled))
     self._paths = refreshed
     self._branch_recovery = None
+
+  def _set_continuations(self, roads: tuple[Road, ...]):
+    """Offline speed continuity only; never manufacture intersection topology.
+
+    The packed maps omit node IDs. Follow a unique end-to-start continuation
+    with the same road identity/class and a shallow tangent change. Interior
+    crossings, nearby parallel roads, ramps and ambiguous main-road forks do
+    not qualify. Real node IDs always take precedence over this inference.
+    """
+    self._continuations = {}
+    if not self._offline_continuity:
+      return
+    entries = {}
+    ends = []
+    for road in roads:
+      highway = road.tags.get('highway', '')
+      identity = (road.tags.get('name', '').strip().casefold(), road.tags.get('ref', '').strip().casefold())
+      if road.node_ids or highway not in ROAD_TYPES or highway.endswith('_link') or not any(identity):
+        continue
+      for forward in allowed_directions(road):
+        points = road.geometry if forward else road.geometry[::-1]
+        # OSM coordinates have seven decimal places; packing can add tiny noise.
+        start, end = (tuple(round(v, 7) for v in p) for p in (points[0], points[-1]))
+        headings = []
+        for origin, neighbours in ((points[0], points[1:]), (points[-1], points[-2::-1])):
+          for point in neighbours:
+            x, y = offset_metres(*point, GpsFix(*origin, None, 0., 0.))
+            if math.hypot(x, y) >= 1.:
+              headings.append(math.degrees(math.atan2(x, y)))
+              break
+        if len(headings) != 2:
+          continue
+        entries.setdefault((start, highway, identity), []).append((road, forward, headings[0]))
+        ends.append((road, forward, (end, highway, identity), (headings[1] + 180) % 360))
+    for road, forward, key, heading in ends:
+      options = [(other, direction) for other, direction, bearing in entries.get(key, ())
+                 if other != road and abs((bearing - heading + 180) % 360 - 180) <= 15.]
+      if len(options) == 1:
+        self._continuations[id(road), forward] = options[0]
+
+  def _offline_progress(self, previous: RoadMatch, current: RoadMatch, maximum: float) -> float | None:
+    if current.distance > 15 or current.heading_error is None or current.heading_error > 12:
+      return None
+    road, forward = previous.road, previous.forward
+    distance = self._nodes[id(road)][-1][1] - previous.along if forward else previous.along
+    visited = {id(road)}
+    for _ in range(4):
+      continuation = self._continuations.get((id(road), forward))
+      if continuation is None or distance > maximum:
+        return None
+      road, forward = continuation
+      if id(road) in visited:
+        return None
+      visited.add(id(road))
+      length = self._nodes[id(road)][-1][1]
+      if road == current.road and forward == current.forward:
+        progress = distance + (current.along if forward else length - current.along)
+        return progress if progress <= maximum else None
+      distance += length
+    return None
 
   @staticmethod
   def _lateral_offset(match: RoadMatch, fix: GpsFix) -> float:
@@ -423,6 +486,8 @@ class RoadTracker:
       return None
     if current.road == previous.road:
       return (current.along - previous.along) * (1 if previous.forward else -1) if current.forward == previous.forward else None
+    if self._offline_continuity and not previous.road.node_ids and not current.road.node_ids:
+      return self._offline_progress(previous, current, maximum)
     # A mapped ramp endpoint can lie beyond the physical merge. A lane change
     # may reach the incoming mainline before crossing that node. Allow only a
     # nearby, same-direction approach to ONE shared continuation with the same
@@ -704,7 +769,7 @@ class OSMSpeedLimit:
     self._timed_roads = None
     self._has_timed_roads = False
     self._tracker = RoadTracker()
-    self._offline_tracker = RoadTracker()
+    self._offline_tracker = RoadTracker(offline_continuity=True)
     self._offline = OfflineWorker()
     self._offline_speed_inputs = (None, None)
     self._offline_speed_roads = ()

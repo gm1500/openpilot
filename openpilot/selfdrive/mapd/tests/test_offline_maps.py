@@ -57,6 +57,7 @@ def archive_bytes(speed=50., conditional='', one_way=True):
           ways = tile.init('ways', 1)
           w = ways[0]
           w.id, w.name, w.maxSpeed, w.oneWay = 10, 'Test road', speed / 3.6, one_way
+          w.ref, w.highwayClass = '216', 'motorway'
           w.minLat, w.maxLat, w.minLon, w.maxLon = .09, .11, .1, .1
           w.maxSpeedConditional = conditional
           w.maxSpeedBackward = 30 / 3.6
@@ -107,6 +108,8 @@ def test_real_format_persists_across_restart_and_preserves_direction_and_conditi
   assert roads[0].tags['maxspeed:backward'] == '30.0'
   assert roads[0].tags['maxspeed:conditional'] == '30 @ (Mo-Fr 08:00-16:00)'
   assert roads[0].tags['oneway'] == 'yes'
+  assert roads[0].tags['ref'] == '216'
+  assert roads[0].tags['highway'] == 'motorway'
   # An atomic update is observed by an already-running reader.
   install(store, tmp_path, speed=80)
   assert restarted.roads(fix)[0].tags['maxspeed'] == '80.0'
