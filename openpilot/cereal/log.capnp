@@ -449,6 +449,7 @@ struct DeviceState @0xa4d8b5af2aa492eb {
   dspTempC @49 :Float32;
   memoryTempC @28 :Float32;
   modemTempC @36 :List(Float32);
+  nvmeTempC @35 :List(Float32);
   pmicTempC @39 :List(Float32);
   intakeTempC @46 :Float32;
   exhaustTempC @47 :Float32;
@@ -524,7 +525,6 @@ struct DeviceState @0xa4d8b5af2aa492eb {
     chargingDisabled @18 :Bool;
     usbOnline @12 :Bool;
     ambientTempC @30 :Float32;
-    nvmeTempC @35 :List(Float32);
   }
 }
 

@@ -20,6 +20,7 @@ from ipaddress import IPv4Address, AddressValueError
 from enum import Enum
 
 from openpilot.common.esim.base import WEBBING_ICCID_PREFIX
+from openpilot.common.hardware import HARDWARE
 
 logging.basicConfig(
   level=logging.INFO,
@@ -329,15 +330,16 @@ class Modem:
       # clear initial EPS bearer APN (some carriers reject the default)
       'AT+CGDCONT=0,"IP",""',
 
-      # SIM hot swap
-      'AT+QSIMDET=1,0',
-      'AT+QSIMSTAT=1',
-
       # configure modem as data-centric
       'AT+QNVW=5280,0,"0102000000000000"',
       'AT+QNVFW="/nv/item_files/ims/IMS_enable",00',
       'AT+QNVFW="/nv/item_files/modem/mmode/ue_usage_setting",01',
     ]
+    # The SIM-detect signal is not routed on the original comma 3.
+    if HARDWARE.get_device_type() == "tici":
+      cmds += ['AT+QSIMDET=0', 'AT+QSIMSTAT=0']
+    else:
+      cmds += ['AT+QSIMDET=1,0', 'AT+QSIMSTAT=1']
     for c in cmds:
       self._at(c)
 
@@ -353,11 +355,11 @@ class Modem:
       return State.INITIALIZING
 
     identity = self._read_identity()
+    # Correct persisted SIM-detect settings even when the SIM is not detected.
+    self._configure_modem(identity["modem_version"])
     if not identity["iccid"] or not identity["imei"]:
       logging.warning(f"identity read incomplete: {identity}, retrying")
       return State.INITIALIZING
-
-    self._configure_modem(identity["modem_version"])
 
     self.S.update(identity)
     self._apn = self._read_param("GsmApn")

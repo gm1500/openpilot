@@ -9,7 +9,31 @@
 - Original DOS/F4 Panda board, USB transport, recovery and bootloader identification. The Panda fork retains the current health/CAN protocol and this branch's existing opendbc safety rules. F4 queues use 512 receive entries and 128 entries per transmit queue to fit the existing SRAM/bootloader layout; a linker assertion protects the stack and reset cookies.
 - An isolated Python 3.12 environment from `uv.lock`, retaining AGNOS 12.8's libusb1 3.1.0 compatibility pin, created by `tools/c3_setup.sh`. First boot needs internet access for these dependencies. Later boots reuse the environment until the lockfile changes.
 - AGNOS 12.8's Weston service is stopped for the current raylib UI. Modem port aliases are installed in `/run`. Both changes reset on reboot when returning to a legacy branch.
+- Device-specific speaker routing/EQ, USB IRQ affinity and reset-enumeration delay, AR0231 brightness scaling and a 20 FPS UI.
+- EG25 SIM detection configured for the original board wiring; Wi-Fi strength/metering read through AGNOS 12.8's NetworkManager D-Bus interface.
+- The original 75 C fan target, NVMe temperature telemetry and missing-storage alert.
 - Sentry's hardware gate accepts the original comma 3. Its existing parking, ignition, temperature and power checks remain in use. Update helpers retain `batmobile-c3`.
+
+## Follow-up peripheral audit
+
+Compared the candidate with upstream `master-tici` at `8450f9f3330221caa89f38807c916f35fcbae615`, the tici removal commits, and AGNOS 12.8 build source `1a63095a493207e1dd1a9eaa1c08ff4ebe4ebf81`.
+
+| Area | Finding and action |
+| --- | --- |
+| u-blox GPS | Retained: `/dev/ttyHS0`, GPIO 32/33/34 power/reset, `pigeond`, `ubloxd`, `gpsLocationExternal` and `UbloxAvailable` selection. The Python parser rewrite did not remove the receiver. No additional GPS driver port needed. |
+| Quectel GPS/cellular | `qcomgpsd` remains the alternate GPS path, selected when u-blox is absent or explicitly disabled. Fixed EG25 SIM-detect configuration: the hot-swap signal is not connected on tici. Configuration runs even when SIM identity is incomplete. AGNOS 12.8 includes PPP. |
+| Main IMU | LSM6DS3/LSM6DS3TR-C accel, gyro and temperature drivers, I2C bus 1 and interrupt GPIO 84 remain. All original sensor configurations in the pre-removal tests included an LSM. |
+| Secondary sensors | BMX055 secondary IMU support was removed before `master-tici` froze; MMC5603NJ magnetometer support was removed later. Current locationd ignores BMX055 and does not consume magnetometer readings. These optional telemetry paths are not restored or replaced with fabricated data. |
+| Audio | Restored original MAX98089 right-speaker routing, gain and five EQ bands. The 3X profile is preserved. AGNOS 12.8 retains sound-card/microphone initialization. |
+| USB Panda | Restored a three-second enumeration interval after GPIO reset/recovery, plus USB host IRQ affinity. An immediate reset/probe loop can continually interrupt USB enumeration. |
+| Display | Restored AR0231 exposure-to-brightness scaling and selected the same 20 FPS UI budget as 3X. Backlight, touch and display drivers come from AGNOS 12.8. |
+| Wi-Fi | UI connection management still uses NetworkManager. Hardware status now also uses its D-Bus API on tici; it no longer depends on the newer supplicant control socket for signal strength and metering. |
+| Cooling | Restored the 75 C fan target. The later 5 C increase assumes the thermal-throttling change in AGNOS 18.1 and is inappropriate for the pinned 12.8 image. |
+| NVMe | AGNOS 12.8 retains the NVMe driver and `/data/media` mount. Restored temperature telemetry at the existing Cap'n Proto field ordinal 35 and a missing-mount alert, including devices configured for eMMC-only logging. Current logger process-failure checks remain in force. |
+
+The old NVMe model-brand warning, logger-failure exemption and source-tree factory-reset NVMe formatting were also removed upstream. They are not required drivers and are not reintroduced by this audit. Device erase/recovery behavior must be qualified separately on the pinned OS.
+
+Additional host validation: **51 tests passed**, covering GPS receiver/service selection, u-blox power sequencing and a framed NAV-PVT packet, speaker register writes, USB reset timing and IRQ placement, modem/SIM setup, Wi-Fi D-Bus requests/metering, NVMe serialization/mount handling, OS selection and fan control. Native params/messaging bindings and the updated schema built successfully; Python lint and diff checks passed. These are host tests, not receiver acquisition, acoustic, network or thermal measurements on a device.
 
 ## Preparing a device checkout
 
@@ -46,3 +70,12 @@ Before any road use, validate on the original hardware while parked:
 - USB pandad and Qualcomm UAPI headers: parent of commaai/openpilot `96d1b876bbd7441cac08bab842aded6729ae1c6d`.
 - F4 platform: commaai/panda `3dc21386239e3073a623156b75901aa302340d6c`, adapted to Batmobile's current Panda interfaces.
 - Modem aliases: commaai/agnos-builder's current `78-modem.rules`.
+
+Follow-up audit references:
+
+- tici-specific removal: commaai/openpilot `3e2549f2b8675ce482200e06855857122f3583e3`.
+- NVMe diagnostics removal: `a8fd55740bd7c88ecb9cc34546d2a72b840d3817`.
+- BMX055 removal / supported sensor combinations: `50aaa691373222dcc71c506c1d055e21c5bc97ea`.
+- Remaining dual-IMU services removal: `752ef8696af9687b7ea3d0309ab8f73990d6b61d`.
+- MMC5603NJ removal: `f8372ccc4df0b5b0e49572f8817ce7d5b14c6db9`.
+- Weston updater fallback removal (already handled by the initial port): `8499de6afe1b7aa22a8ee753c25b1ac595cc6e8a`.

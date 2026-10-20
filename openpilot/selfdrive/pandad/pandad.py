@@ -84,6 +84,9 @@ def main() -> None:
       else:
         HARDWARE.recover_internal_panda()
       count += 1
+      if HARDWARE.get_device_type() == "tici":
+        # USB must enumerate after either GPIO reset before probing/DFU.
+        time.sleep(3)
 
       # Flash all Pandas in DFU mode
       for serial in PandaDFU.list():

@@ -53,6 +53,25 @@ def wpa_supplicant_cmd(cmd: str, timeout: float = 0.2) -> dict[str, str]:
         return {}
       return dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
 
+def nm_wifi_property(interface: str, name: str):
+  # AGNOS 12.8 runs NetworkManager's D-Bus supplicant without the newer
+  # /run/wpa_supplicant/wlan0 control socket. Use its existing NM service.
+  from jeepney import DBusAddress, new_method_call
+  from jeepney.io.blocking import open_dbus_connection
+  from jeepney.wrappers import Properties
+
+  nm = "org.freedesktop.NetworkManager"
+  with open_dbus_connection(bus="SYSTEM") as conn:
+    def prop(path, iface, key):
+      return conn.send_and_get_reply(Properties(DBusAddress(path, bus_name=nm, interface=iface)).get(key), timeout=0.5).body[0][1]
+
+    addr = DBusAddress("/org/freedesktop/NetworkManager", bus_name=nm, interface=nm)
+    device = conn.send_and_get_reply(new_method_call(addr, "GetDeviceByIpIface", "s", ("wlan0",)), timeout=0.5).body[0]
+    if interface == "AccessPoint":
+      device = prop(device, nm + ".Device.Wireless", "ActiveAccessPoint")
+    return prop(device, nm + "." + interface, name)
+
+
 def get_default_route_iface():
   with open("/proc/net/route") as f:
     routes = [(int(route[6]), route[0]) for line in f.readlines()[1:] if (route := line.split())[1] == "00000000" and int(route[3], 16) & 0x1]
@@ -194,6 +213,8 @@ class HardwareComma(HardwareBase):
       elif network_type == NetworkType.ethernet:
         network_strength = NetworkStrength.great
       elif network_type == NetworkType.wifi:
+        if self.get_device_type() == "tici":
+          return self.parse_strength(int(nm_wifi_property("AccessPoint", "Strength")))
         rssi = wpa_supplicant_cmd("SIGNAL_POLL").get("RSSI")
         if rssi is not None:
           dbm = int(rssi)
@@ -214,6 +235,10 @@ class HardwareComma(HardwareBase):
       return Params().get_bool("GsmMetered")
     try:
       if network_type == NetworkType.wifi:
+        if self.get_device_type() == "tici":
+          metered = int(nm_wifi_property("Device", "Metered"))
+          if metered in (1, 2, 3, 4):
+            return metered in (1, 3)  # NM_METERED_YES / NM_METERED_GUESS_YES
         ssid = wpa_supplicant_cmd("STATUS").get("ssid", "")
         if ssid:
           # wpa_supplicant escapes non-printable bytes as \xNN; NM keyfile stores ASCII SSIDs as a literal and others as a byte;byte; list
@@ -246,6 +271,15 @@ class HardwareComma(HardwareBase):
 
   def get_modem_temperatures(self):
     return self.get_modem_state().get('temperatures', [])
+
+  def get_nvme_temperatures(self):
+    if self.get_device_type() != "tici" or not Path("/dev/nvme0").exists():
+      return []
+    try:
+      out = subprocess.check_output(["sudo", "smartctl", "-aj", "/dev/nvme0"], timeout=2, text=True)
+      return [int(t) for t in json.loads(out)["nvme_smart_health_information_log"]["temperature_sensors"]]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+      return []
 
   def get_current_power_draw(self):
     return (self.read_param_file("/sys/class/hwmon/hwmon1/power1_input", int) / 1e6)
@@ -307,7 +341,7 @@ class HardwareComma(HardwareBase):
     if self.amplifier is not None:
       self.amplifier.set_global_shutdown(amp_disabled=powersave_enabled)
       if not powersave_enabled:
-        self.amplifier.initialize_configuration()
+        self.amplifier.initialize_configuration(self.get_device_type())
 
     # *** CPU config ***
 
@@ -345,7 +379,7 @@ class HardwareComma(HardwareBase):
 
   def initialize_hardware(self):
     if self.amplifier is not None:
-      self.amplifier.initialize_configuration()
+      self.amplifier.initialize_configuration(self.get_device_type())
 
     # Allow hardwared to write engagement status to kmsg
     subprocess.run("sudo chmod a+w /dev/kmsg", shell=True)
@@ -387,6 +421,9 @@ class HardwareComma(HardwareBase):
 
     # pandad core
     affine_irq(3, "spi_geni")         # SPI
+    if self.get_device_type() == "tici":
+      affine_irq(3, "xhci-hcd:usb3")  # auxiliary USB
+      affine_irq(3, "xhci-hcd:usb1")  # internal Panda and modem
     try:
       pid = subprocess.check_output(["pgrep", "-f", "spi0"], encoding='utf8').strip()
       subprocess.call(["sudo", "chrt", "-f", "-p", "1", pid])

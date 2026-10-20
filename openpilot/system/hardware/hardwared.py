@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict, namedtuple
+from pathlib import Path
 
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal import log
@@ -86,7 +87,7 @@ class Chestnut:
 
 ThermalBand = namedtuple("ThermalBand", ['min_temp', 'max_temp'])
 HardwareState = namedtuple("HardwareState", ['network_type', 'network_info', 'network_strength', 'network_stats',
-                                             'network_metered', 'modem_temps', 'usb_state'])
+                                             'network_metered', 'modem_temps', 'nvme_temps', 'usb_state'])
 
 # List of thermal bands. We will stay within this region as long as we are within the bounds.
 # When exiting the bounds, we'll jump to the lower or higher band. Bands are ordered in the dict.
@@ -115,6 +116,12 @@ def set_offroad_alert_if_changed(offroad_alert: str, show_alert: bool, extra_tex
     return
   prev_offroad_states[offroad_alert] = (show_alert, extra_text)
   set_offroad_alert(offroad_alert, show_alert, extra_text)
+
+def check_storage_mount():
+  if HARDWARE.get_device_type() == "tici":
+    nvme_expected = Path("/dev/nvme0n1").exists() or not Path("/persist/comma/living-in-the-moment").is_file()
+    set_offroad_alert_if_changed("Offroad_StorageMissing", nvme_expected and not Path("/data/media").is_mount())
+
 
 def touch_thread(end_event):
   count = 0
@@ -179,6 +186,7 @@ def hw_state_thread(end_event, hw_queue):
           network_stats={'wwanTx': tx, 'wwanRx': rx},
           network_metered=HARDWARE.get_network_metered(network_type),
           modem_temps=modem_temps,
+          nvme_temps=HARDWARE.get_nvme_temperatures(),
           usb_state=get_usb_state(),
         )
 
@@ -223,6 +231,7 @@ def hardware_thread(end_event, hw_queue) -> None:
     network_strength=NetworkStrength.unknown,
     network_stats={'wwanTx': -1, 'wwanRx': -1},
     modem_temps=[],
+    nvme_temps=[],
     usb_state=[],
   )
 
@@ -307,6 +316,7 @@ def hardware_thread(end_event, hw_queue) -> None:
       msg.deviceState.networkInfo = last_hw_state.network_info
 
     msg.deviceState.modemTempC = last_hw_state.modem_temps
+    msg.deviceState.nvmeTempC = last_hw_state.nvme_temps
 
     msg.deviceState.screenBrightnessPercent = HARDWARE.get_screen_brightness()
 
@@ -383,6 +393,8 @@ def hardware_thread(end_event, hw_queue) -> None:
       # we enforce this for our software, but you are welcome
       # to make a different decision in your software
       startup_conditions["registered_device"] = PC or (params.get("DongleId") != UNREGISTERED_DONGLE_ID)
+
+    check_storage_mount()
 
     # Handle offroad/onroad transition
     should_start = all(onroad_conditions.values())
