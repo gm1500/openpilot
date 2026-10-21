@@ -10,11 +10,12 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.mapd.osm_speed_limit import OSMSpeedLimit, gps_fix
 from openpilot.selfdrive.mapd.heading import vehicle_motion
 from openpilot.selfdrive.mapd.position import MapPosition
+from openpilot.selfdrive.mapd.speed_preview import model_path
 
 
 def main():
   sm = messaging.SubMaster(['gpsLocationExternal', 'gpsLocation', 'carState', 'controlsState', 'vehicleParameters',
-                           'deviceMotion', 'extrinsicsCalibration', 'deviceState'])
+                           'deviceMotion', 'extrinsicsCalibration', 'deviceState', 'modelV2'])
   pm = messaging.PubMaster(['mapSpeedLimit', 'mapTrafficControl'])
   provider = OSMSpeedLimit()
   provider.clock.prepare()  # load timezone polygons before the publication loop
@@ -33,8 +34,11 @@ def main():
       provider.update_network(str(sm['deviceState'].networkType))
     raw_fix = gps_fix(sm, now)
     provider.clock.observe(raw_fix, now)
-    fix = position.update(raw_fix, vehicle_motion(sm, now, signed_speed), now, time.time())  # noqa: TID251
-    sample = provider.update(fix, now)
+    motion = vehicle_motion(sm, now, signed_speed)
+    fix = position.update(raw_fix, motion, now, time.time())  # noqa: TID251
+    advance = params.get_bool('SlcAdvancedSpeedLimit')
+    prediction = model_path(sm, fix, motion, now) if advance else None
+    sample = provider.update(fix, now, advance=advance, prediction=prediction)
     speed_source = (provider.speed_source, provider.speed_match.road.way_id if provider.speed_match is not None else 0,
                     sample[1] if sample is not None else None, sample[2] if sample is not None else None)
     if speed_source != previous_speed_source:
@@ -44,7 +48,7 @@ def main():
                      advisory_kph=round(advisory * 3.6, 3) if advisory is not None else None)
       previous_speed_source = speed_source
     msg = messaging.new_message('mapSpeedLimit')
-    msg.valid = sample is not None and any(speed is not None for speed in sample[1:3])
+    msg.valid = sample is not None and (any(speed is not None for speed in sample[1:3]) or provider.preview is not None)
     if sample is not None:
       fix, limit, advisory, ahead = sample
       msg.mapSpeedLimit.speedLimit = limit or 0.
@@ -56,6 +60,13 @@ def main():
       msg.mapSpeedLimit.positionMonoTime = int(fix.timestamp * 1e9)
       msg.mapSpeedLimit.headingValid = fix.bearing is not None
       msg.mapSpeedLimit.distanceAhead = ahead
+      msg.mapSpeedLimit.matchedWayId = provider.speed_match.road.way_id if provider.speed_match is not None else 0
+      if provider.preview is not None:
+        preview = provider.preview
+        msg.mapSpeedLimit.nextSpeedLimitValid = True
+        msg.mapSpeedLimit.nextSpeedLimit = preview.speed
+        msg.mapSpeedLimit.nextSpeedLimitDistance = preview.distance
+        msg.mapSpeedLimit.nextSpeedLimitWayId = preview.way_id
     pm.send('mapSpeedLimit', msg)
     # Independent validity: a missing speed limit must not hide a connected
     # junction, and optional map health never disables ordinary control.

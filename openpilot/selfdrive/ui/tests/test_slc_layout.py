@@ -13,6 +13,17 @@ def test_schedule_controls_persist_weekday_and_keep_manual_download_actions(monk
   monkeypatch.setattr(ui.gui_app, 'push_widget', dialogs.append)
   monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*20, 40))
   layout = ui.SLCLayout()
+  assert layout.enable.title == 'Speed Limit Control'
+  assert layout.advance.title == 'Advanced speed limit changes'
+  assert not layout.advance.action_item.toggle.get_state()
+  layout.advance.action_item.toggle._callback(True)
+  assert ui.SLCSettings.read(Params(str(tmp_path/'params'))).advance
+  layout._update_state()
+  assert layout.advance.action_item.toggle.get_state()
+  params.put_bool('SlcAdvancedSpeedLimit', False, block=True)
+  layout.last_refresh = 0.
+  layout._update_state()
+  assert not layout.advance.action_item.toggle.get_state()
   schedule = next(row for row in layout.items if row.title == 'Automatic map updates').action_item
   layout._update_state()
   assert schedule.is_button_selected(0)

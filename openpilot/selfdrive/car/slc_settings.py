@@ -11,6 +11,7 @@ class SLCSettings:
   offset_value: int = 0
   change_policy: int = 0  # 0 = automatic, 1 = lower only, 2 = explicit SET
   resume_policy: int = 0  # 0 = next changed limit, 1 = explicit SET
+  advance: bool = False  # qualify ahead; lower targets may start up to two seconds early
 
   @classmethod
   def read(cls, params):
@@ -21,7 +22,8 @@ class SLCSettings:
       except (ValueError, TypeError):
         return default
     return cls(integer('SlcOffsetType', 0, 0, 1), integer('SlcOffsetValue', 0, -30, 30),
-               integer('SlcChangePolicy', 0, 0, 2), integer('SlcResumePolicy', 0, 0, 1))
+               integer('SlcChangePolicy', 0, 0, 2), integer('SlcResumePolicy', 0, 0, 1),
+               bool(integer('SlcAdvancedSpeedLimit', 0, 0, 1)))
 
   def target(self, posted_kph: float, metric: bool) -> float:
     offset = self.offset_value

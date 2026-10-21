@@ -8,7 +8,8 @@ The comma 3X settings panel provides:
 
 | Setting | Options |
 | --- | --- |
-| SLC this drive | Same enable state as the onroad SLC button |
+| Speed Limit Control | Same enable state as the onroad SLC button |
+| Advanced speed limit changes | Off by default; begin lowering the target up to two seconds before a confidently predicted boundary |
 | New speed limit | Automatic; Lower only; SET to accept |
 | After manual override | Resume at the next changed limit; SET only |
 | Offset type | km/h or mph, following the device unit setting; Percent |
@@ -21,6 +22,33 @@ The comma 3X settings panel provides:
 Offsets affect the cruise target, not the displayed posted limit. Targets keep the existing 8–145 km/h bounds and only operate on cars supporting the existing SLC integration. Ordinary cruise +/− buttons retain manual control. New limits retain the existing two-second qualification and fresh-position checks. SET explicitly accepts a fresh map limit; the existing current-speed floor on explicit SET is unchanged.
 
 “Lower only” compares the new adjusted target with the current cruise setting. “SET to accept” waits for explicit map SET (including re-engagement with SET). Manual override preferences govern when automatic following resumes after the driver adjusts cruise. Defaults preserve the prior automatic behavior with no offset.
+
+### Advanced speed limit changes
+
+This optional setting qualifies an upcoming mapped limit before entering its segment,
+using the existing measured-motion history and a fresh model path when choosing between
+connected forks. A lower target can start up to two seconds before the boundary;
+a higher target waits until the matcher confirms entry into the identified segment.
+Prequalification removes the additional two-second wait after entry. It requires
+two seconds of consistent previews and advancing GPS, so late or ambiguous matches
+retain the normal delay. The posted-limit display continues to describe the current road.
+
+The model path compares road shape; it does not identify legal speeds, measure traffic
+flow, or guarantee which exit the driver will take. Competing branches must have actual
+shared-node connectivity, sufficiently different geometry and a consistent winner
+under heading perturbations. Without usable model geometry, a unique directed route
+can still supply a preview. Offline maps support existing same-road continuations and
+an untagged one-way ramp's sole one-way receiving road at an identical endpoint
+with a merge angle of at most 45 degrees;
+they do not infer fork topology. Advisory speeds and unresolved restrictions block
+this ramp preview. These preview connections never alter the current-road matcher or
+traffic-control graph.
+
+Offsets and manual override policies still apply. A preview does not release no-speed
+E2E fallback before actual road entry. Two seconds is the maximum early target-change
+window, not a promise that the vehicle will physically reach the new speed by the sign.
+Normal longitudinal planning determines the acceleration/deceleration. Recorded-data
+replay and regression tests do not replace on-device road validation.
 
 ## Persistent downloads
 

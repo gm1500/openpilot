@@ -25,6 +25,11 @@ struct MapSpeedLimit @0x81c2f05a394cf4af {
   positionMonoTime @10 :UInt64; # observation time of the projected position; never rewrite gpsMonoTime
   zoneType @11 :ZoneType; # active restriction on the current matched road; old logs default to none
   zoneSource @12 :Text; # municipal restriction identifier, when consulted
+  nextSpeedLimit @13 :Float32; # separate upcoming legal limit, m/s; never a posted current limit
+  nextSpeedLimitDistance @14 :Float32; # remaining directed road distance, metres
+  nextSpeedLimitWayId @15 :UInt64;
+  nextSpeedLimitValid @16 :Bool; # independent of current speed availability
+  matchedWayId @17 :UInt64;
   enum ZoneType {
     none @0;
     construction @1;

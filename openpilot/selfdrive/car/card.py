@@ -19,7 +19,7 @@ from opendbc.car.fw_versions import ObdCallback
 from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
-from openpilot.selfdrive.car.map_cruise import read_map_speed, fallback_e2e_ready
+from openpilot.selfdrive.car.map_cruise import read_map_speed, read_map_preview, fallback_e2e_ready
 from openpilot.selfdrive.car.slc_settings import SLCSettings
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.controls.lib.longitudinal_mode import automatic_e2e_selected
@@ -194,7 +194,9 @@ class Car:
     self.v_cruise_helper.update_v_cruise(CS, self.sm['carControl'].enabled, self.is_metric,
                                       map_enabled=map_enabled, map_speed=map_speed, map_gps_time=gps_time, now=now,
                                       automatic_e2e=self.automatic_e2e, e2e_ready=fallback_e2e_ready(self.sm, now, replay=REPLAY),
-                                      slc_settings=self.slc_settings)
+                                      slc_settings=self.slc_settings,
+                                      map_preview=read_map_preview(self.sm, now, replay=REPLAY),
+                                      map_way_id=self.sm['mapSpeedLimit'].matchedWayId)
     if self.sm['carControl'].enabled and not self.CC_prev.enabled:
       # Use CarState w/ buttons from the step selfdrived enables on
       self.v_cruise_helper.initialize_v_cruise(self.CS_prev, self.experimental_mode)

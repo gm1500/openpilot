@@ -52,10 +52,15 @@ class SLCLayout(Widget):
     self.params = Params()
     self.status = {}
     self.last_refresh = 0.
-    self.enable = toggle_item('SLC this drive',
+    self.enable = toggle_item('Speed Limit Control',
       'Use the mapped speed as the cruise target on supported cars. The onroad SLC button controls the same setting.',
       initial_state=self.params.get('MapCruiseEnabled', return_default=True),
       callback=lambda value: self.params.put_bool('MapCruiseEnabled', value, block=True))
+    self.advance = toggle_item('Advanced speed limit changes',
+      'Predict mapped speed limit changes up to 2 seconds ahead. Begin slowing for lower limits early and apply higher limits ' +
+      'when entering the new road segment. Requires a confident road match; existing override settings still apply.',
+      initial_state=self.params.get('SlcAdvancedSpeedLimit', return_default=True),
+      callback=lambda value: self.params.put_bool('SlcAdvancedSpeedLimit', value, block=True))
     self.region_buttons = MultipleButtonAction(['North America', 'Country'], button_width=310, callback=self.select_region)
     self.region_buttons.is_button_selected = lambda i: self.region().startswith(('region.', 'nation.')[i])
     self.actions = MultipleButtonAction(['Download', 'Update', 'Delete'], button_width=240, callback=self.map_action)
@@ -65,6 +70,7 @@ class SLCLayout(Widget):
       'If the device is off or away from Wi-Fi, update at the next parked Wi-Fi connection.', callback=self.select_weekday)
     self.items = [
       self.enable,
+      self.advance,
       ListItem('New speed limit', action_item=SettingButtons(self.params, 'SlcChangePolicy', ['Automatic', 'Lower only', 'SET to accept']),
         description='Automatic applies qualified new limits. Lower only never raises the current target automatically. ' +
                     'SET to accept waits for an explicit map SET or re-engagement with SET. Ordinary +/- buttons remain manual.'),
@@ -167,6 +173,7 @@ class SLCLayout(Widget):
     self.cancel.set_visible(busy)
     self.update_day.set_visible(self.params.get('OfflineMapUpdateSchedule', return_default=True) == 2)
     self.enable.action_item.set_state(self.params.get('MapCruiseEnabled', return_default=True))
+    self.advance.action_item.set_state(self.params.get('SlcAdvancedSpeedLimit', return_default=True))
 
   def _render(self, rect):
     self.scroller.render(rect)

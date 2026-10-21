@@ -1,5 +1,6 @@
 """Map SET selection and SLC's automatic E2E request/recovery handshake."""
 import math
+from dataclasses import dataclass
 
 from openpilot.common.constants import CV
 from openpilot.selfdrive.car.slc_settings import SLCSettings
@@ -8,6 +9,29 @@ MAP_MESSAGE_MAX_AGE = 0.8
 MAP_GPS_MAX_AGE = 3.0
 MAP_STABLE_TIME = 2.0
 MAP_MISSING_TIME = 1.0
+MAP_ADVANCE_TIME = 2.0
+
+
+@dataclass(frozen=True)
+class MapPreview:
+  speed: float
+  distance: float
+  way_id: int
+
+
+def read_map_preview(sm, now: float, replay: bool = False) -> MapPreview | None:
+  msg = sm['mapSpeedLimit']
+  stamp = (msg.positionMonoTime if msg.positionEstimated else msg.gpsMonoTime) * 1e-9
+  if (not sm.valid['mapSpeedLimit'] or not msg.nextSpeedLimitValid or not msg.headingValid or
+      msg.nextSpeedLimitWayId == 0 or not 0 < stamp <= now or
+      not 0 <= now - sm.logMonoTime['mapSpeedLimit'] * 1e-9 <= MAP_MESSAGE_MAX_AGE or
+      not replay and not 0 <= now - sm.recv_time['mapSpeedLimit'] <= MAP_MESSAGE_MAX_AGE or
+      now - stamp > (MAP_MESSAGE_MAX_AGE if msg.positionEstimated else MAP_GPS_MAX_AGE) or
+      not 0 < msg.gpsMonoTime * 1e-9 <= now or now - msg.gpsMonoTime * 1e-9 > MAP_GPS_MAX_AGE or
+      not math.isfinite(msg.nextSpeedLimit) or not 8 <= round(msg.nextSpeedLimit * CV.MS_TO_KPH, 3) <= 145 or
+      not math.isfinite(msg.nextSpeedLimitDistance) or not 0 <= msg.nextSpeedLimitDistance <= 300):
+    return None
+  return MapPreview(msg.nextSpeedLimit, msg.nextSpeedLimitDistance, msg.nextSpeedLimitWayId)
 
 
 def map_cruise_supported(CP) -> bool:
@@ -81,8 +105,48 @@ class MapCruise:
     self._previous_metric = self.metric
     self._manual_override = False
     self.current_kph = 255.
+    self._preview_key = None
+    self._preview_since = self._preview_first_fix = self._preview_last_fix = self._preview_seen = 0.
+    self._preview_qualified = self.preview_active = False
 
-  def update(self, enabled: bool, speed_ms: float | None, gps_time: float, now: float, automatic_e2e: bool = False):
+  def _anticipate(self, speed_ms, gps_time, now, preview, way_id, v_ego):
+    self.preview_active = False
+    if not self.enabled or not self.settings.advance:
+      self._preview_key = None
+      self._preview_qualified = False
+      return speed_ms, None
+    # Carry qualification across the boundary only for the SAME identified way
+    # and limit, with a fresh position. A different/changed road starts normally.
+    entered = (self._preview_qualified and self._preview_key is not None and speed_ms is not None and
+               self._preview_key == (way_id, round(speed_ms, 4)) and 0 <= now - self._preview_seen <= MAP_GPS_MAX_AGE and
+               0 < gps_time <= now and now - gps_time <= MAP_GPS_MAX_AGE and gps_time >= self._preview_last_fix)
+    qualified_fix = self._preview_first_fix if entered else None
+    valid = (preview is not None and 0 < gps_time <= now and now - gps_time <= MAP_GPS_MAX_AGE and
+             math.isfinite(preview.speed) and 8 <= round(preview.speed * CV.MS_TO_KPH, 3) <= 145 and preview.way_id > 0 and
+             math.isfinite(preview.distance) and 0 <= preview.distance <= 300 and math.isfinite(v_ego) and 2 <= v_ego <= 75)
+    if valid:
+      key = preview.way_id, round(preview.speed, 4)
+      if (key != self._preview_key or not 0 <= now - self._preview_seen <= MAP_MESSAGE_MAX_AGE or gps_time < self._preview_last_fix):
+        self._preview_since, self._preview_first_fix = now, gps_time
+        self._preview_qualified = False
+      self._preview_key, self._preview_seen, self._preview_last_fix = key, now, gps_time
+      self._preview_qualified |= now - self._preview_since >= MAP_STABLE_TIME and gps_time > self._preview_first_fix
+      target = self.settings.target(preview.speed * CV.MS_TO_KPH, self.metric)
+      # Higher limits are qualified ahead but applied only on matched entry.
+      # An early lower target can coexist with no-speed E2E until actual recovery.
+      lowering = 8 <= self.current_kph <= 145 and target <= self.current_kph and (speed_ms is None or preview.speed < speed_ms)
+      if self._preview_qualified and preview.distance <= v_ego * MAP_ADVANCE_TIME and lowering:
+        self.preview_active = True
+        return preview.speed, self._preview_first_fix
+    elif not 0 <= now - self._preview_seen <= MAP_GPS_MAX_AGE or gps_time < self._preview_last_fix:
+      # A short map gap cannot apply an early target. Retain only its already
+      # earned qualification, for a fresh exact-way/limit match at the boundary.
+      self._preview_key = None
+      self._preview_qualified = False
+    return speed_ms, qualified_fix
+
+  def update(self, enabled: bool, speed_ms: float | None, gps_time: float, now: float, automatic_e2e: bool = False,
+             *, preview=None, way_id=0, v_ego=0.):
     previous_target = self.target_kph
     settings_changed = self.settings != self._previous_settings or self.metric != self._previous_metric
     enabled = enabled and self.supported
@@ -90,6 +154,8 @@ class MapCruise:
       self.tracking = True
       self._manual_override = False
     self.enabled = enabled
+    actual_speed = speed_ms
+    speed_ms, qualified_fix = self._anticipate(speed_ms, gps_time, now, preview, way_id, v_ego)
     speed = speed_ms * CV.MS_TO_KPH if speed_ms is not None else math.nan
     # Do not turn an unsupported walking-zone/highway limit into a different limit
     # by clipping it. Ordinary cruise retains its existing 8..145 km/h bounds.
@@ -100,6 +166,9 @@ class MapCruise:
     if candidate is None or candidate != self._candidate or gps_time < self._last_fix:
       self._candidate, self._since, self._first_fix = candidate, now, gps_time
       self.target_kph = None
+      if qualified_fix is not None:
+        self._since = now - MAP_STABLE_TIME
+        self._first_fix = qualified_fix
     self._last_fix = gps_time
     # A single frozen GPS fix cannot qualify a new target merely by waiting.
     if candidate is not None and now - self._since >= MAP_STABLE_TIME and gps_time > self._first_fix:
@@ -120,7 +189,7 @@ class MapCruise:
     if not self.automatic_e2e:
       self.e2e_fallback = self.fallback_set_pending = False
       self._missing_since = None
-    elif candidate is None:
+    elif candidate is None or self.preview_active and actual_speed is None:
       if self._missing_since is None or now < self._missing_since:
         self._missing_since = now
       if now - self._missing_since >= MAP_MISSING_TIME and not self.e2e_fallback:
@@ -143,7 +212,7 @@ class MapCruise:
   def finish_recovery(self, set_kph: float):
     # Keep E2E requested until the mapped SET has been applied (or the driver
     # explicitly chooses a manual SET). Publishing follows the carState update.
-    if self.target_kph is not None and (abs(set_kph - self.target_kph) < .01 or not self.tracking):
+    if not self.preview_active and self.target_kph is not None and (abs(set_kph - self.target_kph) < .01 or not self.tracking):
       self.e2e_fallback = self.fallback_set_pending = False
 
   @property
