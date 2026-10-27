@@ -4,17 +4,17 @@ import json
 from pathlib import Path
 import unittest
 
-from openpilot.selfdrive.controls.lib.lane_change_lead import LaneChangeLeadRecovery
+from openpilot.selfdrive.controls.lib.lead_transition import LeadTransitionRecovery
 from openpilot.selfdrive.controls.lib.vision_lead_tracker import VisionLeadObservation
 
 
-class TestLaneChangeLeadRecovery(unittest.TestCase):
+class TestLeadTransitionRecovery(unittest.TestCase):
   def setUp(self):
-    self.recovery = LaneChangeLeadRecovery()
+    self.recovery = LeadTransitionRecovery()
     self.time = 0.0
 
   def sample(self, distance, ego=30.0, speed=29.0, acceleration=0.0, lateral=0.0, std=8.0, probability=0.99,
-             lane_change=True, yaw=0.0, valid=True, dt=0.05, speed_std=2.0, modify=None):
+             yaw=0.0, valid=True, dt=0.05, speed_std=2.0, modify=None):
     self.time += dt
     obs = [VisionLeadObservation(distance, lateral, std, probability) for _ in range(2)]
     raw = [{'present': True, 'radar': False, 'dRel': distance, 'yRel': lateral, 'vLead': speed, 'vLeadK': speed, 'vRel': speed - ego,
@@ -24,7 +24,7 @@ class TestLaneChangeLeadRecovery(unittest.TestCase):
     if modify is not None:
       modify(obs, raw, leads, speed_stds)
     originals = copy.deepcopy((obs, raw, leads, speed_stds))
-    out = self.recovery.update(obs, raw, leads, speed_stds, self.time, ego, lane_change, yaw, valid)
+    out = self.recovery.update(obs, raw, leads, speed_stds, self.time, ego, yaw, valid)
     self.assertEqual((obs, raw, leads, speed_stds), originals)
     for a, b in zip(leads, out, strict=True):
       self.assertEqual({k: v for k, v in a.items() if k not in ('vLead', 'vLeadK', 'vRel')},
@@ -53,15 +53,34 @@ class TestLaneChangeLeadRecovery(unittest.TestCase):
 
   def test_distance_jitter_keeps_private_history(self):
     changes = self.acquire(frames=30, noise=True)
-    self.assertGreaterEqual(len(self.recovery.history), 20)
-    # Every alternating step exceeds the ordinary tracker's 5 m gate.
+    self.assertGreaterEqual(len(self.recovery.history), 12)
+    # Alternating steps exceed 5 m. Keep the consistent private observations,
+    # but publish no optimistic speed across those possible target jumps.
+    self.assertEqual(max(changes), 0.0)
+    for i in range(12):
+      before, out = self.sample(66.2 + i * 0.2, speed=30.0)
+      changes.append(out[0]['vLead'] - before[0]['vLead'])
     self.assertGreater(max(changes), 0.0)
 
-  def test_not_changing_lane_is_exact_passthrough(self):
-    for i in range(60):
-      before, out = self.sample(60.0 + i * 0.3, lane_change=False)
+  def test_cut_in_acquires_without_any_lane_change_input(self):
+    # A settled far lead is replaced by a nearer vehicle while ego goes
+    # straight. Neither turn signals nor lane-change metadata are inputs.
+    for _ in range(80):
+      before, out = self.sample(110.0, speed=30.0)
       self.assertEqual(before, out)
-    self.assertFalse(self.recovery.history)
+    changes = self.acquire(frames=40)
+    self.assertTrue(all(change == 0.0 for change in changes[:17]))
+    self.assertGreater(max(changes), 0.5)
+
+  def test_cut_out_to_farther_lead_has_fresh_acquisition(self):
+    for _ in range(80):
+      self.sample(60.0, speed=30.0)
+    changes = []
+    for i in range(40):
+      before, out = self.sample(100.0 + i * 0.2, speed=30.0)
+      changes.append(out[0]['vLead'] - before[0]['vLead'])
+    self.assertTrue(all(change == 0.0 for change in changes[:17]))
+    self.assertGreater(max(changes), 0.5)
 
   def test_equal_speed_and_closing_do_not_recover(self):
     for rate in (0.0, -0.5, -2.0, -5.0):
@@ -108,6 +127,38 @@ class TestLaneChangeLeadRecovery(unittest.TestCase):
       self.assertEqual(before, out)
     self.assertLess(self.recovery.history[-1].time - self.recovery.history[0].time, self.recovery.MIN_HISTORY)
 
+  def test_small_cut_in_revokes_old_opening_speed_immediately(self):
+    self.acquire()
+    for i in range(12):
+      before, out = self.sample(60.2 + 0.1 * i, speed=29.0)
+      self.assertEqual(before, out)
+    self.assertLess(self.recovery.history[-1].time - self.recovery.history[0].time, self.recovery.MIN_HISTORY)
+
+  def test_same_distance_different_lateral_target_has_no_bridge(self):
+    self.acquire()
+    for i in range(12):
+      before, out = self.sample(67.2 + 0.1 * i, speed=29.0, lateral=2.0)
+      self.assertEqual(before, out)
+
+  def test_braking_cut_in_stays_unmodified_until_new_motion_is_supported(self):
+    self.acquire()
+    for i in range(10):
+      before, out = self.sample(55.0 - i * 0.1, speed=26.0, acceleration=-1.0)
+      self.assertEqual(before, out)
+      self.assertFalse(self.recovery.history)
+    for i in range(12):
+      before, out = self.sample(54.0 + i * 0.2, speed=30.0)
+      self.assertEqual(before, out)
+
+  def test_detection_loss_discards_old_car_before_reacquisition(self):
+    self.acquire()
+    before, out = self.sample(80.0, probability=0.2)
+    self.assertEqual(before, out)
+    self.assertFalse(self.recovery.history)
+    for i in range(12):
+      before, out = self.sample(80.0 + i * 0.2, speed=30.0)
+      self.assertEqual(before, out)
+
   def test_gradual_target_switch_does_not_create_opening(self):
     for i in range(50):
       # Per-frame changes are small, but this is a switch to a farther car,
@@ -118,7 +169,7 @@ class TestLaneChangeLeadRecovery(unittest.TestCase):
   def test_single_outlier_is_quarantined_without_speed_output(self):
     self.acquire(frames=30)
     count = len(self.recovery.history)
-    before, out = self.sample(90.0)
+    before, out = self.sample(73.0)
     self.assertEqual(before, out)
     self.assertEqual(len(self.recovery.history), count)
     before, out = self.sample(66.4, speed=30.0)
@@ -158,13 +209,38 @@ class TestLaneChangeLeadRecovery(unittest.TestCase):
       before, out = self.sample(67.0, lateral=2.0)
       self.assertEqual(before, out)
 
-  def test_recovery_window_expires(self):
+  def test_settled_lead_keeps_tracking_without_rearming_on_expiry(self):
     self.acquire()
-    for i in range(45):
-      before, out = self.sample(67.0 + i * 0.2, lane_change=False)
+    start = self.recovery.acquired_at
+    for i in range(100):
+      before, out = self.sample(67.0 + i * 0.1, speed=32.0)
+      if self.time - start > self.recovery.ACQUISITION_TIME + 1.1:
+        self.assertEqual(before, out)
+        self.assertEqual(self.recovery.reason, 'tracking')
+        self.assertEqual(self.recovery.acquired_at, start)
+    self.assertTrue(self.recovery.history)
+
+  def test_settled_correction_fades_without_rearming(self):
+    corrections = []
+    for i in range(120):
+      before, out = self.sample(60.0 + i * 0.2, speed=32.0)
+      corrections.append(out[0]['vLead'] - before[0]['vLead'])
+    # No abrupt expiry step; the new target's established model speed keeps
+    # this synthetic track consistent throughout the whole acquisition.
+    self.assertGreater(max(corrections), 0.0)
+    for previous, current in zip(corrections[60:-1], corrections[61:], strict=True):
+      self.assertLessEqual(previous - current, 0.100001)
+    self.assertTrue(all(value == 0.0 for value in corrections[82:]))
+    self.assertEqual(self.recovery.reason, 'tracking')
+
+  def test_braking_during_handover_revokes_immediately(self):
+    for i in range(63):
+      self.sample(60.0 + i * 0.2, speed=32.0)
+    self.assertEqual(self.recovery.reason, 'handover')
+    self.assertGreater(self.recovery.correction, 0.0)
+    before, out = self.sample(72.5, speed=31.0, acceleration=-0.5)
     self.assertEqual(before, out)
-    self.assertEqual(self.recovery.reason, 'inactive')
-    self.assertFalse(self.recovery.history)
+    self.assertEqual(self.recovery.correction, 0.0)
 
   def test_input_loss_time_gap_and_invalid_yaw_revoke(self):
     for kwargs in ({'valid': False}, {'dt': 0.3}, {'dt': -0.1}, {'yaw': None}, {'yaw': float('nan')},
@@ -205,17 +281,17 @@ class TestLaneChangeLeadRecovery(unittest.TestCase):
     self.assertEqual(outputs[0], outputs[1])
 
 
-class TestRecordedLaneChange(unittest.TestCase):
+class TestRecordedLeadTransition(unittest.TestCase):
   def test_recorded_target_handoff_and_recovery(self):
-    fixture = json.loads((Path(__file__).parent / 'fixtures/lane_change_lead.json').read_text())
-    recovery = LaneChangeLeadRecovery()
+    fixture = json.loads((Path(__file__).parent / 'fixtures/lead_transition.json').read_text())
+    recovery = LeadTransitionRecovery()
     changed = []
-    for timestamp, ego, changing, yaw, observations, published in fixture['frames']:
+    for timestamp, ego, yaw, observations, published in fixture['frames']:
       obs = [VisionLeadObservation(*o[:4]) for o in observations]
       raw = [{'present': True, 'radar': False, 'dRel': o[0], 'vLead': o[4], 'aLeadK': o[5]} for o in observations]
       leads = [{'dRel': p[0], 'vLead': p[1], 'aLeadK': p[2], 'present': p[3], 'radar': p[4],
                 'vLeadK': p[5], 'vRel': p[6]} for p in published]
-      result = recovery.update(obs, raw, leads, [o[6] for o in observations], timestamp, ego, changing, yaw)
+      result = recovery.update(obs, raw, leads, [o[6] for o in observations], timestamp, ego, yaw)
       for original, updated in zip(leads, result, strict=True):
         self.assertEqual(original['dRel'], updated['dRel'])
         self.assertEqual(original['aLeadK'], updated['aLeadK'])
@@ -225,10 +301,10 @@ class TestRecordedLaneChange(unittest.TestCase):
         changed.append(timestamp)
       # Both heads disagree during the initial acquisition. Do not invent a
       # faster lead to suppress this recorded slowdown before opening is known.
-      if timestamp < 33.0 or timestamp > 36.4:
+      if timestamp < 33.0:
         self.assertEqual(result, leads)
     self.assertTrue(changed)
-    self.assertLess(min(changed), 35.0)  # ordinary distance history matures around 35.6 s
+    self.assertLess(min(changed), 35.6)  # ordinary distance history matures around this point
 
 
 if __name__ == '__main__':

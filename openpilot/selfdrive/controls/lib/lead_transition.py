@@ -1,4 +1,4 @@
-"""Bounded vision-speed recovery while acquiring a lead during a lane change.
+"""Bounded vision-speed recovery during lead acquisition and target transitions.
 
 The ordinary tracker remains authoritative. This observer uses a fresh, short
 history, never a distance difference across a target handoff, and can only raise
@@ -28,28 +28,29 @@ class _Sample:
   model_travel: float
 
 
-class LaneChangeLeadRecovery:
-  RECOVERY_TIME = 2.0
+class LeadTransitionRecovery:
+  ACQUISITION_TIME = 3.0
   HISTORY_TIME = 1.5
   MIN_HISTORY = 0.7
   MIN_SAMPLES = 10
   CONFIRM_TIME = 0.15
   MIN_OPENING = 0.5
   RANGE_NOISE_FLOOR = 1.0
+  FRAME_RANGE_JUMP = 5.0
   MAX_CORRECTION = 2.0  # m/s above the raw model; never a cruise-speed boost
   CORRECTION_RATE = 2.0  # m/s per second, upward only; hazards revoke immediately
+  HANDOVER_RATE = 2.0  # release a settled correction smoothly; never delay a hazard reset
 
   def __init__(self):
     self.reset()
 
   def reset(self):
-    self.active_until = -math.inf
-    self.was_changing = False
     self.time: float | None = None
     self._clear('inactive')
 
   def _clear(self, reason):
     self.history: deque[_Sample] = deque()
+    self.acquired_at: float | None = None
     self.correction = 0.0
     self.confirm_time = 0.0
     self.speed_lower = 0.0
@@ -75,18 +76,27 @@ class LaneChangeLeadRecovery:
       ego_travel = (0.5 * (ego + previous.ego) + yaw * 0.5 * (observation.lateral + previous.lateral)) * dt
       model_step = 0.5 * (model_speed + previous.model_speed) * dt
       prediction = previous.distance + model_step - ego_travel
-      gate = min(12.0, max(5.0, math.hypot(previous.std, observation.std) * 0.75))
+      gate = min(12.0, max(self.FRAME_RANGE_JUMP, math.hypot(previous.std, observation.std) * 0.75))
       travel = previous.travel + ego_travel
       model_travel = previous.model_travel + model_step
       first = self.history[0]
       cumulative_error = observation.distance - first.distance + travel - first.travel - (model_travel - first.model_travel)
       # An uncertainty-scaled frame gate alone can join two different cars.
       # Also reject sustained displacement incompatible with model motion.
-      if abs(observation.distance - prediction) > gate or abs(observation.lateral - lateral_prediction) > 0.5 or abs(cumulative_error) > 8.0:
-        self._uncertain('target_change', timestamp)
+      distance_error = abs(observation.distance - prediction)
+      if distance_error > gate or abs(observation.lateral - lateral_prediction) > 0.5:
+        self._clear('target_change')
+        travel = model_travel = 0.0
+      elif distance_error > self.FRAME_RANGE_JUMP or abs(cumulative_error) > 8.0:
+        # Model uncertainty may justify retaining private history, but not
+        # publishing its opening speed across a possible small cut-in. One
+        # outlier can recover; a persistent displacement starts a fresh track.
+        self._uncertain('range_jump', timestamp)
         if self.history:
           return False
         travel = model_travel = 0.0
+    if not self.history:
+      self.acquired_at = timestamp
     self.history.append(_Sample(timestamp, observation.distance, observation.lateral, observation.std,
                                 ego, model_speed, yaw_rate, travel, model_travel))
     while timestamp - self.history[0].time > self.HISTORY_TIME:
@@ -123,7 +133,7 @@ class LaneChangeLeadRecovery:
     return lower, float(np.mean([s.ego for s in self.history]))
 
   def update(self, observations: list[VisionLeadObservation], raw_leads: list[dict], leads: list[dict], speed_stds: list[float],
-             timestamp: float, ego: float, lane_change: bool, yaw_rate: float | None, valid: bool = True) -> list[dict]:
+             timestamp: float, ego: float, yaw_rate: float | None, valid: bool = True) -> list[dict]:
     if not valid or not math.isfinite(timestamp) or not math.isfinite(ego):
       self.reset()
       return leads
@@ -132,14 +142,6 @@ class LaneChangeLeadRecovery:
       self.reset()
       dt = 0.0
     self.time = timestamp
-    if lane_change:
-      if not self.was_changing:
-        self._clear('acquiring')
-      self.active_until = timestamp + self.RECOVERY_TIME
-    self.was_changing = lane_change
-    if timestamp > self.active_until:
-      self._clear('inactive')
-      return leads
     if not (len(observations) == len(raw_leads) == len(leads) == len(speed_stds) == 2 and
             yaw_rate is not None and math.isfinite(yaw_rate) and abs(yaw_rate) < 0.5 and 15.0 < ego < 50.0):
       self._clear('unsupported')
@@ -168,6 +170,14 @@ class LaneChangeLeadRecovery:
     baseline_speed = min(lead['vLead'] for lead in raw_leads)
     if not self._observe(observation, timestamp, ego, baseline_speed, yaw_rate):
       return leads
+    # Observe continuously, but only add a correction while acquiring a new
+    # target. Keep settled history alive to detect the next cut-in, cut-out or
+    # reacquisition; expiry must not itself create another recovery window.
+    settled = self.acquired_at is None or timestamp - self.acquired_at > self.ACQUISITION_TIME
+    if settled and self.correction <= 0.0:
+      self.correction = self.confirm_time = 0.0
+      self.reason = 'tracking'
+      return leads
     estimate = self._opening_speed()
     if estimate is None:
       self.reason = 'acquiring'
@@ -183,8 +193,12 @@ class LaneChangeLeadRecovery:
       self.reason = 'confirming'
       return leads
     correction = min(self.MAX_CORRECTION, min(speed_stds), max(0.0, lower - baseline_speed))
-    self.correction = min(correction, self.correction + self.CORRECTION_RATE * dt)
-    self.reason = 'opening' if self.correction > 0.0 else 'no_correction'
+    if settled:
+      self.correction = min(correction, max(0.0, self.correction - self.HANDOVER_RATE * dt))
+      self.reason = 'handover' if self.correction > 0.0 else 'tracking'
+    else:
+      self.correction = min(correction, self.correction + self.CORRECTION_RATE * dt)
+      self.reason = 'opening' if self.correction > 0.0 else 'no_correction'
     # Only speed is changed. Presence, distance, braking acceleration and all
     # planner/cruise limits retain their original owners and immediate response.
     output = list(leads)
