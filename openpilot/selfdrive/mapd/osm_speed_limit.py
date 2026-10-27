@@ -187,6 +187,16 @@ def allowed_directions(road: Road) -> tuple[bool, ...]:
   return (True,) if oneway in ('yes', '1', 'true') else (False,) if oneway == '-1' else (True, False)
 
 
+def same_directed_way(first: Road, second: Road) -> bool:
+  # Packing adds floating-point noise, but cannot change road identity,
+  # geometry or direction. OSM coordinates have seven decimal places.
+  return (first.way_id > 0 and first.way_id == second.way_id and
+          allowed_directions(first) == allowed_directions(second) and
+          len(first.geometry) == len(second.geometry) and
+          all(round(a, 7) == round(b, 7) for p, q in zip(first.geometry, second.geometry, strict=True)
+              for a, b in zip(p, q, strict=True)))
+
+
 class RoadTracker:
   """Compare bounded connected paths across fresh fixes before selecting a limit."""
   def __init__(self, *, offline_continuity: bool = False):
@@ -211,6 +221,52 @@ class RoadTracker:
     self._winner_since = self._winner_travel = 0.
     self._branch_recovery: tuple[RoadMatch, GpsFix, float, float, int] | None = None
     self.control_reason = 'noRoadMatch'
+
+  def inherit(self, previous: 'RoadTracker', roads: tuple[Road, ...], fix: GpsFix, local_time: datetime | None):
+    """Revalidate motion history against a new source, never copy its topology."""
+    self.reset()
+    if (previous._path_fix is None or not previous._paths or
+        not 0 <= fix.timestamp - previous._path_fix.timestamp <= GPS_MAX_AGE):
+      return
+    self._local_time = local_time
+    self._set_roads(roads)
+    by_id: dict[int, list[Road]] = {}
+    for road in roads:
+      by_id.setdefault(road.way_id, []).append(road)
+
+    def reproject(match: RoadMatch | None, observation: GpsFix | None) -> RoadMatch | None:
+      if match is None or observation is None:
+        return None
+      options = by_id.get(match.road.way_id, ())
+      if len(options) != 1 or not same_directed_way(match.road, options[0]):
+        return None
+      candidates = road_candidates((options[0],), observation, TRACK_RADIUS, local_time)
+      return next((c for c in candidates if c.forward == match.forward), None)
+
+    paths = []
+    for match, score, since, travelled in previous._paths:
+      projected = reproject(match, previous._path_fix)
+      if projected is None:
+        return  # incomplete history must qualify again through ordinary acquisition
+      paths.append((projected, score, since, travelled))
+    self._paths = paths
+    self._path_fix = previous._path_fix
+    self.match = reproject(previous.match, previous.fix)
+    self.fix = previous.fix if self.match is not None else None
+    self._stop_anchor = previous._stop_anchor if self.match is not None else None
+    self._processed = previous._processed
+    self._result = reproject(previous._result, previous._path_fix)
+    # New speed tags can introduce a conflict without any new motion evidence.
+    if self._result is not None and any(
+        (old.speed, old.advisory_speed) == (previous._result.speed, previous._result.advisory_speed) and
+        (new.speed, new.advisory_speed) != (self._result.speed, self._result.advisory_speed)
+        for (old, *_), (new, *_) in zip(previous._paths, paths, strict=True)):
+      self._result = None
+    if previous._winner is not None:
+      self._winner = next((match.road for match, _, _, _ in paths
+                           if same_directed_way(match.road, previous._winner)), None)
+      if self._winner is not None:
+        self._winner_since, self._winner_travel = previous._winner_since, previous._winner_travel
 
   def _set_roads(self, roads: tuple[Road, ...]):
     self._roads = roads
@@ -771,6 +827,7 @@ class OSMSpeedLimit:
     self._has_timed_roads = False
     self._tracker = RoadTracker()
     self._offline_tracker = RoadTracker(offline_continuity=True)
+    self._active_tracker: RoadTracker | None = None
     self._offline = OfflineWorker()
     self._offline_speed_inputs = (None, None)
     self._offline_speed_roads = ()
@@ -800,9 +857,7 @@ class OSMSpeedLimit:
       live = live_by_id.get(road.way_id)
       # Only reconcile the same complete, directed way. Offline packing adds
       # floating-point noise; OSM coordinates have seven decimal places.
-      if (live is not None and allowed_directions(live) == allowed_directions(road) and
-          len(live.geometry) == len(road.geometry) and
-          all(round(a, 7) == round(b, 7) for p, q in zip(live.geometry, road.geometry, strict=True) for a, b in zip(p, q, strict=True))):
+      if live is not None and same_directed_way(live, road):
         keys = {key for key in road.tags.keys() | live.tags.keys()
                 if key == 'maxspeed' or key.startswith('maxspeed:') or key in ('school_zone', 'hazard')}
         tags = {key: value for key, value in road.tags.items() if key not in keys}
@@ -846,6 +901,8 @@ class OSMSpeedLimit:
       self._wake.set()
     if fix is None:
       self._tracker.reset()
+      self._offline_tracker.reset()
+      self._active_tracker = None
       return None
     # Start only after the process has forked, on-road with a valid fix.
     if self._thread is None or not self._thread.is_alive():
@@ -858,10 +915,11 @@ class OSMSpeedLimit:
     # A fetch may complete just after the caller sampled `now`, before this
     # snapshot was read. Its internal completion timestamp is still fresh.
     if using_offline:
-      self._tracker.reset()
       self.control_reason = 'cacheUnavailable'
       if offline_roads is None:
+        self._tracker.reset()
         self._offline_tracker.reset()
+        self._active_tracker = None
         return None
       # The live coverage circle can expire before the fetched way's geometry
       # ends. Reconcile speed tags only; offline matching/coverage and the live
@@ -877,6 +935,13 @@ class OSMSpeedLimit:
     local_time = self.clock.local_time(fix, now) if self._has_timed_roads else None
     if local_time is not None:
       local_time = local_time.replace(second=0, microsecond=0)
+    if tracker is not self._active_tracker:
+      if self._active_tracker is not None:
+        tracker.inherit(self._active_tracker, roads, fix, local_time)
+        self._active_tracker.reset()
+      else:
+        tracker.reset()
+      self._active_tracker = tracker
     match = tracker.update(roads, fix, local_time)
     gps_time = fix.gps_timestamp if fix.estimated else fix.timestamp
     self.control_reason = 'cacheUnavailable' if using_offline else 'noRoadMatch' if match is None else 'gpsStale'

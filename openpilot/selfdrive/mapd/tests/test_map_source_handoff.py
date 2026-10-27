@@ -134,3 +134,101 @@ def test_unmatched_and_untagged_roads_remain_distinguishable():
   assert service.speed_source == 'live' and service.speed_match.road.way_id == 2
   assert service.update(replace(fix, bearing=90., timestamp=101.), 101.)[1:3] == (None, None)
   assert service.speed_source == 'none' and service.speed_match is None
+
+
+@pytest.mark.parametrize('to_offline', [False, True])
+def test_source_handoff_preserves_mainline_at_incoming_parallel_ramp(to_offline):
+  main = polyline(((0, -200), (0, 300), (0, 600)), '100', way_id=1, highway='motorway', oneway='yes')
+  ramp = polyline(((-30, -100), (0, 300)), None, way_id=2, highway='motorway_link',
+                  oneway='yes', **{'maxspeed:advisory': '70'})
+  live = main, ramp
+  offline = tuple(replace(r, node_ids=(), geometry=tuple((lat + 1e-14, lon - 1e-14) for lat, lon in r.geometry)) for r in live)
+  available = [offline[:1]]
+  service = osm.OSMSpeedLimit()
+  service._thread = Mock()
+  service._offline = SimpleNamespace(update=lambda fix, now: available[0])
+  fix = osm.GpsFix(*point(0, 40), 6., 15., 100., speed=20.)
+  if to_offline:
+    service._cache = live[:1], fix, 100.
+  assert service.update(fix, 100.)[1] == pytest.approx(100/3.6)
+
+  available[0] = offline
+  service._cache = ((), None, -float('inf')) if to_offline else (live, fix, 100.1)
+  # A source switch is not a new GPS observation, and must not re-acquire the
+  # nearby incoming arm. Its more favourable heading is deliberately tempting.
+  for step in range(5):
+    moved = replace(fix, latitude=point(0, 40 + 20 * step)[0], timestamp=100. + step)
+    sample = service.update(moved, moved.timestamp + .1)
+    assert sample[1:3] == (pytest.approx(100/3.6), None)
+    assert service.speed_match.road.way_id == 1
+    assert service.speed_source == ('offline' if to_offline else 'live')
+    assert (service.control_match is None) == to_offline
+    assert bool(service.speed_match.road.node_ids) != to_offline
+
+
+def test_handoff_keeps_a_real_outgoing_ramp_reachable():
+  main = polyline(((0, -100), (0, 0), (0, 200)), '100', way_id=1, highway='motorway', oneway='yes')
+  ramp = polyline(((0, 0), (40, 100)), None, way_id=2, highway='motorway_link',
+                  oneway='yes', **{'maxspeed:advisory': '70'})
+  service = osm.OSMSpeedLimit()
+  service._thread = Mock()
+  service._offline = SimpleNamespace(update=lambda fix, now: (replace(main, node_ids=()),))
+  fix = osm.GpsFix(*point(0, -20), 0., 3., 100., speed=20.)
+  assert service.update(fix, 100.)[1] == pytest.approx(100/3.6)
+  service._cache = (main, ramp), fix, 100.1
+  assert service.update(fix, 100.1)[1] == pytest.approx(100/3.6)
+  for step in range(1, 5):
+    moved = osm.GpsFix(*point(8 * step, 20 * step), 21.8, 3., 100. + step, speed=22.)
+    sample = service.update(moved, moved.timestamp)
+  assert sample[1:3] == (None, pytest.approx(70/3.6))
+  assert service.speed_match.road.way_id == 2
+
+
+@pytest.mark.parametrize('change', ['id', 'geometry', 'direction', 'zero_id', 'duplicate', 'stale'])
+def test_handoff_does_not_transfer_history_between_unverified_roads(change):
+  road = polyline(((0, -100), (0, 100)), '100', way_id=1, oneway='yes')
+  fix = osm.GpsFix(*point(0, 0), 0., 3., 100., speed=10.)
+  previous, current = osm.RoadTracker(), osm.RoadTracker()
+  assert previous.update((road,), fix) is not None
+  destination = replace(road, tags={**road.tags, 'maxspeed': '80'}, node_ids=())
+  if change == 'id':
+    destination = replace(destination, way_id=2)
+  elif change == 'geometry':
+    destination = replace(destination, geometry=tuple(point(1, y) for y in (-100, 100)))
+  elif change == 'direction':
+    destination = replace(destination, tags={**destination.tags, 'oneway': '-1'})
+  elif change == 'zero_id':
+    road, destination = replace(road, way_id=0), replace(destination, way_id=0)
+    previous.reset()
+    previous.update((road,), fix)
+  elif change == 'stale':
+    fix = replace(fix, timestamp=104.)
+  roads = (destination, destination) if change == 'duplicate' else (destination,)
+  current.inherit(previous, roads, fix, None)
+  assert current.match is None and current._paths == [] and current._result is None
+
+
+def test_handoff_preserves_ambiguity_and_uses_new_speed_tags():
+  main = polyline(((0, -100), (0, 100)), '100', way_id=1, oneway='yes')
+  parallel = polyline(((2, -100), (2, 100)), '100', way_id=2, oneway='yes')
+  previous, current = osm.RoadTracker(), osm.RoadTracker()
+  fix = osm.GpsFix(*point(1, 0), 0., 15., 100., speed=20.)
+  assert previous.update((main, parallel), fix) is not None
+  changed = replace(parallel, tags={**parallel.tags, 'maxspeed': '70'}, node_ids=())
+  roads = replace(main, node_ids=()), changed
+  current.inherit(previous, roads, fix, None)
+  assert len(current._paths) == 2
+  assert current.update(roads, fix) is None  # repeated fix cannot qualify the new conflict
+  assert current.update(roads, replace(fix, latitude=point(1, 20)[0], timestamp=101.)) is None
+
+
+def test_position_loss_clears_both_source_histories():
+  road = polyline(((0, -100), (0, 100)), '100', way_id=1, oneway='yes')
+  service = osm.OSMSpeedLimit()
+  service._thread = Mock()
+  service._offline = SimpleNamespace(update=lambda fix, now: (road,))
+  fix = osm.GpsFix(*point(0, 0), 0., 3., 100.)
+  assert service.update(fix, 100.)[1] == pytest.approx(100/3.6)
+  assert service.update(None, 101.) is None
+  assert service._active_tracker is None
+  assert service._tracker._paths == service._offline_tracker._paths == []
