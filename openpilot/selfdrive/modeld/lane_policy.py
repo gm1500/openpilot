@@ -8,6 +8,7 @@ import time
 
 import numpy as np
 
+from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 
 DT = 1.0 / ModelConstants.MODEL_RUN_FREQ
@@ -46,8 +47,7 @@ BIAS_BUILD_RATE = 0.00001                   # 1/(m s)
 BIAS_RELEASE_PREVIEW = 0.35                 # s
 BIAS_RELEASE_GAIN = 0.003                   # 1/(m^2 s)
 BIAS_RELEASE_RATE = 0.00008                 # 1/(m s)
-CURVE_THRESHOLD = 0.00060                   # 1/m, guard lane-target reversals in curves
-CURVE_REVERSAL_TIME = 0.30                  # s
+CORRECTION_FILTER_TIME = 0.50               # s, plan-long's lane-correction smoothing
 TURN_THRESHOLD = 0.00015                    # 1/m, detect meaningful E2E direction changes
 TURN_RELEASE_TIME = 0.35                    # s
 MAX_CORRECTION = 0.00045                    # 1/m
@@ -171,6 +171,7 @@ class LanePolicy:
     self.last_mode = None
     self.last_mode_time = self.last_anchor_time = 0.0
     self.error_logged = False
+    self.correction_filter = FirstOrderFilter(0.0, CORRECTION_FILTER_TIME, DT)
     self.reset()
 
   @property
@@ -182,8 +183,9 @@ class LanePolicy:
     self.active = self.holding_line = False
     self.arm_time = self.line_loss_time = self.correction = 0.0
     self.width: float | None = None
-    self.last_turn_sign = self.last_curve_sign = 0
-    self.turn_release = self.curve_release = 0.0
+    self.last_turn_sign = 0
+    self.turn_release = 0.0
+    self.correction_filter.x = 0.0
     self.reset_motion()
     self.reset_bias()
 
@@ -313,25 +315,18 @@ class LanePolicy:
       self.last_turn_sign = direction
 
   def _guard_correction(self, correction: float, e2e: float) -> tuple[float, bool]:
-    """Release stale alignment during lane-target or E2E turn reversals."""
-    target_sign = sign(correction) if abs(correction) >= CORRECTION_DEADBAND else 0
-    if abs(e2e) >= CURVE_THRESHOLD:
-      if target_sign and self.last_curve_sign and target_sign != self.last_curve_sign:
-        self.curve_release = CURVE_REVERSAL_TIME
-      if target_sign:
-        self.last_curve_sign = target_sign
-    else:
-      self.last_curve_sign = 0
-    guarded = self.turn_release > 0.0 or self.curve_release > 0.0
+    """Smooth lane-target changes; retain the separate E2E turn-reversal guard."""
+    # Unity-gain filtering replaces the 0.3 s lane-target reversal pause.
+    # Keep the learned centering bias and final slew limits outside this filter.
+    correction = self.correction_filter.update(correction)
+    guarded = self.turn_release > 0.0
     if guarded:
       self.reset_motion()
     if self.turn_release > 0.0:
       self.turn_release = max(0.0, self.turn_release - DT)
       if correction * e2e < 0.0:
         correction = 0.0
-    if self.curve_release > 0.0:
-      self.curve_release = max(0.0, self.curve_release - DT)
-      correction = 0.0
+        self.correction_filter.x = 0.0
     return correction, guarded
 
   def update(self, model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
@@ -367,7 +362,7 @@ class LanePolicy:
       offset, heading = near_geometry(center, x)
       self._track_turn(e2e_curvature)
       feedback_allowed = lateral_active and not steering_pressed and strong and v_ego >= 10.0 and abs(e2e_curvature) * v_ego ** 2 < 1.5
-      motion_allowed = feedback_allowed and abs(offset) <= BIAS_MAX_OFFSET and self.turn_release <= 0.0 and self.curve_release <= 0.0
+      motion_allowed = feedback_allowed and abs(offset) <= BIAS_MAX_OFFSET and self.turn_release <= 0.0
       geometric_rate = v_ego * heading
       rate, ready = self.update_motion(offset, geometric_rate, motion_allowed, frame_time)
       if strong and correction * offset > 0.0:
