@@ -1,13 +1,15 @@
-"""Fit an E2E-shaped lane target over the shared, reliable path horizon.
+"""plan-long centering with batmobile's lane qualification and fallback.
 
-The virtual target is used for a bounded curvature correction. The raw model
-path stays intact for logging and fallback. Positive offset means lane right.
+The correction follows commaai/openpilot commit 1c2df3b: two-second lookahead,
+half gain, confidence/speed weighting and a 0.5 s filter. The raw model path
+and steering action stay intact; only the qualified correction is added.
 """
 import math
 import time
 
 import numpy as np
 
+from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 
 DT = 1.0 / ModelConstants.MODEL_RUN_FREQ
@@ -21,50 +23,19 @@ ARM_TIME = 0.75                             # s of strong two-line confidence
 WIDTH_TIME = 9.95                           # s, learned width for one-line hold
 ONE_LINE_HOLD_TIME = 1.00                    # s
 WIDTH_FIT_START, WIDTH_FIT_END = 8.0, 55.0    # m
-ANCHOR_BLEND_START, ANCHOR_BLEND_END = 10.0, 45.0  # m, spatial transition to lane geometry
-ANCHOR_FIT_START, ANCHOR_FIT_END = 8.0, 55.0  # m, shared lane/E2E fit, no extrapolation
-HOLD_FIT_END = 40.0                         # m, retain v3's one-line behavior
-ANCHOR_FALLBACK_END = 30.0                   # m, short-plan fit without extrapolation
-MIN_LOOKAHEAD, MAX_LOOKAHEAD = 32.0, 45.0     # m
-PATH_WEIGHT_SPREAD = 0.25                   # fraction of lookahead, spatial weighting
-HEADING_GAIN = 0.55
-NEAR_FIT_END = 20.0                         # m, lane-relative offset and tangent
-MOTION_BIAS_TIME = 2.0                       # s, reconcile heading with offset changes
-MOTION_MAX_BIAS = 0.10                      # m/s
-MOTION_MAX_GAP = 0.15                       # s, reject stale frame history
-MOTION_MAX_STEP = 0.10                      # m/frame, reject lane estimate jumps
-APPROACH_TIME = 0.20                        # s
-APPROACH_MAX_FRACTION = 0.25
-BIAS_ARM_TIME = 2.0                         # s of steady, same-side error
-BIAS_MAX_PAUSE = 2.0                        # s, discard qualification after long motion
-BIAS_DEADBAND = 0.015                       # m
-BIAS_MAX_OFFSET = 0.35                      # m, leave large transients to base anchoring
-BIAS_MAX_RATE = 0.05                        # m/s, integrate only during steady motion
-BIAS_KI = 0.00008                           # 1/(m^2 s)
-BIAS_MAX = 0.00015                          # 1/m, inside the shared correction limit
-BIAS_BUILD_RATE = 0.00001                   # 1/(m s)
-BIAS_RELEASE_PREVIEW = 0.35                 # s
-BIAS_RELEASE_GAIN = 0.003                   # 1/(m^2 s)
-BIAS_RELEASE_RATE = 0.00008                 # 1/(m s)
-CURVE_THRESHOLD = 0.00060                   # 1/m, guard lane-target reversals in curves
-CURVE_REVERSAL_TIME = 0.30                  # s
-TURN_THRESHOLD = 0.00015                    # 1/m, detect meaningful E2E direction changes
-TURN_RELEASE_TIME = 0.35                    # s
-MAX_CORRECTION = 0.00045                    # 1/m
-ENGAGE_STEP, RELEASE_STEP = 0.00008, 0.00020 # 1/m per model frame
-CORRECTION_DEADBAND = 0.000012               # 1/m
 MAX_LANE_CHANGE_PROB = 0.10
 LOG_INTERVAL = 1.0                         # s
+LOOKAHEAD_TIME = 2.0                        # s
+MIN_LOOKAHEAD = 10.0                        # m
+CENTER_GAIN = 0.5
+MAX_CORRECTION_ACCEL = 0.5                  # m/s^2, added lateral acceleration
+CORRECTION_FILTER_TIME = 0.5                # s
 
 
 def is_enabled(value: bytes | bool | None) -> bool:
   if value is None:
     return True
   return value == b"1" if isinstance(value, (bytes, bytearray)) else bool(value)
-
-
-def sign(value: float) -> int:
-  return 1 if value > 0.0 else -1 if value < 0.0 else 0
 
 
 def inner_probs(model_output: dict[str, np.ndarray]) -> tuple[float, float]:
@@ -81,88 +52,30 @@ def lane_width(left: np.ndarray, right: np.ndarray, fit: np.ndarray) -> tuple[fl
   return float(median), bool(valid)
 
 
-def anchor_gain(x: np.ndarray | float) -> np.ndarray | float:
-  progress = np.clip((np.asarray(x) - ANCHOR_BLEND_START) / (ANCHOR_BLEND_END - ANCHOR_BLEND_START), 0.0, 1.0)
-  return progress ** 3 * (10.0 + progress * (-15.0 + 6.0 * progress))
-
-
-def blend_path(center: np.ndarray, e2e: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, float]:
-  """Align E2E's offset/heading over the whole fit, then blend residual shape.
-
-  Near samples retain E2E's shape plus the affine alignment. Far samples reach
-  the lane midpoint. This virtual target need not start at the vehicle origin:
-  its displacement is a tracking error, not a curvature to differentiate.
-  """
-  heading, offset = np.polyfit(x, center - e2e, 1)
-  aligned = e2e + offset + heading * x
-  return aligned + anchor_gain(x) * (center - aligned), float(heading)
-
-
-def anchor_correction(output: dict[str, np.ndarray], center: np.ndarray, x: np.ndarray, speed: float,
-                      path_blend: bool = True) -> tuple[float, float, float]:
+def plan_lane_correction(output: dict[str, np.ndarray], center: np.ndarray, x: np.ndarray,
+                         speed: float, confidence: float) -> tuple[float, float, float]:
+  """Apply upstream's curvature rule to the centre accepted by our detector."""
   position = np.asarray(output['plan'][0, :, Plan.POSITION], dtype=np.float64)
   if position.ndim != 2 or position.shape[1] < 2:
     raise ValueError("E2E position path has an invalid shape")
   plan_x, plan_y = position[:, 0], position[:, 1]
-  valid = np.isfinite(plan_x) & np.isfinite(plan_y)
-  plan_x, plan_y = plan_x[valid], plan_y[valid]
-  if plan_x.shape[0] < 4 or np.any(np.diff(plan_x) <= 0.0):
+  if (len(plan_x) < 4 or not np.all(np.isfinite(plan_x)) or not np.all(np.isfinite(plan_y)) or
+      np.any(np.diff(plan_x) <= 0.0)):
     raise ValueError("E2E position path is not a finite increasing path")
-  fit = (x >= ANCHOR_FIT_START) & (x <= ANCHOR_FALLBACK_END)
-  if np.count_nonzero(fit) < 3:
-    raise ValueError("lane horizon has too few anchor samples")
-  if plan_x[0] > x[fit][0] or plan_x[-1] < x[fit][-1]:
-    raise ValueError("E2E position path does not cover the anchor horizon")
-  extended = (x >= ANCHOR_FIT_START) & (x <= (ANCHOR_FIT_END if path_blend else HOLD_FIT_END))
-  if path_blend:
-    fit = extended & (x <= plan_x[-1])
-  elif plan_x[-1] >= x[extended][-1]:
-    fit = extended
-  fit_x = x[fit]
-  e2e = np.interp(fit_x, plan_x, plan_y)
-  relative = center[fit] - e2e
-  if not np.all(np.isfinite(relative)):
-    raise ValueError("lane/E2E anchor path is not finite")
-  lookahead = float(np.clip(2.0 * speed, MIN_LOOKAHEAD, MAX_LOOKAHEAD))
-  if path_blend:
-    target, heading = blend_path(center[fit], e2e, fit_x)
-    gain = anchor_gain(fit_x)
-    # Keep v3's heading damping while fitting an arc to all target samples.
-    field = gain * (target - e2e - (1.0 - HEADING_GAIN) * heading * fit_x)
-    weights = np.exp(-0.5 * ((fit_x - lookahead) / (PATH_WEIGHT_SPREAD * lookahead)) ** 2)
-    weights *= np.gradient(fit_x) * fit_x ** 2
-    # Normalize the least-squares arc response to a parallel path displacement.
-    # Steady centering keeps exactly v3's gain at every speed/covered horizon.
-    error = float(anchor_gain(lookahead) * np.dot(weights, field) / np.dot(weights, gain))
-  else:
-    # A single line plus learned width does not justify the new far shape fit.
-    heading, offset = np.polyfit(fit_x, relative, 1)
-    error = float(anchor_gain(lookahead) * (HEADING_GAIN * heading * lookahead + offset))
-  correction = float(np.clip(2.0 * error / (lookahead * lookahead), -MAX_CORRECTION, MAX_CORRECTION))
+  if x.shape != center.shape:
+    raise ValueError("lane centre has an invalid shape")
+  lookahead = max(LOOKAHEAD_TIME * speed, MIN_LOOKAHEAD)
+  # Keep batmobile's no-extrapolation rule at the new, longer lookahead.
+  if not (plan_x[0] <= lookahead <= plan_x[-1] and x[0] <= lookahead <= x[-1]):
+    raise ValueError("lane/model path does not cover the lookahead")
+  upper = int(np.searchsorted(x, lookahead))
+  if not np.all(np.isfinite(center[max(0, upper - 1):upper + 1])):
+    raise ValueError("lane centre is not finite at the lookahead")
+  error = float(np.interp(lookahead, x, center) - np.interp(lookahead, plan_x, plan_y))
+  weight = float(np.clip(confidence, 0.0, 1.0)) * np.interp(speed, [4.0, 8.0], [0.0, 1.0])
+  max_curvature = MAX_CORRECTION_ACCEL / max(speed, 1.0) ** 2
+  correction = float(np.clip(CENTER_GAIN * weight * 2.0 * error / lookahead ** 2, -max_curvature, max_curvature))
   return correction, error, lookahead
-
-
-def near_geometry(center: np.ndarray, x: np.ndarray) -> tuple[float, float]:
-  fit = (x >= 0.0) & (x <= NEAR_FIT_END)
-  if np.count_nonzero(fit) < 3 or not np.all(np.isfinite(center[fit])):
-    raise ValueError("invalid near-lane geometry")
-  _, heading, offset = np.polyfit(x[fit], center[fit], 2)
-  return float(offset), float(heading)
-
-
-def soften_correction(correction: float) -> float:
-  if abs(correction) >= CORRECTION_DEADBAND:
-    return correction
-  ramp = float(np.clip((abs(correction) / CORRECTION_DEADBAND - 0.5) * 2.0, 0.0, 1.0))
-  return correction * ramp * ramp * (3.0 - 2.0 * ramp)
-
-
-def approach_scale(offset: float, rate: float) -> float:
-  if offset * rate >= 0.0:
-    return 1.0
-  near_weight = float(np.clip((0.30 - abs(offset)) / 0.20, 0.0, 1.0))
-  fraction = min(APPROACH_TIME * abs(rate) / max(abs(offset), 1e-6), APPROACH_MAX_FRACTION)
-  return 1.0 - near_weight * fraction
 
 
 class LanePolicy:
@@ -171,6 +84,7 @@ class LanePolicy:
     self.last_mode = None
     self.last_mode_time = self.last_anchor_time = 0.0
     self.error_logged = False
+    self.correction_filter = FirstOrderFilter(0.0, CORRECTION_FILTER_TIME, DT)
     self.reset()
 
   @property
@@ -182,27 +96,13 @@ class LanePolicy:
     self.active = self.holding_line = False
     self.arm_time = self.line_loss_time = self.correction = 0.0
     self.width: float | None = None
-    self.last_turn_sign = self.last_curve_sign = 0
-    self.turn_release = self.curve_release = 0.0
-    self.reset_motion()
-    self.reset_bias()
-
-  def reset_motion(self) -> None:
-    self.motion_time: float | None = None
-    self.motion_offset = self.motion_bias = 0.0
-
-  def reset_bias_arm(self) -> None:
-    self.bias_arm_time = self.bias_pause_time = 0.0
-    self.bias_error_sign = 0
-
-  def reset_bias(self) -> None:
-    self.bias = 0.0
-    self.reset_bias_arm()
+    self.lane_confidence = 0.0
+    self.correction_filter.x = 0.0
 
   def _mode(self, mode: str) -> None:
     now = time.monotonic()
     if self.logger is not None and mode != self.last_mode and now - self.last_mode_time >= LOG_INTERVAL:
-      self.logger.info(f"ui-lp-full-center: {mode}")
+      self.logger.info(f"lp-plan-long: {mode}")
       self.last_mode, self.last_mode_time = mode, now
 
   def _fallback(self, e2e: float, reason: str) -> float:
@@ -210,23 +110,24 @@ class LanePolicy:
     self._mode(reason)
     return float(e2e)
 
-  def _record(self, lookahead: float, error: float, e2e: float, offset: float, rate: float, geometric_rate: float,
-              ready: bool, path_blend: bool) -> None:
+  def _record(self, lookahead: float, error: float, e2e: float) -> None:
     now = time.monotonic()
     if self.logger is not None and now - self.last_anchor_time >= LOG_INTERVAL:
       self.logger.info(" ".join((
-        f"lp-e2e-blend: x={lookahead:.1f}m error={error:+.3f}m corr={self.correction:+.6f} e2e={e2e:+.6f}",
-        f"offset={offset:+.3f}m rate={rate:+.3f}m/s bias={self.bias:+.6f}",
-        f"geom_rate={geometric_rate:+.3f}m/s rate_bias={self.motion_bias:+.3f}m/s motion_ready={int(ready)}",
-        f"bias_arm={self.bias_arm_time:.2f}s bias_pause={self.bias_pause_time:.2f}s",
-        f"path_blend={int(path_blend)}",
+        f"lp-plan-long: x={lookahead:.1f}m error={error:+.3f}m corr={self.correction:+.6f} e2e={e2e:+.6f}",
+        f"confidence={self.lane_confidence:.3f} one_line={int(self.holding_line)}",
       )))
       self.last_anchor_time = now
 
-  def _centerline(self, output: dict[str, np.ndarray], x: np.ndarray) -> tuple[np.ndarray | None, bool]:
+  def _centerline(self, output: dict[str, np.ndarray], x: np.ndarray,
+                  lookahead: float = WIDTH_FIT_END) -> tuple[np.ndarray | None, bool]:
     left, right = output['lane_lines'][0, 1:3, :, 0].astype(np.float64)
     left_prob, right_prob = inner_probs(output)
     fit = (x >= WIDTH_FIT_START) & (x <= WIDTH_FIT_END)
+    if lookahead > WIDTH_FIT_END:
+      # Apply the same detector checks through the samples used by the longer lookahead.
+      upper = min(int(np.searchsorted(x, lookahead)), len(x) - 1)
+      fit = (x >= WIDTH_FIT_START) & (x <= x[upper])
     if x.shape != left.shape or np.count_nonzero(fit) < 3:
       raise ValueError("lane-line horizon does not match ModelConstants.X_IDXS")
     valid_left = np.isfinite(left_prob) and left_prob >= RETAIN_LINE_PROB and np.all(np.isfinite(left[fit]))
@@ -238,101 +139,17 @@ class LanePolicy:
         self.line_loss_time, self.holding_line = 0.0, False
         if strong:
           self.width = width if self.width is None else self.width + min(DT / WIDTH_TIME, 1.0) * (width - self.width)
+        self.lane_confidence = min(left_prob, right_prob)
         return 0.5 * (left + right), strong
     # Preserve the existing left-line priority when two visible lines disagree.
     if self.active and self.width is not None and (valid_left or valid_right):
       self.line_loss_time += DT
       if self.line_loss_time <= ONE_LINE_HOLD_TIME:
         self.holding_line = True
+        # Weight the reconstructed centre by the line actually used, not the missing line.
+        self.lane_confidence = left_prob if valid_left else right_prob
         return (left + self.width / 2.0 if valid_left else right - self.width / 2.0), False
     return None, False
-
-  def update_motion(self, offset: float, geometric_rate: float, allowed: bool,
-                    frame_time: float | None = None) -> tuple[float, bool]:
-    """Remove persistent heading-rate error without filtering the steering command."""
-    if not allowed:
-      self.reset_motion()
-      return geometric_rate, False
-    if frame_time is None:
-      frame_time = 0.0 if self.motion_time is None else self.motion_time + DT
-    if not all(math.isfinite(value) for value in (offset, geometric_rate, frame_time)):
-      self.reset_motion()
-      raise ValueError("invalid lane-motion sample")
-    ready = False
-    if self.motion_time is not None:
-      dt, step = frame_time - self.motion_time, offset - self.motion_offset
-      ready = 0.0 < dt <= MOTION_MAX_GAP and abs(step) < MOTION_MAX_STEP
-      if ready:
-        innovation = dt * (geometric_rate - self.motion_bias) - step
-        self.motion_bias = float(np.clip(self.motion_bias + innovation / (MOTION_BIAS_TIME + dt), -MOTION_MAX_BIAS, MOTION_MAX_BIAS))
-      else:
-        self.motion_bias = 0.0
-    self.motion_time, self.motion_offset = frame_time, offset
-    return geometric_rate - self.motion_bias, ready
-
-  def update_bias(self, offset: float, rate: float, base: float, allowed: bool) -> float:
-    """Learn steady centering error; hold at centre and unwind before crossing."""
-    if not allowed or abs(offset) > BIAS_MAX_OFFSET:
-      self.reset_bias()
-      return 0.0
-    error = math.copysign(max(abs(offset) - BIAS_DEADBAND, 0.0), offset)
-    bias_sign = sign(self.bias)
-    projected = offset + BIAS_RELEASE_PREVIEW * rate
-    release = bias_sign * min(bias_sign * offset, bias_sign * projected, 0.0)
-    if release * self.bias < 0.0:
-      change = float(np.clip(BIAS_RELEASE_GAIN * release, -BIAS_RELEASE_RATE, BIAS_RELEASE_RATE)) * DT
-      self.bias = math.copysign(max(abs(self.bias) - abs(change), 0.0), self.bias)
-      self.reset_bias_arm()
-    elif error == 0.0:
-      self.reset_bias_arm()
-    else:
-      if sign(error) != self.bias_error_sign:
-        self.reset_bias_arm()
-      self.bias_error_sign = sign(error)
-      steady = abs(rate) <= BIAS_MAX_RATE
-      if steady:
-        self.bias_pause_time = 0.0
-        self.bias_arm_time = min(self.bias_arm_time + DT, BIAS_ARM_TIME)
-      else:
-        self.bias_pause_time = min(self.bias_pause_time + DT, BIAS_MAX_PAUSE)
-        if self.bias_pause_time >= BIAS_MAX_PAUSE:
-          self.bias_arm_time = 0.0
-      if steady and self.bias_arm_time >= BIAS_ARM_TIME:
-        change = float(np.clip(BIAS_KI * error, -BIAS_BUILD_RATE, BIAS_BUILD_RATE)) * DT
-        candidate = float(np.clip(self.bias + change, -BIAS_MAX, BIAS_MAX))
-        total = base + candidate
-        if abs(total) <= MAX_CORRECTION or change * total < 0.0:
-          self.bias = candidate
-    return self.bias
-
-  def _track_turn(self, e2e: float) -> None:
-    if abs(e2e) >= TURN_THRESHOLD:
-      direction = sign(e2e)
-      if self.last_turn_sign and direction != self.last_turn_sign:
-        self.turn_release = TURN_RELEASE_TIME
-      self.last_turn_sign = direction
-
-  def _guard_correction(self, correction: float, e2e: float) -> tuple[float, bool]:
-    """Release stale alignment during lane-target or E2E turn reversals."""
-    target_sign = sign(correction) if abs(correction) >= CORRECTION_DEADBAND else 0
-    if abs(e2e) >= CURVE_THRESHOLD:
-      if target_sign and self.last_curve_sign and target_sign != self.last_curve_sign:
-        self.curve_release = CURVE_REVERSAL_TIME
-      if target_sign:
-        self.last_curve_sign = target_sign
-    else:
-      self.last_curve_sign = 0
-    guarded = self.turn_release > 0.0 or self.curve_release > 0.0
-    if guarded:
-      self.reset_motion()
-    if self.turn_release > 0.0:
-      self.turn_release = max(0.0, self.turn_release - DT)
-      if correction * e2e < 0.0:
-        correction = 0.0
-    if self.curve_release > 0.0:
-      self.curve_release = max(0.0, self.curve_release - DT)
-      correction = 0.0
-    return correction, guarded
 
   def update(self, model_output: dict[str, np.ndarray], e2e_curvature: float, v_ego: float,
              blinkers_active: bool = False, lane_policy_enabled: bool = False,
@@ -352,7 +169,7 @@ class LanePolicy:
       if lane_change_prob > MAX_LANE_CHANGE_PROB:
         return self._fallback(e2e_curvature, "stock-e2e fallback: lane-change intent")
       x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
-      center, strong = self._centerline(model_output, x)
+      center, strong = self._centerline(model_output, x, max(LOOKAHEAD_TIME * v_ego, MIN_LOOKAHEAD))
       if center is None:
         return self._fallback(e2e_curvature, "stock-e2e fallback: lane geometry or confidence")
       if not self.active:
@@ -362,31 +179,17 @@ class LanePolicy:
           return float(e2e_curvature)
         self.active, self.line_loss_time = True, 0.0
 
-      path_blend = not self.holding_line
-      correction, error, lookahead = anchor_correction(model_output, center, x, v_ego, path_blend)
-      offset, heading = near_geometry(center, x)
-      self._track_turn(e2e_curvature)
-      feedback_allowed = lateral_active and not steering_pressed and strong and v_ego >= 10.0 and abs(e2e_curvature) * v_ego ** 2 < 1.5
-      motion_allowed = feedback_allowed and abs(offset) <= BIAS_MAX_OFFSET and self.turn_release <= 0.0 and self.curve_release <= 0.0
-      geometric_rate = v_ego * heading
-      rate, ready = self.update_motion(offset, geometric_rate, motion_allowed, frame_time)
-      if strong and correction * offset > 0.0:
-        correction *= approach_scale(offset, rate)
-      correction, guarded = self._guard_correction(soften_correction(correction), e2e_curvature)
-      if guarded:
-        rate, ready = geometric_rate, False
-      correction += self.update_bias(offset, rate, correction, feedback_allowed and ready)
-      correction = float(np.clip(correction, -MAX_CORRECTION, MAX_CORRECTION))
-      # Smooth entry, with faster release when an old correction becomes stale.
-      releasing = abs(correction) < abs(self.correction) or correction * self.correction < 0.0
-      step = RELEASE_STEP if releasing else ENGAGE_STEP
-      self.correction += float(np.clip(correction - self.correction, -step, step))
-      self._record(lookahead, error, e2e_curvature, offset, rate, geometric_rate, ready, path_blend)
+      correction, error, lookahead = plan_lane_correction(model_output, center, x, v_ego, self.lane_confidence)
+      max_curvature = MAX_CORRECTION_ACCEL / max(v_ego, 1.0) ** 2
+      # Keep the limit valid after a speed rise, including the filter's retained state.
+      self.correction = float(np.clip(self.correction_filter.update(correction), -max_curvature, max_curvature))
+      self.correction_filter.x = self.correction
+      self._record(lookahead, error, e2e_curvature)
       self.error_logged = False
-      self._mode("anchor lane center hold" if self.holding_line else "E2E path fit")
+      self._mode("plan-long one-line hold" if self.holding_line else "plan-long lane centering")
       return float(e2e_curvature + self.correction)
     except (KeyError, IndexError, TypeError, ValueError, FloatingPointError, np.linalg.LinAlgError) as err:
       if not self.error_logged and self.logger is not None:
-        self.logger.warning(f"ui-lp-full-center input error: {type(err).__name__}: {err}")
+        self.logger.warning(f"lp-plan-long input error: {type(err).__name__}: {err}")
       self.error_logged = True
       return self._fallback(e2e_curvature, "stock-e2e fallback: lane-policy input error")
