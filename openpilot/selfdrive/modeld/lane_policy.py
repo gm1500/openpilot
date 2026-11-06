@@ -9,7 +9,7 @@ import time
 import numpy as np
 
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
-from openpilot.selfdrive.modeld.road_edge_policy import RoadEdgePolicy
+from openpilot.selfdrive.modeld.road_edge_policy import EDGE_RECOVERY_FRAMES, RoadEdgePolicy
 
 DT = 1.0 / ModelConstants.MODEL_RUN_FREQ
 ARM_LINE_PROB = 0.92
@@ -401,8 +401,17 @@ class LanePolicy:
       if center is None:
         return self._fallback(e2e_curvature, "stock-e2e fallback: lane geometry or confidence", reset_edges=False)
       if not self.active:
-        self.arm_time = min(self.arm_time + DT, ARM_TIME) if strong else 0.0
-        if self.arm_time < ARM_TIME:
+        if strong:
+          self.arm_time = min(self.arm_time + DT, ARM_TIME)
+        else:
+          # A short bounded edge hold pauses qualification; it cannot earn
+          # engagement time or erase good frames while its paint stays strong.
+          held_edge = (self.edge_side is not None and self.road_edges.edges[self.edge_side].held and
+                       inner_probs(model_output)[1 - self.edge_side] >= ARM_LINE_PROB)
+          if not held_edge:
+            self.arm_time = 0.0
+        edge_settled = self.edge_side is None or self.road_edges.edges[self.edge_side].observed_frames >= EDGE_RECOVERY_FRAMES
+        if self.arm_time < ARM_TIME or not edge_settled:
           self._mode("stock-e2e fallback: arming lane confidence")
           return float(e2e_curvature)
         self.active, self.line_loss_time = True, 0.0

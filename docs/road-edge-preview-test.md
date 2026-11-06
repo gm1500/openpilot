@@ -31,7 +31,7 @@ both painted lines must be strong for 0.75 s before switching back.
 | Geometric lane width | 3.0–4.6 m over 5–55 m; narrow near-field space rejected |
 | Width spread over horizon | At most 0.75 m between the 10th/90th percentiles |
 | Temporal qualification | 15 consecutive model frames; width range at most 0.30 m |
-| Width smoothing | 1 s time constant; widening at most 0.20 m/s |
+| Median-width smoothing | 1 s time constant; change at most 0.20 m/s; immediate inward geometry cap kept separate |
 | Short outward opening | Hold at most 0.30 s or 5 m, whichever comes first |
 | Immediate rejection | Narrowing below minimum, loss of anchor, invalid geometry or lane-change intent |
 
@@ -44,7 +44,10 @@ The filtered width is attached to the current opposite painted line. Curve shape
 and vehicle motion therefore update immediately instead of being delayed by a
 filter on camera-frame edge position. A credible narrowing reduces width promptly.
 If centering was inactive, the qualified edge also passes the original policy's
-0.75 s engagement timer before it begins applying correction.
+0.75 s engagement timer before it begins applying correction. A bounded hold
+pauses that timer while the opposite paint remains strong; held frames never
+earn qualification time. Three fresh observed frames are required before initial
+engagement after a hold. Loss of strong paint still resets engagement progress.
 Blinkers, model lane-change intent and invalid inputs retain the original fallback.
 Steady-error bias learning is disabled for an inferred edge to avoid integrating
 an uncertain curb offset; the painted-line centering gains remain unchanged.
@@ -105,3 +108,32 @@ confidence chatter, exact pause duration, wire-schema round trips and source col
 Changed Python files pass Ruff and compilation; the diff passes whitespace checks.
 The native map-download/scheduler suites and a complete on-device UI/system build
 were not run in this host environment.
+
+### Follow-up: steady-curb continuity
+
+Route `000004e6--d60f5fff86`, segments 1, 2 and 18, was recorded on the initial
+version of this branch. The first lateral engagement is in segment 2. Replaying
+the original filter reproduced its logged edge-availability states exactly.
+
+The three active-centering releases in the steady curb section were caused by
+the policy's width memory. Its inward geometry cap was repeatedly lowering the
+stored width, and subsequent valid median-width observations then exceeded the
+0.30 m compatibility threshold. Low model uncertainty and a confident opposite
+painted line were still present at those releases.
+
+The continuity reference now follows accepted observations independently of the
+filtered median and conservative output cap. The inward cap also applies during
+short holds; it cannot cause filter drift or justify adopting a large geometry
+jump. Confidence thresholds, 3.0–4.6 m width bounds, 0.30 s / 5 m hold bounds,
+paint-anchor requirements and curvature correction limits are unchanged.
+
+On the same recorded inputs, the 4.83–15.73 s section now stays selected for
+10.90 s, compared with 6.85 s and three releases previously. The earlier wide
+geometry is still rejected, and the later opening still ends the edge fallback.
+Segments 1 and 18 introduce no road-edge candidates. All three supplied videos
+were reviewed and all 3,600 model frames replayed. This measures continuity of
+policy selection, not closed-loop steering smoothness or tire clearance.
+
+The follow-up passes 31 focused lane-policy tests, including the original 25 and
+six additional cases for width drift, the recorded curb trace, bounded arming
+holds, fresh recovery, strong-paint loss and inward movement during a hold.

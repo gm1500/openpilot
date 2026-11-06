@@ -14,6 +14,7 @@ DT = 1.0 / ModelConstants.MODEL_RUN_FREQ
 EDGE_MIN_WIDTH, EDGE_MAX_WIDTH = 3.0, 4.6
 EDGE_ARM_STD, EDGE_RETAIN_STD = 0.50, 0.65
 EDGE_ARM_FRAMES = round(0.75 / DT)
+EDGE_RECOVERY_FRAMES = round(0.15 / DT)
 EDGE_WIDTH_TIME = 1.0
 EDGE_MAX_WIDTH_RATE = 0.20  # m/s; widening must not chase driveway openings
 EDGE_MAX_SPREAD = 0.75     # m across the validated horizon
@@ -29,6 +30,8 @@ class EdgeBoundary:
   def reset(self):
     self.available = self.held = False
     self.width = None
+    self.filtered_width = self.observed_width = None
+    self.observed_frames = 0
     self.y = None
     self.history = deque(maxlen=EDGE_ARM_FRAMES)
     self.gap_time = self.gap_distance = 0.0
@@ -54,9 +57,12 @@ class EdgeBoundary:
       self.reset()
       return
     geometric = high <= EDGE_MAX_WIDTH and high - low <= EDGE_MAX_SPREAD
-    compatible = self.width is None or abs(median - self.width) <= EDGE_MAX_HISTORY_SPREAD
+    # Compare successive observations, not the deliberately conservative output
+    # boundary. Clamping that boundary inward must not poison curb continuity.
+    compatible = self.observed_width is None or abs(median - self.observed_width) <= EDGE_MAX_HISTORY_SPREAD
     observed = geometric and compatible and edge_std <= (EDGE_RETAIN_STD if self.available else EDGE_ARM_STD)
     if observed:
+      self.observed_frames = min(self.observed_frames + 1, EDGE_ARM_FRAMES)
       self.gap_time = self.gap_distance = 0.0
       self.held = False
       if not self.available:
@@ -69,22 +75,30 @@ class EdgeBoundary:
           self.history.append(float(median))
         if len(self.history) < EDGE_ARM_FRAMES:
           return
-        self.width = float(np.median(self.history))
+        self.filtered_width = float(np.median(self.history))
         self.available = True
-      change = np.clip((median - self.width) * DT / (EDGE_WIDTH_TIME + DT),
+      self.observed_width = float(median)
+      change = np.clip((median - self.filtered_width) * DT / (EDGE_WIDTH_TIME + DT),
                        -EDGE_MAX_WIDTH_RATE * DT, EDGE_MAX_WIDTH_RATE * DT)
-      self.width += float(change)
+      self.filtered_width += float(change)
       # Do not lag an observed narrowing. A virtual boundary must not extend
       # beyond a credible edge merely because its earlier width was greater.
-      self.width = min(self.width, float(low))
+      # The instantaneous inward cap is not fed back into the width filter.
+      # Otherwise repeated noisy lows ratchet it down and reject good geometry.
+      self.width = min(self.filtered_width, float(low), float(np.min(widths[near])))
     elif self.available:
+      self.observed_frames = 0
       self.gap_time += DT
       self.gap_distance += max(speed, 0.0) * DT
       if self.gap_time > EDGE_HOLD_TIME or self.gap_distance > EDGE_HOLD_DISTANCE:
         self.reset()
         return
       self.held = True
+      # Even a held hypothesis must not extend beyond a newly observed inward
+      # edge. This cap cannot turn a large jump into an accepted observation.
+      self.width = min(self.width, float(low), float(np.min(widths[near])))
     else:
+      self.observed_frames = 0
       self.history.clear()
       return
     self.y = opposite + direction * self.width

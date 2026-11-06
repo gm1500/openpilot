@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace as NS
 
 import numpy as np
@@ -67,6 +69,74 @@ def test_width_filter_does_not_lag_vehicle_motion_or_curve_shape():
   moved = model_output(offset=0.1, curvature=0.001)
   p.update(moved, x, 15.0)
   np.testing.assert_allclose(p.edges[1].y, moved['road_edges'][0, 1, :, 0], atol=1e-10)
+
+
+def test_noisy_inward_caps_do_not_ratchet_width_or_disqualify_a_steady_curb():
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  normal = model_output(width=4.0)
+  for _ in range(20):
+    p.update(normal, x, 15.0)
+  dip = model_output(width=4.0)
+  dip['road_edges'][0, 1, :8, 0] -= 0.35
+  for _ in range(20):
+    p.update(dip, x, 15.0)
+    assert p.edges[1].available and not p.edges[1].held
+    assert p.edges[1].width <= 3.65 + 1e-8
+    p.update(normal, x, 15.0)
+    assert p.edges[1].available and not p.edges[1].held
+    assert p.edges[1].width == pytest.approx(4.0)
+
+
+def test_recorded_steady_curb_keeps_continuity_after_qualification():
+  # Five seconds of boundary observations; no GPS, images or vehicle identifiers.
+  frames = json.loads((Path(__file__).parent / 'fixtures' / 'steady_curb.json').read_text())['frames']
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  for index, (stamp, speed, probability, std, paint, edge) in enumerate(frames):
+    m = model_output(left_prob=probability, edge_std=std)
+    m['lane_lines'][0, 1, :, 0] = np.pad(paint, (0, 33 - len(paint)), mode='edge')
+    m['road_edges'][0, 1, :, 0] = np.pad(edge, (0, 33 - len(edge)), mode='edge')
+    p.update(m, x, speed, stamp)
+    if index >= 19:
+      assert p.edges[1].available and not p.edges[1].held, stamp
+
+
+def test_short_hold_pauses_arming_and_requires_fresh_recovery_before_engaging():
+  p = LanePolicy()
+  tick(p, model_output(), 28)
+  assert not p.active
+  progress = p.arm_time
+  tick(p, model_output(edge_std=0.9), 2)
+  assert not p.active and p.arm_time == progress
+  tick(p, model_output())
+  assert not p.active  # enough accumulated time, but only one fresh frame
+  tick(p, model_output(edge_std=0.9))
+  assert not p.active
+  tick(p, model_output(), 2)
+  assert not p.active
+  tick(p, model_output())
+  assert p.active
+
+
+@pytest.mark.parametrize('probability', [0.69, 0.90])
+def test_arming_hold_does_not_preserve_progress_without_strong_paint(probability):
+  p = LanePolicy()
+  tick(p, model_output(), 26)
+  tick(p, model_output(left_prob=probability, edge_std=0.9))
+  assert not p.active and p.arm_time == 0.0
+
+
+def test_held_boundary_also_moves_inside_an_observed_narrowing():
+  p = LanePolicy()
+  tick(p, model_output(width=4.0), 40)
+  narrowed = model_output(width=4.0)
+  narrowed['road_edges'][0, 1, :, 0] -= 0.5
+  tick(p, narrowed)
+  assert p.road_edges.edges[1].held
+  assert p.road_edges.edges[1].width <= 3.5 + 1e-8
+  tick(p, narrowed, 8)
+  assert not p.active  # the large change must be qualified again
 
 
 def test_driveway_hold_is_bounded_and_narrowing_drops_immediately():
