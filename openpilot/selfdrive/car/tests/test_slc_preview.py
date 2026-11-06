@@ -41,14 +41,14 @@ class Drive:
     return self.helper.v_cruise_kph
 
 
-def test_lower_limit_starts_at_two_seconds_and_keeps_posted_limit_distinct():
+def test_lower_limit_uses_braking_distance_and_keeps_posted_limit_distinct():
   d = Drive()
   d.approach()
   assert d.target == 100
-  d.preview = replace(d.preview, distance=40.1)
+  d.preview = replace(d.preview, distance=51.1)
   d.tick()
   assert d.target == 100
-  d.preview = replace(d.preview, distance=40.)
+  d.preview = replace(d.preview, distance=50.)
   d.tick()
   assert d.target == 70
   assert d.helper.map_cruise.preview_active
@@ -205,7 +205,7 @@ def test_preview_reader_rejects_unusable_inputs(issue):
     'unknown_way': ('nextSpeedLimitWayId', 0),
     'nan_speed': ('nextSpeedLimit', float('nan')),
     'nan_distance': ('nextSpeedLimitDistance', float('nan')),
-    'far_distance': ('nextSpeedLimitDistance', 301.),
+    'far_distance': ('nextSpeedLimitDistance', 1001.),
     'stale_gps': ('gpsMonoTime', int(96e9)),
     'future_gps': ('gpsMonoTime', int(101e9)),
   }[issue]
@@ -217,3 +217,53 @@ def test_preview_reader_rejects_unusable_inputs(issue):
   sm.logMonoTime = {'mapSpeedLimit': int(100e9)}
   sm.recv_time = {'mapSpeedLimit': 100.}
   assert read_map_preview(sm, 100.) is None
+
+
+def test_confirmed_unrestricted_merge_raises_target_before_highway_entry():
+  d = Drive()
+  d.speed, d.way = None, 1
+  d.preview = MapPreview(100 / 3.6, 150., 2, merge=True)
+  d.helper.v_cruise_kph = 70.
+  d.tick(220)
+  assert d.target == 100 and d.helper.map_cruise.preview_active
+  assert d.speed is None and d.way == 1
+
+
+@pytest.mark.parametrize('issue', ['restriction', 'advisory', 'ordinary', 'too_far', 'lower_only', 'manual'])
+def test_merge_target_keeps_restrictions_and_user_controls(issue):
+  d = Drive(change_policy=1 if issue == 'lower_only' else 0, resume_policy=1)
+  d.speed = 40. if issue == 'restriction' else None
+  d.preview = MapPreview(100 / 3.6, 170. if issue == 'too_far' else 150., 2,
+                         advisory=issue == 'advisory', merge=issue != 'ordinary')
+  d.helper.v_cruise_kph = 70.
+  if issue == 'manual':
+    d.helper.map_cruise.pause()
+  d.tick(220)
+  assert d.target <= 70.
+
+
+def test_merge_geometry_must_qualify_before_raising_set():
+  d = Drive()
+  d.speed = None
+  d.preview = MapPreview(110 / 3.6, 100., 2)
+  d.tick(220)
+  d.preview = replace(d.preview, merge=True)
+  d.tick(100)
+  assert not d.helper.map_cruise.preview_active
+  d.tick(110)
+  assert d.helper.map_cruise.preview_active and d.target == 110
+
+
+def test_advisory_fifty_metres_ahead_is_an_early_lower_target():
+  d = Drive()
+  d.preview = MapPreview(40 / 3.6, 50., 2, advisory=True)
+  d.tick(220)
+  assert d.target == 40 and d.helper.map_cruise.preview_active
+
+
+def test_distant_speed_can_qualify_without_being_applied():
+  d = Drive()
+  d.speed = None
+  d.preview = MapPreview(60 / 3.6, 800., 2)
+  d.tick(220)
+  assert d.target == 100 and not d.helper.map_cruise.preview_active

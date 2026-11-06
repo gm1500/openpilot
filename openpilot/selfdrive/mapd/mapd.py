@@ -67,6 +67,8 @@ def main():
         msg.mapSpeedLimit.nextSpeedLimit = preview.speed
         msg.mapSpeedLimit.nextSpeedLimitDistance = preview.distance
         msg.mapSpeedLimit.nextSpeedLimitWayId = preview.way_id
+        msg.mapSpeedLimit.nextSpeedLimitAdvisory = preview.advisory
+        msg.mapSpeedLimit.nextSpeedLimitMerge = preview.merge
     pm.send('mapSpeedLimit', msg)
     # Independent validity: a missing speed limit must not hide a connected
     # junction, and optional map health never disables ordinary control.

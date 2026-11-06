@@ -57,8 +57,8 @@ class SLCLayout(Widget):
       initial_state=self.params.get('MapCruiseEnabled', return_default=True),
       callback=lambda value: self.params.put_bool('MapCruiseEnabled', value, block=True))
     self.advance = toggle_item('Advanced speed limit changes',
-      'Predict mapped speed limit changes up to 2 seconds ahead. Begin slowing for lower limits early and apply higher limits ' +
-      'when entering the new road segment. Requires a confident road match; existing override settings still apply.',
+      'Anticipate mapped limits and ramp advisory speeds. Slow earlier for lower speeds and pick up the highway speed ' +
+      'up to 8 seconds before a confirmed, unrestricted on-ramp merge. Requires a confident road match; override settings still apply.',
       initial_state=self.params.get('SlcAdvancedSpeedLimit', return_default=True),
       callback=lambda value: self.params.put_bool('SlcAdvancedSpeedLimit', value, block=True))
     self.region_buttons = MultipleButtonAction(['North America', 'Country'], button_width=310, callback=self.select_region)

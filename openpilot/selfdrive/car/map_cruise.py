@@ -10,6 +10,8 @@ MAP_GPS_MAX_AGE = 3.0
 MAP_STABLE_TIME = 2.0
 MAP_MISSING_TIME = 1.0
 MAP_ADVANCE_TIME = 2.0
+MAP_MERGE_ADVANCE_TIME = 8.0
+MAP_APPROACH_DECEL = 1.0
 
 
 @dataclass(frozen=True)
@@ -17,6 +19,8 @@ class MapPreview:
   speed: float
   distance: float
   way_id: int
+  advisory: bool = False
+  merge: bool = False
 
 
 def read_map_preview(sm, now: float, replay: bool = False) -> MapPreview | None:
@@ -29,9 +33,10 @@ def read_map_preview(sm, now: float, replay: bool = False) -> MapPreview | None:
       now - stamp > (MAP_MESSAGE_MAX_AGE if msg.positionEstimated else MAP_GPS_MAX_AGE) or
       not 0 < msg.gpsMonoTime * 1e-9 <= now or now - msg.gpsMonoTime * 1e-9 > MAP_GPS_MAX_AGE or
       not math.isfinite(msg.nextSpeedLimit) or not 8 <= round(msg.nextSpeedLimit * CV.MS_TO_KPH, 3) <= 145 or
-      not math.isfinite(msg.nextSpeedLimitDistance) or not 0 <= msg.nextSpeedLimitDistance <= 300):
+      not math.isfinite(msg.nextSpeedLimitDistance) or not 0 <= msg.nextSpeedLimitDistance <= 1000):
     return None
-  return MapPreview(msg.nextSpeedLimit, msg.nextSpeedLimitDistance, msg.nextSpeedLimitWayId)
+  return MapPreview(msg.nextSpeedLimit, msg.nextSpeedLimitDistance, msg.nextSpeedLimitWayId,
+                    msg.nextSpeedLimitAdvisory, msg.nextSpeedLimitMerge)
 
 
 def map_cruise_supported(CP) -> bool:
@@ -118,24 +123,29 @@ class MapCruise:
     # Carry qualification across the boundary only for the SAME identified way
     # and limit, with a fresh position. A different/changed road starts normally.
     entered = (self._preview_qualified and self._preview_key is not None and speed_ms is not None and
-               self._preview_key == (way_id, round(speed_ms, 4)) and 0 <= now - self._preview_seen <= MAP_GPS_MAX_AGE and
+               self._preview_key[:2] == (way_id, round(speed_ms, 4)) and 0 <= now - self._preview_seen <= MAP_GPS_MAX_AGE and
                0 < gps_time <= now and now - gps_time <= MAP_GPS_MAX_AGE and gps_time >= self._preview_last_fix)
     qualified_fix = self._preview_first_fix if entered else None
     valid = (preview is not None and 0 < gps_time <= now and now - gps_time <= MAP_GPS_MAX_AGE and
              math.isfinite(preview.speed) and 8 <= round(preview.speed * CV.MS_TO_KPH, 3) <= 145 and preview.way_id > 0 and
-             math.isfinite(preview.distance) and 0 <= preview.distance <= 300 and math.isfinite(v_ego) and 2 <= v_ego <= 75)
+             math.isfinite(preview.distance) and 0 <= preview.distance <= 1000 and math.isfinite(v_ego) and 2 <= v_ego <= 75)
     if valid:
-      key = preview.way_id, round(preview.speed, 4)
+      key = preview.way_id, round(preview.speed, 4), preview.advisory, preview.merge
       if (key != self._preview_key or not 0 <= now - self._preview_seen <= MAP_MESSAGE_MAX_AGE or gps_time < self._preview_last_fix):
         self._preview_since, self._preview_first_fix = now, gps_time
         self._preview_qualified = False
       self._preview_key, self._preview_seen, self._preview_last_fix = key, now, gps_time
       self._preview_qualified |= now - self._preview_since >= MAP_STABLE_TIME and gps_time > self._preview_first_fix
       target = self.settings.target(preview.speed * CV.MS_TO_KPH, self.metric)
-      # Higher limits are qualified ahead but applied only on matched entry.
-      # An early lower target can coexist with no-speed E2E until actual recovery.
+      # Earlier braking uses the distance needed to shed speed plus the existing
+      # two-second lead. Raising SET early requires mapd's unique, aligned,
+      # model-confirmed unrestricted highway merge; ordinary higher zones wait.
       lowering = 8 <= self.current_kph <= 145 and target <= self.current_kph and (speed_ms is None or preview.speed < speed_ms)
-      if self._preview_qualified and preview.distance <= v_ego * MAP_ADVANCE_TIME and lowering:
+      braking_distance = max(0.0, v_ego ** 2 - preview.speed ** 2) / (2 * MAP_APPROACH_DECEL)
+      lower_range = min(300.0, max(50.0, v_ego * MAP_ADVANCE_TIME + braking_distance))
+      merging = preview.merge and not preview.advisory and speed_ms is None and 8 <= self.current_kph <= 145
+      in_range = lowering and preview.distance <= lower_range or merging and preview.distance <= min(250.0, v_ego * MAP_MERGE_ADVANCE_TIME)
+      if self._preview_qualified and in_range:
         self.preview_active = True
         return preview.speed, self._preview_first_fix
     elif not 0 <= now - self._preview_seen <= MAP_GPS_MAX_AGE or gps_time < self._preview_last_fix:

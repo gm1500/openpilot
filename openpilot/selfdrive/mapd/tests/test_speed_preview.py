@@ -158,3 +158,67 @@ def test_model_coordinates_age_and_cumulative_curve_distance():
   assert model_path(sm, fix, VehicleMotion(20., False, None), 100.) is None
   sm['modelV2'].position.x[10] = np.nan
   assert model_path(sm, fix, motion, 100.) is None
+
+
+def straight_prediction():
+  distances = np.array([40., 80., 120., 160.])
+  return ModelPath(np.column_stack((np.zeros(4), distances)), np.ones(4), np.zeros(2), distances)
+
+
+def test_advisory_on_connected_ramp_is_previewed():
+  first, second = pair(speed=None, next_speed=None, highway='motorway_link')
+  second = replace(second, tags={**second.tags, 'maxspeed:advisory': '40'})
+  target = preview((first, second))
+  assert target.advisory and not target.merge
+  assert target.speed == pytest.approx(40 / 3.6)
+  assert target.distance == pytest.approx(80.)
+
+
+def test_unresolved_legal_limit_is_not_bypassed_by_advisory():
+  first, second = pair(speed=None, next_speed=None, highway='motorway_link')
+  second = replace(second, tags={**second.tags, 'maxspeed:conditional': '40 @ wet', 'maxspeed:advisory': '50'})
+  assert preview((first, second)) is None
+
+
+def test_unknown_ramp_chain_can_find_limit_beyond_old_search_horizon():
+  roads = [polyline([(0, -100), (0, 350)], None, 1, highway='motorway_link', oneway='yes'),
+           polyline([(0, 350), (0, 800)], None, 2, highway='motorway_link', oneway='yes'),
+           polyline([(0, 800), (0, 1200)], '60', 3, highway='secondary', oneway='yes')]
+  target = preview(roads)
+  assert target.speed == pytest.approx(60 / 3.6) and target.distance == pytest.approx(800.)
+  assert not target.merge
+
+
+@pytest.mark.parametrize('offline', [False, True])
+def test_unique_straight_highway_merge_is_explicitly_qualified(offline):
+  ramp, highway = pair(speed=None, next_speed='100')
+  ramp = replace(ramp, tags={**ramp.tags, 'highway': 'motorway_link'})
+  highway = replace(highway, tags={**highway.tags, 'highway': 'motorway'})
+  roads = packed((ramp, highway)) if offline else (ramp, highway)
+  target = preview(roads, straight_prediction(), offline=offline)
+  assert target.merge and target.speed == pytest.approx(100 / 3.6)
+
+
+@pytest.mark.parametrize('issue', ['no_model', 'uncertain', 'off_path', 'curve', 'current_limit', 'receiving_advisory', 'slow'])
+def test_unproven_or_restricted_merge_cannot_raise_target_early(issue):
+  ramp, highway = pair(speed=None, next_speed='100')
+  ramp = replace(ramp, tags={**ramp.tags, 'highway': 'motorway_link'})
+  highway = replace(highway, tags={**highway.tags, 'highway': 'motorway'})
+  prediction = straight_prediction()
+  changes = {}
+  if issue == 'no_model':
+    prediction = None
+  elif issue == 'uncertain':
+    prediction = replace(prediction, std=np.full(4, 4.))
+  elif issue == 'off_path':
+    prediction = replace(prediction, points=prediction.points + [20., 0.])
+  elif issue == 'curve':
+    prediction = replace(prediction, points=np.column_stack(([0., 1., 5., 12.], prediction.distances)))
+  elif issue == 'current_limit':
+    ramp = replace(ramp, tags={**ramp.tags, 'maxspeed': '60'})
+  elif issue == 'receiving_advisory':
+    highway = replace(highway, tags={**highway.tags, 'maxspeed:advisory': '70'})
+  else:
+    changes['speed'] = 9.
+  target = preview((ramp, highway), prediction, **changes)
+  assert target is None or not target.merge

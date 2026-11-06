@@ -9,7 +9,7 @@ The comma 3X settings panel provides:
 | Setting | Options |
 | --- | --- |
 | Speed Limit Control | Same enable state as the onroad SLC button |
-| Advanced speed limit changes | Off by default; begin lowering the target up to two seconds before a confidently predicted boundary |
+| Advanced speed limit changes | Off by default; anticipate lower limits/advisories and a confirmed highway merge |
 | New speed limit | Automatic; Lower only; SET to accept |
 | After manual override | Resume at the next changed limit; SET only |
 | Offset type | km/h or mph, following the device unit setting; Percent |
@@ -27,8 +27,22 @@ Offsets affect the cruise target, not the displayed posted limit. Targets keep t
 
 This optional setting qualifies an upcoming mapped limit before entering its segment,
 using the existing measured-motion history and a fresh model path when choosing between
-connected forks. A lower target can start up to two seconds before the boundary;
-a higher target waits until the matcher confirms entry into the identified segment.
+connected forks. A lower target can start within the estimated distance needed to
+reduce speed at 1 m/s² plus two seconds of travel (minimum 50 m, maximum 300 m).
+This is a target-selection trigger; the longitudinal planner still controls braking.
+An untagged ramp chain can be searched up to 1 km ahead to find the next speed,
+without applying it outside these approach bounds. An advisory can supply that
+target when the receiving segment has no legal-speed tag; unresolved legal tags
+are never bypassed with an advisory.
+
+Ordinary higher limits still wait for entry. The exception is an on-ramp with no
+mapped legal/advisory restriction and exactly one directed continuation onto a
+one-way motorway or trunk road. A fresh, low-uncertainty model path must agree with
+the connected geometry, heading must be within 15 degrees of the receiving road,
+and predicted curvature at the target speed must imply no more than 1.5 m/s²
+lateral acceleration. After stable qualification, its speed can be selected within
+eight seconds of travel, capped at 250 m. Missing map tags do not prove a road has
+no restriction; this remains an experimental map-based target.
 Prequalification removes the additional two-second wait after entry. It requires
 two seconds of consistent previews and advancing GPS, so late or ambiguous matches
 retain the normal delay. The posted-limit display continues to describe the current road.
@@ -40,13 +54,13 @@ under heading perturbations. Without usable model geometry, a unique directed ro
 can still supply a preview. Offline maps support existing same-road continuations and
 an untagged one-way ramp's sole one-way receiving road at an identical endpoint
 with a merge angle of at most 45 degrees;
-they do not infer fork topology. Advisory speeds and unresolved restrictions block
-this ramp preview. These preview connections never alter the current-road matcher or
+they do not infer fork topology. An existing ramp advisory and unresolved restrictions
+block continuation beyond them. These preview connections never alter the current-road matcher or
 traffic-control graph.
 
 Offsets and manual override policies still apply. A preview does not release no-speed
-E2E fallback before actual road entry. Two seconds is the maximum early target-change
-window, not a promise that the vehicle will physically reach the new speed by the sign.
+E2E fallback before actual road entry. Early target selection is not a promise that
+the vehicle will physically reach the new speed by the sign or merge.
 Normal longitudinal planning determines the acceleration/deceleration. Recorded-data
 replay and regression tests do not replace on-device road validation.
 
