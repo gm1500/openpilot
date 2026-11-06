@@ -24,21 +24,33 @@ anchor immediately clears the edge estimate, including any temporary hold.
 Qualified two-line paint remains preferred; when recovering from edge centering,
 both painted lines must be strong for 0.75 s before switching back.
 
-| Check | Initial test setting |
+| Check | Current test setting |
 | --- | --- |
 | Opposite paint probability | At least 0.92 to qualify; 0.70 to retain |
 | Edge model standard deviation | At most 0.50 to qualify; 0.65 to retain |
 | Geometric lane width | 3.0–4.6 m over 5–55 m; narrow near-field space rejected |
 | Width spread over horizon | At most 0.75 m between the 10th/90th percentiles |
-| Temporal qualification | 15 consecutive model frames; width range at most 0.30 m |
+| Temporal qualification | 15 consecutive valid frames; width 10th–90th percentile span at most 0.30 m and latest width within 0.30 m of the window median |
 | Median-width smoothing | 1 s time constant; change at most 0.20 m/s; immediate inward geometry cap kept separate |
-| Short outward opening | Hold at most 0.30 s or 5 m, whichever comes first |
+| Ordinary short hold | At most 0.30 s or 5 m, whichever comes first |
+| Established curb, outward opening | At most 1.25 s or 20 m, with stronger continuous paint support |
+| Established curb, uncertainty increase | At most 0.50 s or 8 m; edge standard deviation must stay at or below 1.0 |
 | Immediate rejection | Narrowing below minimum, loss of anchor, invalid geometry or lane-change intent |
 
 These are experimental geometric gates derived from the supplied samples, not
 certification of a road-design standard. Speed limits how far a held edge can
 persist; speed alone does not manufacture a lane width. Adjacent-lane extrapolation
 is not used to excuse a wide shoulder or multiple-lane corridor.
+
+The extended bridge starts only with paint probability at least 0.92 and an
+already qualified curb. Paint must then remain at least 0.85, with no near-field
+paint jump above 0.20 m per model frame. A large inward change, weak paint or
+unstable anchor cancels the extended budget; loss below the ordinary 0.70 paint
+threshold or a corridor below 3.0 m still invalidates immediately. Three
+consecutive agreeing edge observations are required to replenish a gap budget.
+One or two isolated good frames cannot keep renewing it. Hold time and distance
+use elapsed camera-frame time, including dropped frames. No new edge can qualify
+from an opening, and its apparent extra width is never learned during a hold.
 
 The filtered width is attached to the current opposite painted line. Curve shape
 and vehicle motion therefore update immediately instead of being delayed by a
@@ -61,13 +73,17 @@ this branch. It does not override reliable paint to cross a lane line around a c
 | Boundary | Candidate/armed | Used with lateral control active |
 | --- | --- | --- |
 | Painted line | Existing blue | Existing green |
-| Qualified virtual edge replacing weak paint | Orange | Yellow |
+| Qualified virtual edge replacing weak paint | Yellow, normal width | Green, double width |
 
 The UI draws the same filtered virtual boundary used by the policy, through 55 m.
 Unqualified edges keep their existing display. Fresh model/control state and no
 steering override are required for active colours. `modelV2.lanePolicy` records
 per-side sources, filtered geometry and short holds without overwriting raw model
 lane lines, road edges or the model path. Older logs retain the legacy colour path.
+Only the actively used virtual-edge side is thickened. The opposite painted line
+keeps its original width and blue/green scheme. Colour and thickness are selected
+at draw time, so disengagement/override removes both without waiting for another
+model frame.
 
 ## Earlier speed selection
 
@@ -137,3 +153,70 @@ policy selection, not closed-loop steering smoothness or tire clearance.
 The follow-up passes 31 focused lane-policy tests, including the original 25 and
 six additional cases for width drift, the recorded curb trace, bounded arming
 holds, fresh recovery, strong-paint loss and inward movement during a hold.
+
+### Follow-up: curb openings and confidence fluctuations
+
+Reviewed the bookmark neighbourhoods in all 20 supplied videos from
+`000004e7--05f29b7d3e`, segments 1, 5, 10, 13–19, 21–23, 25, 38–39 and 41–44,
+and replayed all 24,001 model frames. The recording used `e3959e6`. The old-policy
+replay reproduces edge availability except the first 2.4 s of segment 21, where
+segment 20 was not supplied and the replay starts without the device's history.
+Contiguous supplied segments retain state; missing segments reset replay state.
+
+The main findings were an overly fragile temporal width window and short holds,
+plus genuine loss of painted-line support at several intersections. A rolling
+robust width window now tolerates an isolated old width outlier without restarting
+qualification. It still needs 15 consecutive valid observations; missing paint,
+excessive edge uncertainty, sustained width disagreement and an outlying latest
+width do not earn qualification. Existing width/confidence limits remain.
+
+On identical recorded perception and vehicle inputs (time counted in 20 Hz model
+frames):
+
+| Check | Previous policy | Updated policy |
+| --- | ---: | ---: |
+| Edge centering selected while lateral control active, no override | 106.50 s | 116.75 s |
+| Segment 13 selected edge time | 30.30 s | 31.55 s |
+| Segment 14 selected edge time | 23.45 s | 25.35 s |
+| Segment 23 selected edge time | 3.80 s | 11.25 s |
+| Segment 25 selected edge time | 2.25 s | 1.95 s |
+
+The end of segment 13 shows a driveway opening ahead of an otherwise established
+right curb. The updated policy bridges that interruption into segment 14 while
+following current left paint at the established width. It still releases around
+0.74 s into segment 14 when support deteriorates. Segment 23's solid curb is
+selected at approximately 48.79 s instead of 56.24 s: the robust temporal window
+allows earlier qualification despite isolated width fluctuations. The small loss
+in segment 25 is intentional: three returning observations must agree before a
+hold budget is refreshed, rather than accepting isolated good frames.
+
+Wide corridors at the segment 10/21 bookmarks, low-confidence anchors at several
+intersections, and the unmarked/construction examples do not justify wider or
+unanchored virtual lanes. Segments 38, 39, 41, 43 and 44 still produce no qualified
+edge. Segment 42 briefly qualifies the right curb, then rejects narrowing below
+3.0 m. Segments 38–44 have lateral control off; those videos test detection only.
+This change therefore bridges supported openings, not every intersection or
+curb visible to a human. The earlier 4e6 segment 2 steady-curb regression remains
+continuously selected through the previously analysed interval.
+
+The curve reversal pause remains **0.15 s**. A diagnostic reconstruction of the
+recorded base curvature (published action already includes our correction) was
+checked against the rounded 1 Hz policy debug messages. Excluding cold-start
+history, 185 matched samples agree within 0.000001 1/m. With identical recorded
+inputs and the current guard logic, 0.15 s produces eight curve-guard entries
+while controlling, seven in segment 5 and one in segment 13. Those occupy 1.20 s;
+0.10 s occupies 0.80 s, while 0.30 s occupies 2.10 s across seven entries because
+one closely spaced pair is combined. This compares timer settings in the current
+algorithm, not every behaviour of the original batmobile timer. It does not
+simulate how the changed steering would alter subsequent camera observations.
+There is insufficient evidence here to claim a further reduction improves
+handling, or that restoring 0.30 s fixes the remaining curve offset.
+
+Validation: 52 focused tests pass, including three new recorded boundary traces,
+left/right openings, time/distance expiry, paint loss, anchor jumps, narrowing,
+confidence loss, intermittent recovery, admission robustness and active-side
+colours. Changed Python files pass Ruff and compilation. The 3,600-frame earlier
+4e6 sample was also replayed. No centering gains, correction limits, speed-preview
+logic or vehicle-control interfaces were changed. These are open-loop selection
+and regression results; on-device UI rendering and closed-loop steering behaviour
+remain untested on this host.

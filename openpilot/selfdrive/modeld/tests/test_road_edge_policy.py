@@ -8,7 +8,7 @@ import pytest
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.modeld.lane_policy import DT, LanePolicy, anchor_correction, soften_correction
 from openpilot.selfdrive.modeld.road_edge_policy import RoadEdgePolicy
-from openpilot.selfdrive.ui.onroad.lane_policy_style import boundary_colors, EDGE_ORANGE, EDGE_YELLOW, PAINT_BLUE, PAINT_GREEN
+from openpilot.selfdrive.ui.onroad.lane_policy_style import active_edge, boundary_colors, EDGE_YELLOW, PAINT_BLUE, PAINT_GREEN
 
 
 def model_output(offset=0.3, width=3.6, left_prob=0.99, right_prob=0.1, curvature=0.0, edge_std=0.3):
@@ -148,7 +148,7 @@ def test_driveway_hold_is_bounded_and_narrowing_drops_immediately():
   tick(p, opening, 3)
   assert p.active and p.road_edges.edges[1].held
   assert p.road_edges.edges[1].width == old_width
-  tick(p, opening, 6)
+  tick(p, opening, 30)
   assert not p.active
   tick(p, model_output(), 40)
   narrowed = model_output()
@@ -289,12 +289,189 @@ def test_published_filtered_geometry_and_side_sources():
   assert not msg.lanePolicy.active
 
 
-def test_orange_candidate_yellow_used_painted_blue_green():
+def test_yellow_candidate_green_active_only_virtual_side_thickens():
   state = NS(valid=True, enabled=True, active=True, leftSource='painted', rightSource='roadEdge',
              edges=[NS(available=True), NS(available=True)])
   assert boundary_colors(state, 0, True) == (PAINT_GREEN, None)
-  assert boundary_colors(state, 1, True) == (None, EDGE_YELLOW)
+  assert boundary_colors(state, 1, True) == (None, PAINT_GREEN)
+  assert active_edge(state, 1, True) and not active_edge(state, 0, True)
   assert boundary_colors(state, 0, False) == (PAINT_BLUE, None)
-  assert boundary_colors(state, 1, False) == (None, EDGE_ORANGE)
+  assert boundary_colors(state, 1, False) == (None, EDGE_YELLOW)
+  assert not active_edge(state, 1, False)
   state.enabled = False
   assert boundary_colors(state, 1, True) == (None, None)
+
+
+@pytest.mark.parametrize('side', [0, 1])
+def test_established_opening_freezes_width_and_follows_current_paint(side):
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  m = model_output(left_prob=0.99 if side else 0.1, right_prob=0.1 if side else 0.99)
+  for _ in range(30):
+    p.update(m, x, 10.0)
+  width = p.edges[side].width
+  opening = model_output(offset=0.2, curvature=0.001,
+                         left_prob=0.99 if side else 0.1, right_prob=0.1 if side else 0.99)
+  opening['road_edges'][0, side, :, 0] += 2.0 * (-1 if side == 0 else 1)
+  for _ in range(20):
+    p.update(opening, x, 10.0)
+    assert p.edges[side].available and p.edges[side].held
+    assert p.edges[side].width == pytest.approx(width)
+    expected = opening['lane_lines'][0, 2 - side, :, 0] + (-1 if side == 0 else 1) * width
+    np.testing.assert_allclose(p.edges[side].y, expected)
+  # The returning curb must agree for three consecutive frames before learning.
+  for _ in range(2):
+    p.update(m, x, 10.0)
+    assert p.edges[side].held
+  p.update(m, x, 10.0)
+  assert p.edges[side].available and not p.edges[side].held
+
+
+@pytest.mark.parametrize('speed,frames', [(0.0, 25), (10.0, 25), (30.0, 13)])
+def test_opening_bridge_has_time_and_distance_limits(speed, frames):
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  for _ in range(30):
+    p.update(model_output(), x, speed)
+  opening = model_output()
+  opening['road_edges'][0, 1, :, 0] += 2.0
+  for _ in range(frames):
+    p.update(opening, x, speed)
+    assert p.edges[1].available
+  p.update(opening, x, speed)
+  assert not p.edges[1].available
+
+
+@pytest.mark.parametrize('issue', ['weak_paint', 'lost_paint', 'jumping_paint', 'narrowing', 'uncertain_edge'])
+def test_long_bridge_stops_when_support_deteriorates(issue):
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  for _ in range(30):
+    p.update(model_output(), x, 10.0)
+  opening = model_output()
+  opening['road_edges'][0, 1, :, 0] += 2.0
+  for _ in range(12):
+    p.update(opening, x, 10.0)
+  assert p.edges[1].available
+  if issue in ('weak_paint', 'lost_paint'):
+    opening['lane_lines_prob'][0, 3] = 0.84 if issue == 'weak_paint' else 0.69
+  elif issue == 'jumping_paint':
+    opening['lane_lines'][0, 1, :, 0] -= 0.4
+  elif issue == 'narrowing':
+    opening['road_edges'][0, 1, :, 0] -= 3.0
+  else:
+    opening['road_edges_stds'][0, 1, :, 0] = 1.1
+  p.update(opening, x, 10.0)
+  assert not p.edges[1].available
+
+
+def test_intermittent_good_frames_cannot_refresh_an_opening_forever():
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  for _ in range(30):
+    p.update(model_output(), x, 10.0)
+  opening = model_output()
+  opening['road_edges'][0, 1, :, 0] += 2.0
+  for n in range(26):
+    p.update(model_output() if n % 4 in (2, 3) else opening, x, 10.0)
+  assert not p.edges[1].available
+
+
+def test_confidence_dip_has_a_shorter_bridge_than_visible_outward_opening():
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  for _ in range(30):
+    p.update(model_output(), x, 10.0)
+  for _ in range(10):
+    p.update(model_output(edge_std=0.9), x, 10.0)
+    assert p.edges[1].available and p.edges[1].held
+  p.update(model_output(edge_std=0.9), x, 10.0)
+  assert not p.edges[1].available
+
+
+def test_robust_width_window_ignores_one_old_outlier_but_requires_agreeing_latest_width():
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  for n in range(15):
+    p.update(model_output(width=4.0 if n == 5 else 3.6), x, 10.0)
+  assert p.edges[1].available and p.edges[1].width == pytest.approx(3.6)
+  p.reset()
+  for n in range(15):
+    p.update(model_output(width=4.0 if n == 14 else 3.6), x, 10.0)
+  assert not p.edges[1].available
+
+
+def test_opening_cannot_qualify_without_an_observed_curb():
+  p = LanePolicy()
+  opening = model_output()
+  opening['road_edges'][0, 1, :, 0] += 2.0
+  tick(p, opening, 100)
+  assert not p.active and not p.road_edges.edges[1].available
+
+
+@pytest.mark.parametrize('name,start,end', [('curb_opening', 1.0, 5.65), ('curb_width_noise', 2.1, 11.0),
+                                         ('curb_opening_night', 1.0, 3.7)])
+def test_recorded_opening_and_noisy_curb_retain_qualified_boundary(name, start, end):
+  frames = json.loads((Path(__file__).parent / 'fixtures' / f'{name}.json').read_text())['frames']
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  for stamp, speed, probability, std, paint, edge in frames:
+    m = model_output(left_prob=probability, edge_std=std)
+    m['lane_lines'][0, 1, :, 0] = np.pad(paint, (0, 33 - len(paint)), mode='edge')
+    m['road_edges'][0, 1, :, 0] = np.pad(edge, (0, 33 - len(edge)), mode='edge')
+    p.update(m, x, speed, stamp)
+    if start <= stamp <= end:
+      assert p.edges[1].available, stamp
+    if name == 'curb_opening' and stamp >= 5.7:
+      assert not p.edges[1].available, stamp  # paint support deteriorates after the opening
+
+
+def test_long_bridge_cannot_earn_initial_engagement():
+  p = LanePolicy()
+  tick(p, model_output(), 15)
+  assert p.road_edges.edges[1].available and not p.active
+  progress = p.arm_time
+  opening = model_output()
+  opening['road_edges'][0, 1, :, 0] += 2.0
+  # tick's fixed 20 m/s reaches 15 m here, still inside both bridge limits.
+  tick(p, opening, 15)
+  assert p.road_edges.edges[1].held and not p.active and p.arm_time == progress
+  tick(p, model_output(), 3)
+  assert not p.active and p.arm_time == pytest.approx(progress + DT)
+
+
+@pytest.mark.parametrize('speed,frames', [(0.0, 12), (30.0, 6)])
+def test_dropped_model_frames_do_not_extend_bridge_time_or_distance(speed, frames):
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  for n in range(30):
+    p.update(model_output(), x, speed, n * DT)
+  opening = model_output()
+  opening['road_edges'][0, 1, :, 0] += 2.0
+  stamp = 29 * DT
+  for _ in range(frames):
+    stamp += 0.1
+    p.update(opening, x, speed, stamp)
+    assert p.edges[1].available
+  stamp += 0.1
+  p.update(opening, x, speed, stamp)
+  assert not p.edges[1].available  # time or distance exhausted at half the nominal frame rate
+
+
+def test_bridge_compares_narrow_corridor_end_to_its_previous_boundary_not_median():
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  m = model_output(width=4.2)
+  m['road_edges'][0, 1, x < 15.0, 0] -= 0.4
+  for _ in range(30):
+    p.update(m, x, 10.0)
+  assert p.edges[1].available and p.edges[1].width == pytest.approx(3.8)
+  opening = {k: v.copy() for k, v in m.items()}
+  opening['road_edges'][0, 1, x > 35.0, 0] += 2.0
+  for _ in range(12):
+    p.update(opening, x, 10.0)
+    assert p.edges[1].available and p.edges[1].width == pytest.approx(3.8)
+  # A true inward step is compared with the original cap, not a moving cap.
+  opening['road_edges'][0, 1, x < 15.0, 0] -= 0.4
+  p.update(opening, x, 10.0)
+  assert not p.edges[1].available

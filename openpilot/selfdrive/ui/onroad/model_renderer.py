@@ -11,7 +11,7 @@ from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.onroad.e2e_assist import slowing_assist_color
 from openpilot.selfdrive.ui.onroad.lead_geometry import lead_fill_alpha, rounded_triangle
-from openpilot.selfdrive.ui.onroad.lane_policy_style import boundary_colors
+from openpilot.selfdrive.ui.onroad.lane_policy_style import active_edge, boundary_colors
 from openpilot.selfdrive.ui.onroad.model_stop import ModelStop, PATH_HALF_WIDTH
 from openpilot.selfdrive.ui.onroad.stop_bar import draw_stop_bar
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -42,6 +42,11 @@ class ModelPoints:
 
 
 @dataclass
+class VirtualEdgePoints(ModelPoints):
+  active_points: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=np.float32))
+
+
+@dataclass
 class LeadVehicle:
   glow: list[tuple[float, float]] = field(default_factory=list)
   chevron: list[tuple[float, float]] = field(default_factory=list)
@@ -65,7 +70,7 @@ class ModelRenderer(Widget):
     self._path = ModelPoints()
     self._lane_lines = [ModelPoints() for _ in range(4)]
     self._road_edges = [ModelPoints() for _ in range(2)]
-    self._virtual_edges = [ModelPoints() for _ in range(2)]
+    self._virtual_edges = [VirtualEdgePoints() for _ in range(2)]
     self._acceleration_x = np.empty((0,), dtype=np.float32)
 
     # Transform matrix (3x3 for car space to screen space)
@@ -201,10 +206,12 @@ class ModelRenderer(Widget):
 
     for virtual in self._virtual_edges:
       virtual.projected_points = np.empty((0, 2), dtype=np.float32)
+      virtual.active_points = np.empty((0, 2), dtype=np.float32)
       if virtual.raw_points.size:
         distance = min(max_distance, 55.0)
         index = self._get_path_length_idx(virtual.raw_points[:, 0], distance)
-        virtual.projected_points = self._map_line_to_polygon(virtual.raw_points, 0.035, 0.0, index, distance)
+        virtual.projected_points = self._map_line_to_polygon(virtual.raw_points, 0.025, 0.0, index, distance)
+        virtual.active_points = self._map_line_to_polygon(virtual.raw_points, 0.050, 0.0, index, distance)
 
     # Update path using raw points
     if lead and lead.present:
@@ -307,7 +314,10 @@ class ModelRenderer(Widget):
 
       virtual = self._virtual_edges[i]
       if styles[i][1] is not None and virtual.projected_points.size:
-        draw_polygon(self._rect, virtual.projected_points, rl.Color(*styles[i][1], 230))
+        # Choose at draw time so a disengagement/override immediately removes
+        # both the green colour and extra thickness, even between model frames.
+        points = virtual.active_points if active_edge(state, i, controlling) else virtual.projected_points
+        draw_polygon(self._rect, points, rl.Color(*styles[i][1], 230))
       else:
         alpha = np.clip(1.0 - self._road_edge_stds[i], 0.0, 1.0)
         color = rl.Color(255, 0, 0, int(alpha * 255))
