@@ -14,7 +14,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.common.simple_kalman import KF1D
 from openpilot.selfdrive.controls.lib.vision_lead_confidence import LeadUncertainty, VisionLeadConfidenceFilter
 from openpilot.selfdrive.controls.lib.vision_lead_tracker import VisionLeadObservation, VisionLeadTracker
-from openpilot.selfdrive.controls.lib.lane_change_lead import LaneChangeLeadRecovery
+from openpilot.selfdrive.controls.lib.lead_transition import LeadTransitionRecovery
 
 
 # Default lead acceleration decay set to 50% at 1s
@@ -186,7 +186,7 @@ class RadarD:
     self.lead_prob_filters = [FirstOrderFilter(0.0, 0.2, DT_MDL) for _ in range(2)]
     self.vision_lead_tracker = VisionLeadTracker()
     self.vision_confidence_filter = VisionLeadConfidenceFilter()
-    self.lane_change_lead_recovery = LaneChangeLeadRecovery()
+    self.lead_transition_recovery = LeadTransitionRecovery()
     self.last_vision_log = 0.0
 
     self.v_ego = 0.0
@@ -265,11 +265,10 @@ class RadarD:
       leads = self.vision_confidence_filter.update(raw_leads, baseline, uncertainties, self.vision_lead_tracker.slots,
                                                   timestamp, self.v_ego, valid)
       model = sm['modelV2']
-      lane_change = model.meta.laneChangeState in (log.LaneChangeState.laneChangeStarting, log.LaneChangeState.laneChangeFinishing)
       yaw_rate = float(model.orientationRate.z[0]) if len(model.orientationRate.z) else None
-      leads = self.lane_change_lead_recovery.update(
+      leads = self.lead_transition_recovery.update(
         observations, raw_leads, leads, [uncertainty.speed_std for uncertainty in uncertainties],
-        timestamp, self.v_ego, lane_change, yaw_rate, valid)
+        timestamp, self.v_ego, yaw_rate, valid)
       for i, field in enumerate(('leadOne', 'leadTwo')):
         setattr(self.radar_state, field, leads[i])
         if timestamp - self.last_vision_log >= 1.0:
@@ -282,14 +281,14 @@ class RadarD:
             f"confidence={confidence.reason} gains={confidence.range_gain:.3f},{confidence.accel_gain:.3f}",
             f"conf_dr={leads[i].get('dRel', 0.0) - baseline[i].get('dRel', 0.0):.3f}",
             f"conf_da={leads[i].get('aLeadK', 0.0) - baseline[i].get('aLeadK', 0.0):.3f}",
-            f"lane_recovery={self.lane_change_lead_recovery.reason} dv={self.lane_change_lead_recovery.correction:.2f}",
+            f"lead_transition={self.lead_transition_recovery.reason} dv={self.lead_transition_recovery.correction:.2f}",
           )))
       if timestamp - self.last_vision_log >= 1.0:
         self.last_vision_log = timestamp
     else:
       self.vision_lead_tracker.reset()
       self.vision_confidence_filter.reset()
-      self.lane_change_lead_recovery.reset()
+      self.lead_transition_recovery.reset()
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
