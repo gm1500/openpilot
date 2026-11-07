@@ -44,6 +44,22 @@ Installed tiles provide an independent local speed-limit fallback when the norma
 
 Live maps work without installing any regional packages. The live query remains 1.5 km on the original Overpass provider, with the same 2 MiB response limit and fresh-position/coverage checks. A fresh online result takes priority. The bulk format does not contain OSM node IDs or complete junction topology, so offline geometry is not used to invent junction connections. Live data continues to supply richer junction/control information. This version therefore supports offline speed limits, not complete offline replacement of every map-derived feature.
 
+For offline speed matching, the reader preserves the road class and route reference.
+An established match can follow a unique end-to-start continuation with the same
+class, name/reference and permitted direction, provided its endpoint tangents differ
+by no more than 15 degrees. This inference is limited to four pieces and the existing
+measured-travel bound; the new match must be within 15 m and 12 degrees of the vehicle.
+Ramps, interior crossings, nearby parallel roads and ambiguous main-road forks do
+not qualify. The new piece's own speed/advisory/conditional tags apply immediately;
+there is no timed hold of a previous speed. The inferred continuations are separate
+from node connectivity and cannot produce junctions or traffic-control targets.
+Existing downloaded tiles work without a new download or format migration.
+GPS replay against published regional tiles reproduced 20 boundary dropouts before
+this change and none afterward, after initial road acquisition. Regression tests
+cover real speed changes, unknown restrictions, ramps, crossings, ambiguous forks,
+reverse way geometry and unchanged live-node requirements. Replay and unit tests
+do not replace on-device road validation.
+
 When the car leaves the live query circle, the offline matcher uses recent live speed tags for an identical way ID, complete geometry and allowed direction. Tags expire with the existing ten-minute live cache or are replaced by the next live response. Raw legal/advisory, directional and conditional tags are reconciled before matching, so schedules are reevaluated and removed or unsupported limits do not revive old offline values. Offline geometry and coverage remain required; no junction topology is inferred and nothing is written to the installed tiles. Different ways and changed geometry retain their own offline tags.
 
 Source, matched way ID and published limits are logged on changes as `mapd.speed_source`, including transitions to no match. `offline+live` identifies offline geometry using reconciled live speed tags. A newly fetched map is not proof that its speed tags reflect current signs.

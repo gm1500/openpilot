@@ -14,6 +14,8 @@ from openpilot.common.hardware.hw import Paths
 SOURCE = Path(BASEDIR) / 'openpilot/third_party/offline_maps'
 MAX_TILE_BYTES = 32 * 1024 * 1024
 SCHEMA = capnp.load(str(SOURCE / 'offline.capnp'))
+HIGHWAY_TAGS = {name: name.replace('Link', '_link').replace('livingStreet', 'living_street')
+                for name in SCHEMA.HighwayClass.schema.enumerants if name != 'unknown'}
 
 
 def map_root() -> Path:
@@ -133,7 +135,9 @@ class OfflineMaps:
           points = tuple((p.latitude, p.longitude) for p in way.nodes)
           if not all(math.isfinite(a) and math.isfinite(b) and -90 <= a <= 90 and -180 <= b <= 180 for a, b in points):
             continue
-          tags = {'name': str(way.name), 'oneway': 'yes' if way.oneWay else 'no'}
+          tags = {'name': str(way.name), 'ref': str(way.ref), 'oneway': 'yes' if way.oneWay else 'no'}
+          if highway := HIGHWAY_TAGS.get(str(way.highwayClass)):
+            tags['highway'] = highway
           for attr, key in (('maxSpeed', 'maxspeed'), ('maxSpeedForward', 'maxspeed:forward'),
                             ('maxSpeedBackward', 'maxspeed:backward'), ('advisorySpeed', 'maxspeed:advisory')):
             speed = getattr(way, attr)
