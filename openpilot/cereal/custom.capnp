@@ -214,3 +214,23 @@ struct CustomReserved18 @0xc86a3d38d13eb3ef {
 
 struct CustomReserved19 @0xa4f1eb3323f5f582 {
 }
+
+struct LanePolicyState {
+  valid @0 :Bool; # publisher implements per-side sources; false in older logs
+  enabled @1 :Bool;
+  active @2 :Bool; # centering selected and lateral control active without driver override
+  leftSource @3 :BoundarySource;
+  rightSource @4 :BoundarySource;
+  edges @5 :List(VirtualLaneBoundary); # left, right; raw perception remains in modelV2
+  enum BoundarySource {
+    none @0;
+    painted @1;
+    roadEdge @2;
+  }
+}
+
+struct VirtualLaneBoundary {
+  available @0 :Bool;
+  held @1 :Bool; # short real-line anchored continuity across an outward opening
+  y @2 :List(Float32); # filtered boundary at model lane x stations, valid through 55 m
+}
