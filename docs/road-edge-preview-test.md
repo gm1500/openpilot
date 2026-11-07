@@ -27,10 +27,11 @@ both painted lines must be strong for 0.75 s before switching back.
 | Check | Current test setting |
 | --- | --- |
 | Opposite paint probability | At least 0.92 to earn qualification; brief dips to 0.85 may pause it; 0.70 to retain an established boundary |
-| Edge model standard deviation | At most 0.50 to qualify; 0.65 to retain |
+| Edge model standard deviation | At most 0.50 for normal qualification; up to 0.65 with longer, stricter stability qualification; 0.65 to retain |
 | Geometric lane width | 3.0–4.6 m over 5–55 m; narrow near-field space rejected |
 | Width spread over horizon | At most 0.75 m between the 10th/90th percentiles |
-| Temporal qualification | 15 strong observed frames within a 1.25 s window; confidence-only pauses at most 0.25 s each; width 10th–90th percentile span at most 0.30 m and latest width within 0.30 m of the window median |
+| Normal qualification | 15 strong observed frames within a 1.25 s window; confidence-only pauses at most 0.25 s each; width 10th–90th percentile span at most 0.30 m and latest width within 0.30 m of the window median |
+| Moderate-uncertainty qualification | 30 strong observed frames within 2.0 s; temporal width span/latest deviation at most 0.20 m, spatial width span at most 0.50 m |
 | Median-width smoothing | 1 s time constant; change at most 0.20 m/s; immediate inward geometry cap kept separate |
 | Ordinary short hold | At most 0.30 s or 5 m, whichever comes first |
 | Established curb, outward opening | At most 1.25 s or 20 m, with stronger continuous paint support |
@@ -64,7 +65,11 @@ During acquisition, a confidence-only dip may pause earned progress for at most
 pass admission checks, width must agree with the earned history, and painted-line
 position/direction through 20 m must move by no more than 0.20 m per frame.
 Weak frames earn no progress. Older strong observations expire after 1.25 s;
-longer dips, missing paint, geometry changes or uncertain edges clear progress.
+longer dips, missing paint, geometry changes or edge uncertainty above 0.65 clear
+progress. A brief edge-uncertainty rise from 0.50 to 0.65 can pause normal
+qualification under the same time/geometry limits, but cannot earn its progress.
+The separate moderate-uncertainty path requires 30 strong painted-anchor
+observations with tighter spatial and temporal width agreement.
 Blinkers, model lane-change intent and invalid inputs retain the original fallback.
 Steady-error bias learning is disabled for an inferred edge to avoid integrating
 an uncertain curb offset; the painted-line centering gains remain unchanged.
@@ -261,3 +266,49 @@ schema and UI-colour regressions remain passing. Python lint, compilation and
 whitespace checks pass. These are open-loop boundary-selection results; the
 logged action already includes the recording policy's correction, so this replay
 does not establish a closed-loop steering or oscillation improvement.
+
+### Follow-up: earlier curb and barrier acquisition
+
+On the speed-pause POC, route `00000008--1d6913bdff`, segments 1 and 7, exposed
+another acquisition limitation. Some steady curb estimates had edge standard
+deviation around 0.55–0.60, while the painted anchor was strong and the corridor
+was within the existing width bounds. Repeated crossings of 0.50 also erased
+otherwise consistent boundary evidence.
+
+Normal qualification still needs 15 observations with paint probability at least
+0.92 and edge standard deviation at most 0.50. Brief moderate edge-uncertainty
+dips can pause it without earning progress. A second path requires 30 strong
+observations within two seconds, permits edge standard deviation at most 0.65,
+and tightens temporal width agreement to 0.20 m and spatial spread to 0.50 m.
+At the normal 20 Hz model rate this is 1.5 s of earned evidence. It retains the
+same painted-anchor, bracketing, 3.0–4.6 m width, jump, freshness and expiry gates.
+The qualified boundary's output width is still capped inside the observed edge.
+
+| New sample | Additional usable interval in replay |
+| --- | --- |
+| Segment 1, left curb | Active edge centering from approximately 14.04–19.29 s |
+| Segment 7, right barrier | Candidate from 8.60 s; active edge centering from 9.40–15.61 s |
+| Segment 7, later left curb | Candidate 0.20 s earlier; active centering still waits for lateral control |
+
+These add 11.45 s of active edge selection on identical recorded inputs, with
+no previously active edge frames lost. Segment 1 begins with a qualified boundary
+inherited from missing segment 0; cold-start replay cannot reproduce that initial
+state. The comparison excludes its first five seconds, after both replay and
+recorded policy have released the boundary. Segment 7 availability matches the
+baseline replay exactly; control-state alignment differs by one model frame.
+The updated policy releases at subsequent openings and still rejects wide
+corridors and lost paint. Review of both supplied videos confirms the added
+intervals correspond to a continuous curb or barrier.
+
+The previous eight supplied segments were also replayed (9,600 additional model
+frames). Active edge selection changes from 80.30 to 80.80 s, with no active
+frames lost. The unmarked/weak-anchor examples still produce no candidate.
+Across all ten segments, 12,000 model frames were checked. These remain open-loop
+boundary-selection checks, not a simulation of the resulting driven path.
+
+Validation: 91 focused tests pass. Added coverage includes both sides, minimum
+observation count, uncertainty spikes, spatial/temporal width variation, sparse
+paint evidence, dropped-frame expiry, and recorded curb/barrier regressions.
+Centering gains, correction limits, existing hold budgets, lane-change handling,
+UI colours and the speed-dependent curve-pause POC are unchanged. On-device
+steering behaviour remains to be evaluated.

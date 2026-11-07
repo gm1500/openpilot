@@ -16,6 +16,8 @@ EDGE_ARM_STD, EDGE_RETAIN_STD = 0.50, 0.65
 EDGE_ARM_FRAMES = round(0.75 / DT)
 EDGE_ARM_PROB, EDGE_ARM_PAUSE_PROB = 0.92, 0.85
 EDGE_ARM_PAUSE_TIME, EDGE_ARM_WINDOW = 0.25, 1.25
+EDGE_STABLE_FRAMES, EDGE_STABLE_WINDOW = round(1.50 / DT), 2.0
+EDGE_STABLE_HISTORY_SPREAD, EDGE_STABLE_SPREAD = 0.20, 0.50
 EDGE_RECOVERY_FRAMES = round(0.15 / DT)
 EDGE_WIDTH_TIME = 1.0
 EDGE_MAX_WIDTH_RATE = 0.20  # m/s; widening must not chase driveway openings
@@ -41,12 +43,47 @@ class EdgeBoundary:
     self.observed_frames = 0
     self.y = None
     self.history = deque(maxlen=EDGE_ARM_FRAMES)
-    self.arm_age = self.arm_pause = 0.0
+    self.stable_history = deque(maxlen=EDGE_STABLE_FRAMES)
+    self.arm_age = 0.0
+    self.arm_pauses = [0.0, 0.0]
     self.previous_arm_anchor = None
     self.gap_time = self.gap_distance = 0.0
     self.gap_extendable = False
     self.gap_width = None
     self.previous_anchor = None
+
+  def _qualify(self, opposite, opposite_prob, edge_std, x, median, spread, dt):
+    # Strong paint is required on every earned observation. Moderate edge
+    # uncertainty needs twice the evidence and a tighter, stable corridor.
+    self.arm_age += dt
+    arm_anchor = opposite[(x >= 0.0) & (x <= 20.0)]
+    continuous = (self.previous_arm_anchor is not None and
+                  np.max(np.abs(arm_anchor - self.previous_arm_anchor)) <= EDGE_MAX_ANCHOR_STEP + 1e-6)
+    self.previous_arm_anchor = arm_anchor.copy()
+    tracks = ((self.history, EDGE_ARM_STD, EDGE_ARM_WINDOW, EDGE_MAX_HISTORY_SPREAD, True),
+              (self.stable_history, EDGE_RETAIN_STD, EDGE_STABLE_WINDOW, EDGE_STABLE_HISTORY_SPREAD,
+               spread <= EDGE_STABLE_SPREAD))
+    for index, (history, std_limit, window, tolerance, shape_ok) in enumerate(tracks):
+      while history and self.arm_age - history[0][0] > window:
+        history.popleft()
+      if not continuous or not shape_ok:
+        history.clear()
+      earns = opposite_prob >= EDGE_ARM_PROB and edge_std <= std_limit and shape_ok
+      if not earns:
+        self.arm_pauses[index] += dt
+        same_width = bool(history) and abs(median - np.median([width for _, width in history])) <= tolerance
+        if (opposite_prob < EDGE_ARM_PAUSE_PROB or self.arm_pauses[index] > EDGE_ARM_PAUSE_TIME + 1e-6 or
+            not same_width or not shape_ok):
+          history.clear()
+        continue
+      self.arm_pauses[index] = 0.0
+      history.append((self.arm_age, float(median)))
+      if len(history) < history.maxlen:
+        continue
+      low, center, high = np.percentile([width for _, width in history], (10, 50, 90))
+      if high - low <= tolerance and abs(median - center) <= tolerance:
+        return float(center)
+    return None
 
   def update(self, opposite, edge, opposite_prob, edge_std, x, speed, dt=DT):
     # Both bounds must bracket the car; a nearby parallel road is not our lane.
@@ -75,7 +112,7 @@ class EdgeBoundary:
     # Compare successive observations, not the deliberately conservative output
     # boundary. Clamping that boundary inward must not poison curb continuity.
     compatible = self.observed_width is None or abs(median - self.observed_width) <= EDGE_MAX_HISTORY_SPREAD
-    observed = geometric and compatible and edge_std <= (EDGE_RETAIN_STD if self.available else EDGE_ARM_STD)
+    observed = geometric and compatible and edge_std <= EDGE_RETAIN_STD
     # A single returning frame must not replenish a long gap's time/distance
     # budget. Keep the width frozen until three consecutive observations agree.
     recovering = observed and self.available and self.gap_time > 0.0 and self.observed_frames + 1 < EDGE_RECOVERY_FRAMES
@@ -94,35 +131,10 @@ class EdgeBoundary:
       self.held = False
       self.gap_extendable = False
       if not self.available:
-        # Only strong paint earns admission. Brief confidence-only dips may
-        # pause it, provided the same paint/curb corridor remains observed.
-        # Age the evidence as well as limiting each dip: scattered strong
-        # frames must not eventually add up to a qualified boundary.
-        self.arm_age += dt
-        while self.history and self.arm_age - self.history[0][0] > EDGE_ARM_WINDOW:
-          self.history.popleft()
-        arm_anchor = opposite[(x >= 0.0) & (x <= 20.0)]
-        arm_continuous = (self.previous_arm_anchor is not None and
-                          np.max(np.abs(arm_anchor - self.previous_arm_anchor)) <= EDGE_MAX_ANCHOR_STEP + 1e-6)
-        self.previous_arm_anchor = arm_anchor.copy()
-        if not arm_continuous:
-          self.history.clear()
-        if opposite_prob < EDGE_ARM_PROB:
-          self.arm_pause += dt
-          same_width = bool(self.history) and abs(median - np.median([width for _, width in self.history])) <= EDGE_MAX_HISTORY_SPREAD
-          if opposite_prob < EDGE_ARM_PAUSE_PROB or self.arm_pause > EDGE_ARM_PAUSE_TIME + 1e-6 or not same_width:
-            self.history.clear()
+        qualified_width = self._qualify(opposite, opposite_prob, edge_std, x, median, high - low, dt)
+        if qualified_width is None:
           return
-        self.arm_pause = 0.0
-        self.history.append((self.arm_age, float(median)))
-        if len(self.history) < EDGE_ARM_FRAMES:
-          return
-        history_low, history_median, history_high = np.percentile([width for _, width in self.history], (10, 50, 90))
-        # One old width outlier should not erase a steady curb. Sustained
-        # changes and a disagreeing latest width still cannot qualify.
-        if history_high - history_low > EDGE_MAX_HISTORY_SPREAD or abs(median - history_median) > EDGE_MAX_HISTORY_SPREAD:
-          return
-        self.filtered_width = float(history_median)
+        self.filtered_width = qualified_width
         self.available = True
       self.observed_width = float(median)
       change = np.clip((median - self.filtered_width) * dt / (EDGE_WIDTH_TIME + dt),
@@ -159,7 +171,9 @@ class EdgeBoundary:
     else:
       self.observed_frames = 0
       self.history.clear()
-      self.arm_age = self.arm_pause = 0.0
+      self.stable_history.clear()
+      self.arm_age = 0.0
+      self.arm_pauses = [0.0, 0.0]
       self.previous_arm_anchor = None
       return
     self.y = opposite + direction * self.width

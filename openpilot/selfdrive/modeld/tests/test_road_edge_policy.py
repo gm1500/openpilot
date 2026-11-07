@@ -49,9 +49,10 @@ def test_stable_edge_and_one_strong_line_keep_original_centering_gain(side):
 
 
 @pytest.mark.parametrize('width', [2.8, 4.9, 7.2])
-def test_width_bounds_reject_narrow_space_and_multiple_lanes(width):
+@pytest.mark.parametrize('std', [0.3, 0.6])
+def test_width_bounds_reject_narrow_space_and_multiple_lanes(width, std):
   p = LanePolicy()
-  tick(p, model_output(width=width), 80)
+  tick(p, model_output(width=width, edge_std=std), 80)
   assert not p.active and not any(e.available for e in p.road_edges.edges)
 
 
@@ -517,15 +518,16 @@ def test_paint_dip_does_not_bridge_deteriorating_acquisition_geometry(issue):
     dip['lane_lines'][0, 1, :, 0] += change
     dip['road_edges'][0, 1, :, 0] += change
   else:
-    dip['road_edges_stds'][0, 1, :, 0] = 0.6
+    dip['road_edges_stds'][0, 1, :, 0] = 0.66
   tick(p, dip, count)
   tick(p, model_output(), 5)
   assert not p.active and not p.road_edges.edges[1].available
 
 
-def test_medium_paint_confidence_alone_never_earns_admission():
+@pytest.mark.parametrize('std', [0.3, 0.6])
+def test_medium_paint_confidence_alone_never_earns_admission(std):
   p = LanePolicy()
-  tick(p, model_output(left_prob=0.90), 200)
+  tick(p, model_output(left_prob=0.90, edge_std=std), 200)
   assert not p.active and not any(e.available for e in p.road_edges.edges)
 
 
@@ -561,6 +563,73 @@ def test_recorded_confidence_fluctuations_reuse_edge_qualification(name, start, 
     tick(p, m, frame_time=stamp)
     if start <= stamp <= end:
       assert p.active and p.edge_side == 1, stamp
+
+
+@pytest.mark.parametrize('side', [0, 1])
+def test_moderate_edge_uncertainty_requires_twice_the_strong_observations(side):
+  p = LanePolicy()
+  m = model_output(edge_std=0.6, left_prob=0.99 if side else 0.1, right_prob=0.1 if side else 0.99)
+  tick(p, m, 29)
+  assert not p.active and not p.road_edges.edges[side].available
+  tick(p, m)
+  assert p.active and p.edge_side == side
+
+
+def test_brief_edge_uncertainty_dip_pauses_fast_qualification_without_earning_it():
+  p = LanePolicy()
+  tick(p, model_output(), 10)
+  tick(p, model_output(edge_std=0.6), 4)
+  tick(p, model_output(), 4)
+  assert not p.active
+  tick(p, model_output())
+  assert p.active
+
+
+@pytest.mark.parametrize('issue', ['uncertainty', 'width_history', 'width_horizon', 'lost_paint', 'sparse_paint'])
+def test_longer_observation_cannot_admit_unreliable_corridors(issue):
+  p = LanePolicy()
+  for frame in range(120):
+    m = model_output(edge_std=0.6)
+    if issue == 'uncertainty':
+      m['road_edges_stds'][:] = 0.66
+    elif issue == 'width_history':
+      m = model_output(edge_std=0.6, width=3.5 if frame % 2 else 3.8)
+    elif issue == 'width_horizon':
+      m = model_output(edge_std=0.6, width=3.4)
+      m['road_edges'][0, 1, :, 0] += 0.016 * np.asarray(ModelConstants.X_IDXS)
+    elif issue == 'lost_paint':
+      m['lane_lines_prob'][0, 3] = 0.69
+    elif frame % 6 >= 2:
+      m['lane_lines_prob'][0, 3] = 0.88
+    tick(p, m)
+    assert not p.active and not p.road_edges.edges[1].available
+
+
+def test_moderate_uncertainty_admission_expires_across_dropped_frames():
+  p = LanePolicy()
+  for frame in range(60):
+    tick(p, model_output(edge_std=0.6), frame_time=frame * 0.1)
+    assert not p.active  # Thirty strong observations cannot fit within two seconds.
+
+
+@pytest.mark.parametrize('name,start,end', [('curb_moderate_uncertainty', 4.1, 9.2),
+                                         ('barrier_uncertainty_fluctuations', 2.7, 9.5)])
+def test_recorded_curb_and_barrier_qualify_despite_moderate_uncertainty(name, start, end):
+  fixture = json.loads((Path(__file__).parent / 'fixtures' / f'{name}.json').read_text())
+  side = fixture['side']
+  p = LanePolicy()
+  for stamp, speed, probability, missing_prob, std, blinkers, desire, paint, missing, edge in fixture['frames']:
+    m = model_output(left_prob=probability if side else missing_prob, right_prob=missing_prob if side else probability)
+    m['road_edges_stds'][:] = 2.0
+    m['road_edges_stds'][0, side, :, 0] = std
+    m['lane_lines'][0, 2 - side, :, 0] = np.pad(paint, (0, 33 - len(paint)), mode='edge')
+    m['lane_lines'][0, 1 + side, :, 0] = np.pad(missing, (0, 33 - len(missing)), mode='edge')
+    m['road_edges'][0, side, :, 0] = np.pad(edge, (0, 33 - len(edge)), mode='edge')
+    m['desire_state'][0, 3] = desire
+    p.update(m, 0.001, speed, lane_policy_enabled=True, blinkers_active=blinkers, frame_time=stamp)
+    if start <= stamp <= end:
+      assert p.active and p.edge_side == side, stamp
+  assert not p.road_edges.edges[side].available  # the later opening still releases
 
 
 @pytest.mark.parametrize('speed,frames', [(0.0, 12), (30.0, 6)])
