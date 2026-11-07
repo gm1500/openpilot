@@ -25,6 +25,7 @@ from openpilot.common.linux import LinuxSystemStats
 from openpilot.system.loggerd.config import get_available_percent
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware.power_monitoring import PowerMonitoring
+from openpilot.system.sentry.config import read_runtime
 from openpilot.system.hardware.fan_controller import FanController
 from openpilot.system.hardware.chestnut.monitoring import chestnut_state_thread
 from openpilot.system.hardware.chestnut.status import ChestnutStatus
@@ -329,7 +330,13 @@ def hardware_thread(end_event, hw_queue) -> None:
     all_comp_temp = all_temp_filter.update(max(temp_sources))
     msg.deviceState.maxTempC = all_comp_temp
 
+    sentry_runtime = read_runtime()
+    sentry_capture = bool(sentry_runtime.get('capture')) and not onroad_conditions['ignition']
     msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"])
+    if sentry_capture or sentry_runtime.get('phase') == 'Cooling down':
+      # Parked capture has no moving air; permit cooling above the stock 30% offroad cap.
+      msg.deviceState.fanSpeedPercentDesired = max(msg.deviceState.fanSpeedPercentDesired,
+                                                  int(min(100, max(20, 20+(all_comp_temp-50)*4))))
 
     is_offroad_for_5_min = (started_ts is None) and ((not started_seen) or (off_ts is None) or (time.monotonic() - off_ts > 60 * 5))
     if is_offroad_for_5_min and offroad_comp_temp > OFFROAD_DANGER_TEMP:
@@ -398,7 +405,8 @@ def hardware_thread(end_event, hw_queue) -> None:
       except Exception:
         pass
 
-    should_pwrsave = not onroad_conditions["ignition"] and msg.deviceState.screenBrightnessPercent < 1e-3
+    # camerad requires the big cluster. Eye brightness must not toggle CPU policy.
+    should_pwrsave = not onroad_conditions["ignition"] and not sentry_capture and msg.deviceState.screenBrightnessPercent < 1e-3
     if should_pwrsave != pwrsave or (count == 0):
       HARDWARE.set_power_save(should_pwrsave)
     pwrsave = should_pwrsave

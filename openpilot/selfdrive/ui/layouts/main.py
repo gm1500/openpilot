@@ -1,10 +1,13 @@
 import pyray as rl
+from openpilot.common.hardware import HARDWARE
 from enum import IntEnum
 import openpilot.cereal.messaging as messaging
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets import Widget
 from openpilot.selfdrive.ui.layouts.sidebar import Sidebar, SIDEBAR_WIDTH
 from openpilot.selfdrive.ui.layouts.home import HomeLayout
+from openpilot.selfdrive.ui.layouts.sentry_eye import SentryEye
+from openpilot.selfdrive.ui.layouts.sentry_prompt import SentryPrompt
 from openpilot.selfdrive.ui.layouts.settings.settings import SettingsLayout, PanelType
 from openpilot.selfdrive.ui.onroad.augmented_road_view import AugmentedRoadView
 from openpilot.selfdrive.ui.ui_state import device, ui_state
@@ -29,6 +32,8 @@ class MainLayout(Widget):
     self._prev_onroad = False
 
     # Initialize layouts
+    self._sentry_eye = SentryEye()
+    self._sentry_prompt = SentryPrompt()
     self._home_layout = HomeLayout()
     self._home_body_layout = BodyLayout()
     self._layouts: dict[MainState, Widget] = {
@@ -52,6 +57,11 @@ class MainLayout(Widget):
 
   def _render(self, _):
     self._handle_onroad_transition()
+    self._sentry_prompt.update(HARDWARE.get_device_type() == 'tizi' and self._onboarding_window.completed and not ui_state.started and not ui_state.ignition and
+                               not ui_state.is_body and ui_state.params.get_bool('IsOffroad') and ui_state.sm.valid['deviceState'])
+    if self._sentry_prompt.opened:
+      self._sentry_prompt.render(self._rect)
+      return
     self._render_main_content()
 
   def _setup_callbacks(self):
@@ -123,6 +133,9 @@ class MainLayout(Widget):
     self._set_mode_for_state()
 
   def _render_main_content(self):
+    if self._current_mode == MainState.HOME and device.sentry_screen:
+      self._sentry_eye.render(self._rect)
+      return
     # Render sidebar
     if self._sidebar.is_visible:
       self._sidebar.render(self._sidebar_rect)

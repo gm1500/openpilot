@@ -7,9 +7,14 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.system.loggerd.config import get_available_bytes, get_available_percent
 from openpilot.system.loggerd.uploader import listdir_by_creation
 from openpilot.system.loggerd.xattr_cache import getxattr
+from openpilot.system.sentry.config import read_runtime
 
 MIN_BYTES = 5 * 1024 * 1024 * 1024
 MIN_PERCENT = 10
+# Keep headroom above the parked recorder's 5 GiB / 10% hard stop. Waiting
+# for that same floor can close a live event before normal cleanup catches up.
+SENTRY_MIN_BYTES = 6 * 1024 * 1024 * 1024
+SENTRY_MIN_PERCENT = 12
 
 DELETE_LAST = ['boot', 'crash']
 
@@ -19,6 +24,10 @@ PRESERVE_COUNT = 5
 
 
 def has_preserve_xattr(d: str) -> bool:
+  # Older Sentry builds set this attribute on every segment. Sentry events now
+  # follow ordinary route cleanup, including events written by those builds.
+  if os.path.exists(os.path.join(Paths.log_root(), d, '.sentry')):
+    return False
   return getxattr(os.path.join(Paths.log_root(), d), PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
 
 
@@ -45,9 +54,10 @@ def get_preserved_segments(dirs_by_creation: list[str]) -> set[str]:
   return preserved
 
 
-def deleter_step() -> tuple[bool, str | None]:
-  out_of_bytes = get_available_bytes(default=MIN_BYTES + 1) < MIN_BYTES
-  out_of_percent = get_available_percent(default=MIN_PERCENT + 1) < MIN_PERCENT
+def deleter_step(sentry_capture: bool = False) -> tuple[bool, str | None]:
+  min_bytes, min_percent = (SENTRY_MIN_BYTES, SENTRY_MIN_PERCENT) if sentry_capture else (MIN_BYTES, MIN_PERCENT)
+  out_of_bytes = get_available_bytes(default=min_bytes + 1) < min_bytes
+  out_of_percent = get_available_percent(default=min_percent + 1) < min_percent
   out_of_space = out_of_percent or out_of_bytes
   if not out_of_space:
     return False, None
@@ -73,8 +83,9 @@ def deleter_step() -> tuple[bool, str | None]:
 
 def deleter_thread(exit_event: threading.Event):
   while not exit_event.is_set():
-    out_of_space, _ = deleter_step()
-    exit_event.wait(.1 if out_of_space else 30)
+    sentry_capture = bool(read_runtime().get('capture'))
+    out_of_space, _ = deleter_step(sentry_capture)
+    exit_event.wait(.1 if out_of_space else 1 if sentry_capture else 30)
 
 
 def main():
