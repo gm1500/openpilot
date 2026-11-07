@@ -11,6 +11,7 @@ from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.onroad.e2e_assist import slowing_assist_color
 from openpilot.selfdrive.ui.onroad.lead_geometry import lead_fill_alpha, rounded_triangle
+from openpilot.selfdrive.ui.onroad.lane_policy_style import active_edge, boundary_colors
 from openpilot.selfdrive.ui.onroad.model_stop import ModelStop, PATH_HALF_WIDTH
 from openpilot.selfdrive.ui.onroad.stop_bar import draw_stop_bar
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -41,6 +42,11 @@ class ModelPoints:
 
 
 @dataclass
+class VirtualEdgePoints(ModelPoints):
+  active_points: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=np.float32))
+
+
+@dataclass
 class LeadVehicle:
   glow: list[tuple[float, float]] = field(default_factory=list)
   chevron: list[tuple[float, float]] = field(default_factory=list)
@@ -64,6 +70,7 @@ class ModelRenderer(Widget):
     self._path = ModelPoints()
     self._lane_lines = [ModelPoints() for _ in range(4)]
     self._road_edges = [ModelPoints() for _ in range(2)]
+    self._virtual_edges = [VirtualEdgePoints() for _ in range(2)]
     self._acceleration_x = np.empty((0,), dtype=np.float32)
 
     # Transform matrix (3x3 for car space to screen space)
@@ -152,6 +159,16 @@ class ModelRenderer(Widget):
     for i, road_edge in enumerate(model.roadEdges):
       self._road_edges[i].raw_points = np.array([road_edge.x, road_edge.y, road_edge.z], dtype=np.float32).T
 
+    for i, virtual in enumerate(self._virtual_edges):
+      virtual.raw_points = np.empty((0, 3), dtype=np.float32)
+      state = model.lanePolicy
+      if state.valid and state.enabled and len(state.edges) == 2 and state.edges[i].available:
+        y = np.asarray(state.edges[i].y, dtype=np.float32)
+        raw = self._road_edges[i].raw_points
+        if len(y) == len(raw) and np.isfinite(y).all():
+          virtual.raw_points = raw.copy()
+          virtual.raw_points[:, 1] = y
+
     self._lane_line_probs = np.array(model.laneLineProbs, dtype=np.float32)
     self._road_edge_stds = np.array(model.roadEdgeStds, dtype=np.float32)
     self._acceleration_x = np.array(model.acceleration.x, dtype=np.float32)
@@ -186,6 +203,15 @@ class ModelRenderer(Widget):
     # Update road edges using raw points
     for road_edge in self._road_edges:
       road_edge.projected_points = self._map_line_to_polygon(road_edge.raw_points, 0.025, 0.0, max_idx, max_distance)
+
+    for virtual in self._virtual_edges:
+      virtual.projected_points = np.empty((0, 2), dtype=np.float32)
+      virtual.active_points = np.empty((0, 2), dtype=np.float32)
+      if virtual.raw_points.size:
+        distance = min(max_distance, 55.0)
+        index = self._get_path_length_idx(virtual.raw_points[:, 0], distance)
+        virtual.projected_points = self._map_line_to_polygon(virtual.raw_points, 0.025, 0.0, index, distance)
+        virtual.active_points = self._map_line_to_polygon(virtual.raw_points, 0.050, 0.0, index, distance)
 
     # Update path using raw points
     if lead and lead.present:
@@ -262,23 +288,40 @@ class ModelRenderer(Widget):
 
   def _draw_lane_lines(self):
     """Draw lane lines and road edges"""
+    sm = ui_state.sm
+    state = sm['modelV2'].lanePolicy
+    now = time.monotonic()
+    fresh = sm.valid['modelV2'] and 0 <= now - sm.logMonoTime['modelV2'] * 1e-9 < 0.3
+    controls_fresh = all(sm.valid[s] and 0 <= now - sm.logMonoTime[s] * 1e-9 < 0.3 for s in ('carControl', 'carState'))
+    controlling = fresh and controls_fresh and sm['carControl'].latActive and not sm['carState'].steeringPressed
+    styles = [boundary_colors(state, side, controlling) if fresh else (None, None) for side in (0, 1)]
     for i, lane_line in enumerate(self._lane_lines):
       if lane_line.projected_points.size == 0:
         continue
 
       alpha = np.clip(self._lane_line_probs[i], 0.0, 0.7)
       color = (255, 255, 255)
-      if i in (1, 2) and ui_state.lane_policy_line_color is not None:
-        color = ui_state.lane_policy_line_color
+      if i in (1, 2):
+        if state.valid:
+          color = styles[i - 1][0] or color
+        elif ui_state.lane_policy_line_color is not None:
+          color = ui_state.lane_policy_line_color
       draw_polygon(self._rect, lane_line.projected_points, rl.Color(*color, int(alpha * 255)))
 
     for i, road_edge in enumerate(self._road_edges):
       if road_edge.projected_points.size == 0:
         continue
 
-      alpha = np.clip(1.0 - self._road_edge_stds[i], 0.0, 1.0)
-      color = rl.Color(255, 0, 0, int(alpha * 255))
-      draw_polygon(self._rect, road_edge.projected_points, color)
+      virtual = self._virtual_edges[i]
+      if styles[i][1] is not None and virtual.projected_points.size:
+        # Choose at draw time so a disengagement/override immediately removes
+        # both the green colour and extra thickness, even between model frames.
+        points = virtual.active_points if active_edge(state, i, controlling) else virtual.projected_points
+        draw_polygon(self._rect, points, rl.Color(*styles[i][1], 230))
+      else:
+        alpha = np.clip(1.0 - self._road_edge_stds[i], 0.0, 1.0)
+        color = rl.Color(255, 0, 0, int(alpha * 255))
+        draw_polygon(self._rect, road_edge.projected_points, color)
 
   def _draw_path(self, sm):
     """Draw path with dynamic coloring based on mode and throttle state."""
