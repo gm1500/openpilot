@@ -53,8 +53,12 @@ class LongControl:
     self.pid.pos_limit = accel_limits[1]
 
     previous_state = self.long_control_state
+    # Sierra direct longitudinal control owns brake release. Waiting for stock
+    # ACC's standstill bit can keep our hold applied after the planner departs.
+    cruise_standstill = CS.cruiseState.standstill and not (
+      self.CP.carFingerprint == GM_CAR.CHEVROLET_SILVERADO and self.CP.openpilotLongitudinalControl)
     self.long_control_state = long_control_state_trans(active, self.long_control_state, should_stop,
-                                                       CS.brakePressed, CS.cruiseState.standstill)
+                                                       CS.brakePressed, cruise_standstill)
     if (
       previous_state == LongCtrlState.stopping and self.long_control_state == LongCtrlState.pid
       and self.CP.carFingerprint == GM_CAR.CHEVROLET_SILVERADO
