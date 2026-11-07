@@ -19,6 +19,9 @@ dependencies = [
   "sounddevice",  # micd + soundd
   "requests",     # many one-off uses
   "tqdm",         # cars (fw_versions.py) on start + many one-off uses
+  # mapd: global, offline coordinate -> civil time; never use a home-city offset
+  "timezonefinder==8.2.0",
+  "tzdata",
 
   # core
   "scons",
