@@ -1,4 +1,5 @@
 import pyray as rl
+import math
 import time
 from dataclasses import dataclass
 from collections.abc import Callable
@@ -68,8 +69,8 @@ class Sidebar(Widget):
     self._net_type = NETWORK_TYPES[NetworkType.none]
     self._net_strength = 0
 
-    self._temp_status = MetricData(tr_noop("TEMP"), tr_noop("GOOD"), Colors.GOOD)
-    self._panda_status = MetricData(tr_noop("VEHICLE"), tr_noop("ONLINE"), Colors.GOOD)
+    self._temp_status = MetricData(tr_noop("TEMP"), "--°C", Colors.WARNING)
+    self._panda_status = MetricData(tr_noop("VEHICLE"), "-- V", Colors.WARNING)
     self._connect_status = MetricData(tr_noop("CONNECT"), tr_noop("OFFLINE"), Colors.WARNING)
     self._recording_audio = False
 
@@ -102,29 +103,29 @@ class Sidebar(Widget):
 
   def _update_state(self):
     sm = ui_state.sm
-    if not sm.updated['deviceState']:
-      return
-
     device_state = sm['deviceState']
-
+    now = time.monotonic()
     self._recording_audio = ui_state.recording_audio
-    self._update_network_status(device_state)
-    self._update_temperature_status(device_state)
-    self._update_connection_status(device_state)
-    self._update_panda_status()
+    if sm.updated['deviceState']:
+      self._update_network_status(device_state)
+      self._update_connection_status(device_state)
+    # Refresh numeric telemetry independently, including expiry between messages.
+    self._update_temperature_status(device_state, now)
+    self._update_panda_status(now)
 
   def _update_network_status(self, device_state):
     self._net_type = NETWORK_TYPES.get(device_state.networkType.raw, tr_noop("Unknown"))
     strength = device_state.networkStrength
     self._net_strength = max(0, min(5, strength.raw + 1)) if strength.raw > 0 else 0
 
-  def _update_temperature_status(self, device_state):
-    thermal_status = device_state.thermalStatus
-
-    if thermal_status == ThermalStatus.ok:
-      self._temp_status.update(tr_noop("TEMP"), tr_noop("GOOD"), Colors.GOOD)
-    else:
-      self._temp_status.update(tr_noop("TEMP"), tr_noop("HIGH"), Colors.DANGER)
+  def _update_temperature_status(self, device_state, now):
+    sm = ui_state.sm
+    temperature = device_state.maxTempC
+    fresh = sm.valid['deviceState'] and 0 <= now - sm.recv_time['deviceState'] < 3.
+    available = fresh and math.isfinite(temperature)
+    color = Colors.GOOD if device_state.thermalStatus == ThermalStatus.ok else Colors.DANGER
+    self._temp_status.update(tr_noop("TEMP"), f"{temperature:.0f}°C" if available else "--°C",
+                             color if available else Colors.WARNING)
 
   def _update_connection_status(self, device_state):
     last_ping = device_state.lastAthenaPingTime
@@ -135,11 +136,15 @@ class Sidebar(Widget):
     else:
       self._connect_status.update(tr_noop("CONNECT"), tr_noop("ERROR"), Colors.DANGER)
 
-  def _update_panda_status(self):
+  def _update_panda_status(self, now):
     if ui_state.panda_type == log.PandaState.PandaType.unknown:
       self._panda_status.update(tr_noop("NO"), tr_noop("PANDA"), Colors.DANGER)
     else:
-      self._panda_status.update(tr_noop("VEHICLE"), tr_noop("ONLINE"), Colors.GOOD)
+      sm = ui_state.sm
+      voltage = sm['peripheralState'].voltage / 1000.
+      available = sm.valid['peripheralState'] and 0 <= now - sm.recv_time['peripheralState'] < 3. and voltage > 0.
+      self._panda_status.update(tr_noop("VEHICLE"), f"{voltage:.1f} V" if available else "-- V",
+                                Colors.GOOD if available else Colors.WARNING)
 
   def _handle_mouse_release(self, mouse_pos: MousePos):
     if rl.check_collision_point_rec(mouse_pos, SETTINGS_BTN):
