@@ -48,7 +48,8 @@ BIAS_RELEASE_PREVIEW = 0.35                 # s
 BIAS_RELEASE_GAIN = 0.003                   # 1/(m^2 s)
 BIAS_RELEASE_RATE = 0.00008                 # 1/(m s)
 CURVE_THRESHOLD = 0.00060                   # 1/m, guard lane-target reversals in curves
-CURVE_REVERSAL_TIME = 0.15                  # s
+CURVE_REVERSAL_SPEEDS = (0.0, 100.0 / 3.6)  # m/s; low speed through highway speed
+CURVE_REVERSAL_TIMES = (0.30, 0.10)         # s; POC, rounded to model frames
 TURN_THRESHOLD = 0.00015                    # 1/m, detect meaningful E2E direction changes
 TURN_RELEASE_TIME = 0.35                    # s
 MAX_CORRECTION = 0.00045                    # 1/m
@@ -66,6 +67,10 @@ def is_enabled(value: bytes | bool | None) -> bool:
 
 def sign(value: float) -> int:
   return 1 if value > 0.0 else -1 if value < 0.0 else 0
+
+
+def curve_reversal_frames(v_ego: float) -> int:
+  return round(float(np.interp(v_ego, CURVE_REVERSAL_SPEEDS, CURVE_REVERSAL_TIMES)) / DT)
 
 
 def inner_probs(model_output: dict[str, np.ndarray]) -> tuple[float, float]:
@@ -350,15 +355,16 @@ class LanePolicy:
         self.turn_release = TURN_RELEASE_TIME
       self.last_turn_sign = direction
 
-  def _guard_correction(self, correction: float, e2e: float) -> tuple[float, bool]:
+  def _guard_correction(self, correction: float, e2e: float, v_ego: float) -> tuple[float, bool]:
     """Release stale alignment during lane-target or E2E turn reversals."""
     # A wider reversal deadband ignores small sign noise around centre. The
-    # three-frame pause cannot be extended by reversals during the pause.
+    # speed-dependent pause is captured at entry. Neither speed changes nor
+    # reversals during the pause can extend it.
     target_sign = sign(correction) if abs(correction) >= 2.0 * CORRECTION_DEADBAND else 0
     if abs(e2e) >= CURVE_THRESHOLD:
       if target_sign:
         if self.curve_release_frames == 0 and self.last_curve_sign and target_sign != self.last_curve_sign:
-          self.curve_release_frames = round(CURVE_REVERSAL_TIME / DT)
+          self.curve_release_frames = curve_reversal_frames(v_ego)
         self.last_curve_sign = target_sign
     else:
       self.last_curve_sign = 0
@@ -430,7 +436,7 @@ class LanePolicy:
       rate, ready = self.update_motion(offset, geometric_rate, motion_allowed, frame_time)
       if strong and correction * offset > 0.0:
         correction *= approach_scale(offset, rate)
-      correction, guarded = self._guard_correction(soften_correction(correction), e2e_curvature)
+      correction, guarded = self._guard_correction(soften_correction(correction), e2e_curvature, v_ego)
       if guarded:
         rate, ready = geometric_rate, False
       correction += self.update_bias(offset, rate, correction, feedback_allowed and ready)

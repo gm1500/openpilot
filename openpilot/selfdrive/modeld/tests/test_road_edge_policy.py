@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.selfdrive.modeld.lane_policy import DT, LanePolicy, anchor_correction, soften_correction
+from openpilot.selfdrive.modeld.lane_policy import DT, LanePolicy, anchor_correction, curve_reversal_frames, soften_correction
 from openpilot.selfdrive.modeld.road_edge_policy import RoadEdgePolicy
 from openpilot.selfdrive.ui.onroad.lane_policy_style import active_edge, boundary_colors, EDGE_YELLOW, PAINT_BLUE, PAINT_GREEN
 
@@ -231,27 +231,56 @@ def test_return_to_paint_requires_consecutive_strong_frames():
 def test_curve_pause_exactly_three_frames_not_restarted_by_chatter():
   p = LanePolicy()
   p.motion_bias = 0.04
-  p._guard_correction(0.0001, 0.001)
+  p._guard_correction(0.0001, 0.001, 75.0 / 3.6)
   for value in (-0.0001, 0.0001, -0.0001):
-    assert p._guard_correction(value, 0.001) == (0.0, True)
+    assert p._guard_correction(value, 0.001, 75.0 / 3.6) == (0.0, True)
   assert p.curve_release_frames == 0
-  assert p._guard_correction(-0.0001, 0.001) == (-0.0001, False)
+  assert p._guard_correction(-0.0001, 0.001, 75.0 / 3.6) == (-0.0001, False)
   assert p.motion_bias == 0.04
 
 
 def test_small_sign_noise_does_not_retrigger_curve_pause():
   p = LanePolicy()
-  p._guard_correction(0.0001, 0.001)
+  p._guard_correction(0.0001, 0.001, 75.0 / 3.6)
   for correction in [-0.000015, 0.000015] * 20:
-    assert not p._guard_correction(correction, 0.001)[1]
+    assert not p._guard_correction(correction, 0.001, 75.0 / 3.6)[1]
 
 
 def test_curve_pause_keeps_latest_direction_without_an_extra_pause():
   p = LanePolicy()
-  p._guard_correction(0.0001, 0.001)
+  p._guard_correction(0.0001, 0.001, 75.0 / 3.6)
   for value in (-0.0001, 0.0001, 0.0001):
-    assert p._guard_correction(value, 0.001) == (0.0, True)
-  assert p._guard_correction(0.0001, 0.001) == (0.0001, False)
+    assert p._guard_correction(value, 0.001, 75.0 / 3.6) == (0.0, True)
+  assert p._guard_correction(0.0001, 0.001, 75.0 / 3.6) == (0.0001, False)
+
+
+@pytest.mark.parametrize('speed_kph,frames', [(0., 6), (25., 5), (50., 4), (75., 3), (100., 2), (130., 2)])
+def test_speed_dependent_curve_pause_has_exact_duration(speed_kph, frames):
+  p = LanePolicy()
+  speed = speed_kph / 3.6
+  p._guard_correction(0.0001, 0.001, speed)
+  for _ in range(frames):
+    assert p._guard_correction(-0.0001, 0.001, speed) == (0.0, True)
+  assert p.curve_release_frames == 0
+  assert p._guard_correction(-0.0001, 0.001, speed) == (-0.0001, False)
+
+
+@pytest.mark.parametrize('entry_kph,frames', [(0., 6), (100., 2)])
+def test_speed_changes_and_sign_chatter_cannot_resize_an_existing_pause(entry_kph, frames):
+  p = LanePolicy()
+  p._guard_correction(0.0001, 0.001, entry_kph / 3.6)
+  assert p._guard_correction(-0.0001, 0.001, entry_kph / 3.6) == (0.0, True)
+  for n in range(frames - 1):
+    correction = 0.0001 if n % 2 == 0 else -0.0001
+    changed_speed = 130.0 / 3.6 if n % 2 == 0 else 0.0
+    assert p._guard_correction(correction, 0.001, changed_speed) == (0.0, True)
+  assert p._guard_correction(correction, 0.001, 50.0 / 3.6) == (correction, False)
+
+
+def test_speed_dependent_pause_is_bounded_and_never_increases_with_speed():
+  frames = [curve_reversal_frames(kph / 3.6) for kph in range(-5, 151)]
+  assert min(frames) == 2 and max(frames) == 6
+  assert all(a >= b for a, b in zip(frames, frames[1:], strict=False))
 
 
 def test_two_real_lines_keep_centering_and_existing_temporary_one_line_hold():
@@ -274,7 +303,7 @@ def test_real_turn_reversal_releases_opposing_correction():
   p = LanePolicy()
   p._track_turn(0.001)
   p._track_turn(-0.001)
-  assert p._guard_correction(0.0001, -0.001) == (0.0, True)
+  assert p._guard_correction(0.0001, -0.001, 75.0 / 3.6) == (0.0, True)
 
 
 def test_published_filtered_geometry_and_side_sources():
