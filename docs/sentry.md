@@ -46,15 +46,19 @@ green Off skips this parking without disabling the master switch. Switching the 
 off and back on preserves that parking choice; select Low or High to arm again.
 Skip Sentry on Wi-Fi is enabled by default and appears immediately below that row.
 The controller chooses the parking default once fresh device and ignition state confirm
-the vehicle is parked. With Wi-Fi connected, the green Off tile becomes the default and
+the vehicle is parked. It continues checking an untouched default until Sentry first finishes
+arming, so Wi-Fi that connects during camera warmup or the arming countdown can still
+select Off. With Wi-Fi connected, the green Off tile becomes the default and
 capture is skipped even if the prompt never appears or the screen is asleep. Opening or
 dismissing the prompt does not make that decision. The prompt's choices remain available for the
 configured arming-delay duration, or until the screen timeout, before the prompt closes; no running cameras are
 needed for that countdown. Selecting either risk mode clears the skip and starts normal
 arming, with the prompt following that controller countdown. Selecting Off manually
 starts a fresh choice window of the same duration while keeping capture off; repeated
-Off taps restart that window too. X keeps the current selection. Later network changes do not override a choice or rearm that
-parking session. Settings and the prompt share the same selection, and an explicit
+Off taps restart that window too. X keeps the current selection and does not block a delayed
+Wi-Fi skip. An explicit mode choice always wins. Once Sentry has armed, later Wi-Fi connections
+cannot disable it, including after a cooling or camera recovery pause. Losing Wi-Fi never rearms
+that parking session. Settings and the prompt share the same selection, and an explicit
 choice in either overrides the Wi-Fi default. Each new drive resets the temporary
 choice; a choice made during that drive can also apply to the upcoming parking session.
 With the option disabled or no Wi-Fi connection, the automatic default is Low Risk.

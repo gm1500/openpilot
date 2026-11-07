@@ -99,6 +99,7 @@ def main():
   ready_since, arming_since = None, None
   last_arm_reset = None
   arm_complete = False
+  parking_armed = False
   location = None
   cameras = {}
   sensors = None
@@ -119,7 +120,9 @@ def main():
       driving = (not params.get_bool('IsOffroad') or
                  recent(sm, 'deviceState', now) and sm['deviceState'].started or
                  recent(sm, 'pandaStates', now) and any(p.ignitionLine or p.ignitionCan for p in sm['pandaStates']))
-      apply_parking_default(params, sm, now)
+      if driving:
+        parking_armed = False
+      apply_parking_default(params, sm, now, allow_wifi_override=not parking_armed)
       arm_reset = params.get('SentryArmResetAt')
       if arm_reset is not None and arm_reset != last_arm_reset:
         # Every explicit tap starts a fresh delay, including the current mode.
@@ -273,6 +276,7 @@ def main():
               if warmup_remaining > 0:
                 phase += f' (Camera warmup {math.ceil(warmup_remaining)} s)'
               arm_complete = remaining == 0.
+              parking_armed |= arm_complete
           # Arming belongs to this capture session, not an event or the eye.
           # Brief frame gaps do not disarm it; CameraMotion independently learns
           # exposure again after an actual camera reconnect/frame-counter reset.

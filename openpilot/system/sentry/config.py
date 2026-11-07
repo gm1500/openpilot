@@ -86,10 +86,12 @@ def select_parking_mode(params, mode):
   return selected_at
 
 
-def apply_parking_default(params, sm, now):
+def apply_parking_default(params, sm, now, *, allow_wifi_override=False):
   # Called by sentryd once fresh parked/network state is available, including
-  # while the UI is asleep or the master switch is off. Latch until a new drive.
-  if params.get('SentryParkingModeSource'):
+  # while the UI is asleep or the master switch is off. An untouched default
+  # may become Wi-Fi Off before first arming; explicit choices always win.
+  source = params.get('SentryParkingModeSource')
+  if source and not (source == 'default' and allow_wifi_override):
     return
   if not params.get_bool('IsOffroad') or any(not sm.valid[s] or not 0 <= now-sm.recv_time[s] < 2.
                                            for s in ('deviceState', 'pandaStates')):
@@ -97,7 +99,8 @@ def apply_parking_default(params, sm, now):
   if sm['deviceState'].started or not sm['pandaStates'] or any(p.ignitionLine or p.ignitionCan for p in sm['pandaStates']):
     return
   with parking_mode_lock():
-    if params.get('SentryParkingModeSource'):
+    source = params.get('SentryParkingModeSource')
+    if source and not (source == 'default' and allow_wifi_override):
       return
     if params.get_bool('SentryOffThisDrive'):
       source = 'manual'  # Retain a choice made before this controller update.
@@ -106,7 +109,8 @@ def apply_parking_default(params, sm, now):
       source = 'wifi' if setting(params, 'SentrySkipOnWifi') and wifi else 'default'
       if source == 'wifi':
         params.put_bool('SentryOffThisDrive', True, block=True)
-    params.put('SentryParkingModeSource', source, block=True)
+    if source != params.get('SentryParkingModeSource'):
+      params.put('SentryParkingModeSource', source, block=True)
 
 
 def apply_livestream_mode(params):

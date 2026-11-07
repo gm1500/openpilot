@@ -27,7 +27,8 @@ def quiet_sensors(monkeypatch):
                                                audio_level=lambda now: 0., active=lambda *args: False))
 
 
-def test_wifi_default_and_parking_choices_work_without_any_ui(monkeypatch, tmp_path):
+@pytest.mark.parametrize('wifi_at', [100., 102.])
+def test_wifi_default_and_parking_choices_work_without_any_ui(monkeypatch, tmp_path, wifi_at):
   from openpilot.system.sentry.config import select_parking_mode
   params = Params(DEFAULTS | {'SentryEnabled': False, 'IsOffroad': True})
   clock, sent = [100.], {}
@@ -42,6 +43,7 @@ def test_wifi_default_and_parking_choices_work_without_any_ui(monkeypatch, tmp_p
       self.valid = {s: not s.startswith('gps') for s in services}
     def update(self, timeout):
       now = clock[0]
+      self['deviceState'].networkType = log.DeviceState.NetworkType.wifi if now >= wifi_at else log.DeviceState.NetworkType.none
       self.recv_time = dict.fromkeys(self, now)
       self.logMonoTime = dict.fromkeys(self, int(now*1e9))
       if now == 100.:
@@ -94,7 +96,7 @@ def test_wifi_default_and_parking_choices_work_without_any_ui(monkeypatch, tmp_p
   with pytest.raises(Finished):
     sentryd.main()
   assert 'SentryParkingModeSource' not in sent[100.][1]
-  assert sent[101.][1]['SentryParkingModeSource'] == 'wifi'  # Decided even while master-disabled.
+  assert sent[101.][1]['SentryParkingModeSource'] == ('wifi' if wifi_at == 100. else 'default')
   assert sent[102.][0]['phase'] == 'Off on Wi-Fi' and not sent[102.][0]['capture']
   assert not sent[102.][1].get('SentryModePrompted')
   assert sent[106.][0]['capture'] and sent[106.][1]['SentryRiskMode'] == HIGH_RISK
@@ -107,6 +109,75 @@ def test_wifi_default_and_parking_choices_work_without_any_ui(monkeypatch, tmp_p
   assert sent[147.][0]['phase'] == 'Watching'
   assert sent[148.][0]['phase'] == 'Arming 30 s'  # Can rearm even after the original delay finished.
   assert sent[149.][0]['phase'] == 'Arming 29 s'
+
+
+@pytest.mark.parametrize('wifi_at,manual,cooling,off', [
+  (110., False, False, True), (132., False, False, True),
+  (133., False, False, False), (140., False, True, False), (110., True, False, False),
+])
+def test_wifi_window_closes_at_first_arming_and_never_reopens_on_recovery(monkeypatch, tmp_path, wifi_at, manual, cooling, off):
+  from openpilot.system.sentry.config import select_parking_mode
+  params = Params(DEFAULTS | {'IsOffroad': True, 'SentryRiskMode': HIGH_RISK})
+  clock, sent = [100.], {}
+
+  class SubMaster(dict):
+    def __init__(self, services):
+      super().__init__(deviceState=SimpleNamespace(started=False, networkType=log.DeviceState.NetworkType.none, maxTempC=50.),
+                       pandaStates=[SimpleNamespace(pandaType=log.PandaState.PandaType.tres, ignitionLine=False, ignitionCan=False)],
+                       peripheralState=SimpleNamespace(voltage=12000),
+                       sentryRecorderState=SimpleNamespace(recording=False, error='', bufferBytes=1000),
+                       gpsLocation=SimpleNamespace(hasFix=False), gpsLocationExternal=SimpleNamespace(hasFix=False))
+      self.valid = {s: not s.startswith('gps') for s in services}
+    def update(self, timeout):
+      now = clock[0]
+      self.recv_time = dict.fromkeys(self, now)
+      self.logMonoTime = dict.fromkeys(self, int(now*1e9))
+      self['deviceState'].networkType = log.DeviceState.NetworkType.wifi if now >= wifi_at else log.DeviceState.NetworkType.none
+      self['deviceState'].maxTempC = 75. if cooling and 135. <= now < 138. else 50.
+      if manual and now == 105.:
+        select_parking_mode(params, HIGH_RISK)
+
+  class Camera:
+    warm_until = last_received = 0.
+    def __init__(self, stream):
+      pass
+    def sample(self, now, *args, **kwargs):
+      self.last_received = now
+      return Motion()
+
+  class Finished(Exception):
+    pass
+
+  class Ratekeeper:
+    def __init__(self, *args, **kwargs):
+      pass
+    def keep_time(self):
+      clock[0] += 1.
+      if clock[0] > 175.:
+        raise Finished
+
+  def publish(service, msg):
+    sent[clock[0]] = msg.to_dict()['sentryState']
+
+  monkeypatch.setattr(sentryd.time, 'monotonic', lambda: clock[0])
+  monkeypatch.setattr(sentryd, 'Params', lambda: params)
+  monkeypatch.setattr(sentryd, 'SentryClock', lambda params: SimpleNamespace(update=lambda *args: None, snapshot=lambda wall: ('', 0)))
+  monkeypatch.setattr(sentryd, 'HARDWARE', SimpleNamespace(get_device_type=lambda: 'tizi'))
+  monkeypatch.setattr(sentryd.messaging, 'SubMaster', SubMaster)
+  monkeypatch.setattr(sentryd.messaging, 'PubMaster', lambda services: SimpleNamespace(send=publish))
+  monkeypatch.setattr(sentryd, 'Ratekeeper', Ratekeeper)
+  monkeypatch.setattr(sentryd, 'CameraMotion', Camera)
+  monkeypatch.setattr(sentryd, 'write_runtime', lambda state: None)
+  monkeypatch.setattr(sentryd, 'RUNTIME_PATH', tmp_path/'runtime.json')
+  with pytest.raises(Finished):
+    sentryd.main()
+  assert (sent[wifi_at]['phase'] == 'Off on Wi-Fi') == off
+  assert sent[175.]['capture'] != off
+  assert sent[175.]['phase'] == ('Off on Wi-Fi' if off else 'Watching')
+  if cooling:
+    assert sent[132.]['phase'] == 'Watching'
+    assert sent[135.]['phase'] == 'Cooling down'
+    assert sent[140.]['phase'].startswith('Arming')
 
 
 @pytest.mark.parametrize('first,second', [(1, 2), (2, 1)])
