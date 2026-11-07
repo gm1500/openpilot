@@ -90,12 +90,12 @@ class Junction:
   distance: float
 
 
-def gps_fix(sm, started_frame: int, now: float) -> GpsFix | None:
+def gps_fix(sm, now: float) -> GpsFix | None:
   fixes = []
   for source in ("gpsLocationExternal", "gpsLocation"):
     gps = sm[source]
     timestamp = min(sm.recv_time[source], sm.logMonoTime[source] * 1e-9)
-    if not sm.valid[source] or sm.recv_frame[source] < started_frame or not gps.hasFix or not 0 <= now - timestamp <= GPS_MAX_AGE:
+    if not sm.valid[source] or sm.recv_frame[source] < 1 or not gps.hasFix or not 0 <= now - timestamp <= GPS_MAX_AGE:
       continue
     if not (math.isfinite(gps.latitude) and math.isfinite(gps.longitude) and -85 < gps.latitude < 85 and -180 <= gps.longitude <= 180):
       continue

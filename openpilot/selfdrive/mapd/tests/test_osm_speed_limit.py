@@ -740,26 +740,28 @@ class TestOSMSpeedLimit(unittest.TestCase):
     sm.logMonoTime = dict.fromkeys(sources, int(100e9))
     sm.recv_frame = dict.fromkeys(sources, 20)
     sm["gpsLocationExternal"].hasFix = False
-    self.assertEqual(osm.gps_fix(sm, 10, 101.).latitude, 53.)
-    self.assertIsNone(osm.gps_fix(sm, 21, 101.))
-    self.assertIsNone(osm.gps_fix(sm, 10, 104.))
+    self.assertEqual(osm.gps_fix(sm, 101.).latitude, 53.)
+    sm.recv_frame["gpsLocation"] = 0
+    self.assertIsNone(osm.gps_fix(sm, 101.))
+    sm.recv_frame["gpsLocation"] = 20
+    self.assertIsNone(osm.gps_fix(sm, 104.))
     sm.logMonoTime["gpsLocation"] = int(90e9)
-    self.assertIsNone(osm.gps_fix(sm, 10, 101.))  # stale publisher, fresh receive
+    self.assertIsNone(osm.gps_fix(sm, 101.))  # stale publisher, fresh receive
     sm.logMonoTime["gpsLocation"] = int(100e9)
     for accuracy in (0., 16., math.nan):
       sm["gpsLocation"].horizontalAccuracy = accuracy
-      self.assertIsNone(osm.gps_fix(sm, 10, 101.))
+      self.assertIsNone(osm.gps_fix(sm, 101.))
 
     # Internal Qualcomm fixes omit this field; external receivers still need it.
     internal = sm["gpsLocation"]
     internal.source, internal.horizontalAccuracy = 'qcomdiag', 0.
-    self.assertEqual(osm.gps_fix(sm, 10, 101.).accuracy, osm.QCOM_UNKNOWN_ACCURACY)
+    self.assertEqual(osm.gps_fix(sm, 101.).accuracy, osm.QCOM_UNKNOWN_ACCURACY)
     internal.hasFix = False
-    self.assertIsNone(osm.gps_fix(sm, 10, 101.))
+    self.assertIsNone(osm.gps_fix(sm, 101.))
     internal.hasFix = True
-    self.assertIsNone(osm.gps_fix(sm, 10, 104.))
+    self.assertIsNone(osm.gps_fix(sm, 104.))
     internal.horizontalAccuracy = 25.
-    self.assertIsNone(osm.gps_fix(sm, 10, 101.))
+    self.assertIsNone(osm.gps_fix(sm, 101.))
 
   def test_display_clears_stale_distant_and_offroad_results(self):
     service = self.cached_service()
