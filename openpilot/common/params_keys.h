@@ -105,6 +105,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SlcChangePolicy", {PERSISTENT, INT, "0"}},
     {"SlcResumePolicy", {PERSISTENT, INT, "0"}},
     {"OfflineMapRegion", {PERSISTENT, STRING, "nation.CA"}},
+    {"OfflineMapUpdateSchedule", {PERSISTENT, INT, "0"}},
+    {"OfflineMapUpdateWeekday", {PERSISTENT, INT, "0"}},
     {"OfflineMapRequest", {PERSISTENT, JSON}},
     {"OfflineMapStatus", {CLEAR_ON_MANAGER_START | DONT_LOG, JSON}},
     {"LastAthenaPingTime", {CLEAR_ON_MANAGER_START, INT}},

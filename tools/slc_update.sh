@@ -12,7 +12,7 @@ fi
 exec > >(tee -a /data/slc-update.log) 2>&1
 target="${1:-batmobile}"
 case "$target" in
-  batmobile|slc-offline-maps) ;;
+  batmobile) ;;
   *) echo "[ERROR] Unsupported update branch: $target" >&2; exit 1 ;;
 esac
 echo "[START] $(date -Is) - SLC update on $target"
@@ -63,7 +63,7 @@ python - <<'PY'
 from openpilot.common.params import Params
 p = Params()
 for key in ('SlcOffsetType', 'SlcOffsetValue', 'SlcChangePolicy', 'SlcResumePolicy',
-            'OfflineMapRegion', 'OfflineMapRequest', 'OfflineMapStatus'):
+            'OfflineMapRegion', 'OfflineMapRequest', 'OfflineMapStatus', 'OfflineMapUpdateSchedule', 'OfflineMapUpdateWeekday'):
   p.check_key(key)
 print('[BUILD] All SLC parameter keys verified.')
 PY

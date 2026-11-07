@@ -13,6 +13,7 @@ import requests
 
 from openpilot.cereal import messaging, log
 from openpilot.common.params import Params
+from openpilot.selfdrive.mapd.map_schedule import schedule_period
 from openpilot.selfdrive.mapd.offline_maps import (SCHEMA, MAX_TILE_BYTES, atomic_json, load_json,
                                                    map_root, region_groups, region_name, tile_name)
 
@@ -20,6 +21,7 @@ URL = 'https://map-data.pfeifer.dev/offline'
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 RESERVE_BYTES = 5 * 1024 * 1024 * 1024
+AUTO_RETRY_SECONDS = 3600
 
 
 class DownloadPaused(Exception):
@@ -30,12 +32,16 @@ class DownloadCancelled(Exception):
   pass
 
 
-def check_download_allowed(params, sm, now):
+def check_download_allowed(params, sm, now, *, wifi_only=False):
   if not params.get_bool('IsOffroad'):
     raise DownloadPaused('Waiting until parked')
   if (not sm.valid['deviceState'] or not 0 <= now-sm.recv_time['deviceState'] <= 5 or
       sm['deviceState'].networkType == log.DeviceState.NetworkType.none):
     raise DownloadPaused('Waiting for network connection')
+  if sm['deviceState'].started:
+    raise DownloadPaused('Waiting until parked')
+  if wifi_only and sm['deviceState'].networkType != log.DeviceState.NetworkType.wifi:
+    raise DownloadPaused('Waiting for Wi-Fi')
   # hardwared resolves the active connection's policy, including GsmMetered
   # for cellular and the selected Wi-Fi network's metered setting.
   if sm['deviceState'].networkMetered:
@@ -173,16 +179,105 @@ def fetch_archive(store, group, check, progress, session=requests):
   return path
 
 
+class MapDownloads:
+  """One resumable job shared by manual requests and scheduled refreshes."""
+  def __init__(self, store, params):
+    self.store, self.params = store, params
+    self.job_path = store.root/'download.json'
+    self.job = load_json(self.job_path, None)
+    self.attempt_path = store.root/'scheduled.json'
+    self.attempts = load_json(self.attempt_path, {})
+
+  def save(self):
+    atomic_json(self.job_path, self.job)
+
+  def start(self, region, *, update=False, period=None, wall=None):
+    if self.job is not None:
+      raise ValueError('Cancel the active download first')
+    groups = region_groups(region)
+    installed = self.store.manifest['groups']
+    done = [g for g in groups if g in installed and
+            (not update or period is not None and installed[g].get('downloaded_at', 0) >= period)]
+    self.job = {'region': region, 'groups': groups, 'done': done, 'automatic': period is not None}
+    # Keep the last successful update while refreshing. Existing maps stay
+    # usable, including when an update is paused, cancelled or interrupted.
+    self.store.manifest['regions'].setdefault(region, {'name': region_name(region), 'groups': groups, 'complete': False})
+    self.store.save()
+    self.save()
+    if period is not None:
+      # Cancelling an automatic job suppresses it for this calendar period,
+      # even across restarts. A manual Update can always start another attempt.
+      self.attempts[region] = wall
+      atomic_json(self.attempt_path, self.attempts)
+
+  def schedule(self, wall):
+    period = schedule_period(self.params, wall)
+    if self.job is not None or period is None:
+      return
+    for region, info in self.store.manifest['regions'].items():
+      if info.get('complete') and max(info.get('updated_at', 0), self.attempts.get(region, 0)) < period:
+        self.start(region, update=True, period=period, wall=wall)
+        return
+
+  def clear(self):
+    self.job_path.unlink(missing_ok=True)
+    self.job = None
+
+  def cancel(self, wall):
+    if self.job and self.job.get('automatic'):
+      # Cancel the refresh cycle, including other installed areas and a job
+      # that has crossed into a new calendar period since it was started.
+      self.attempts.update({region: wall for region, info in self.store.manifest['regions'].items() if info.get('complete')})
+      atomic_json(self.attempt_path, self.attempts)
+    self.clear()
+
+  def complete_group(self, group):
+    self.job['done'].append(group)
+    self.job.pop('retry_at', None)
+    self.save()
+
+  def finish(self, wall):
+    self.store.manifest['regions'][self.job['region']].update(complete=True, updated_at=wall)
+    self.store.save()
+    self.clear()
+
+  def failed(self, wall):
+    if self.job and self.job.get('automatic'):
+      # Preserve completed groups and back off instead of retrying every tick.
+      self.job['retry_at'] = wall + AUTO_RETRY_SECONDS
+      self.save()
+    else:
+      self.clear()
+
+  def request(self, request):
+    action, region = request.get('action'), request.get('region', '')
+    if action == 'cancel':
+      raise DownloadCancelled
+    if self.job is not None:
+      raise ValueError('Cancel the active download first')
+    if action == 'delete':
+      if not self.params.get_bool('IsOffroad'):
+        raise ValueError('Park before deleting maps')
+      region_groups(region)
+      self.store.remove(region)
+      self.attempts.pop(region, None)
+      atomic_json(self.attempt_path, self.attempts)
+    elif action in ('download', 'update'):
+      self.start(region, update=action == 'update')
+    else:
+      raise ValueError('Unknown map action')
+
+
 def main():
   params = Params()
   sm = messaging.SubMaster(['deviceState'])
   store = MapStore()
-  job_path = store.root/'download.json'
-  job = load_json(job_path, None)
+  downloads = MapDownloads(store, params)
   last_status = last_check = 0.
 
   def status(phase, **extra):
     nonlocal last_status
+    job = downloads.job
     last_status = time.monotonic()
     params.put('OfflineMapStatus', {'phase': phase, 'region': job['region'] if job else '',
                'active': job is not None,
@@ -200,8 +295,14 @@ def main():
     if request and request.get('action') == 'cancel':
       params.remove('OfflineMapRequest')
       raise DownloadCancelled
+    automatic = downloads.job is not None and downloads.job.get('automatic', False)
+    if automatic and params.get('OfflineMapUpdateSchedule', return_default=True) not in (1, 2):
+      raise DownloadCancelled
     sm.update(0)
-    check_download_allowed(params, sm, time.monotonic())
+    check_download_allowed(params, sm, time.monotonic(), wifi_only=automatic)
+    retry_in = downloads.job.get('retry_at', 0) - time.time() if automatic else 0  # noqa: TID251
+    if retry_in > 0:
+      raise DownloadPaused(f'Update failed; retry in {math.ceil(retry_in/60)} min')
 
   def progress(received, total):
     if time.monotonic() - last_status >= 1:
@@ -212,40 +313,32 @@ def main():
     try:
       if request:
         params.remove('OfflineMapRequest')
-        action, region = request.get('action'), request.get('region', '')
-        if action == 'cancel':
-          raise DownloadCancelled
-        if action == 'delete':
-          if not params.get_bool('IsOffroad'):
-            raise ValueError('Park before deleting maps')
-          if job is not None:
-            raise ValueError('Cancel the active download first')
-          region_groups(region)  # validate before deleting owned data
-          store.remove(region)
+        try:
+          downloads.request(request)
+        except ValueError as error:
+          # A stale UI request must not discard an in-progress download.
+          status('Request rejected', error=str(error))
+          continue
+        if request.get('action') == 'delete':
           status('Maps removed')
-        elif action in ('download', 'update'):
-          if job is not None:
-            raise ValueError('Cancel the active download first')
-          groups = region_groups(region)
-          done = [] if action == 'update' else [g for g in groups if g in store.manifest['groups']]
-          job = {'region': region, 'groups': groups, 'done': done}
-          # Record partial ownership so another region's deletion never removes
-          # already downloaded groups from this selection.
-          store.manifest['regions'][region] = {'name': region_name(region), 'groups': groups, 'complete': False}
-          store.save()
-          atomic_json(job_path, job)
-      if job is None:
+      if downloads.job is None:
+        sm.update(0)
+        try:
+          check_download_allowed(params, sm, time.monotonic(), wifi_only=True)
+        except DownloadPaused:
+          pass
+        else:
+          downloads.schedule(time.time())  # noqa: TID251
+      if downloads.job is None:
         if time.monotonic() - last_status > 10:
           status('Ready')
         time.sleep(1)
         continue
       check(True)
+      job = downloads.job
       pending = [g for g in job['groups'] if g not in job['done']]
       if not pending:
-        store.manifest['regions'][job['region']].update(complete=True, updated_at=time.time())  # noqa: TID251
-        store.save()
-        job = None
-        job_path.unlink(missing_ok=True)
+        downloads.finish(time.time())  # noqa: TID251
         status('Download complete')
         continue
       group = pending[0]
@@ -254,21 +347,16 @@ def main():
       status('Checking maps')
       store.install(archive, group, check)
       archive.unlink(missing_ok=True)
-      job['done'].append(group)
-      atomic_json(job_path, job)
+      downloads.complete_group(group)
     except DownloadCancelled:
-      job = None
-      job_path.unlink(missing_ok=True)
+      downloads.cancel(time.time())  # noqa: TID251
       status('Cancelled; downloaded maps kept')
     except DownloadPaused as error:
       if time.monotonic()-last_status > 2:
         status(str(error))
       time.sleep(1)
     except Exception as error:
-      # Do not repeatedly hammer a failed provider or retry corrupt data. Keep
-      # installed groups and let a deliberate Download action resume them.
-      job = None
-      job_path.unlink(missing_ok=True)
+      downloads.failed(time.time())  # noqa: TID251
       status('Download stopped', error=str(error)[:180] if isinstance(error, (ValueError, OSError)) else type(error).__name__)
       time.sleep(1)
 
