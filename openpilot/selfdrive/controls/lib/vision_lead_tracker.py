@@ -121,7 +121,8 @@ class _DistanceTrack:
   def reset_inconsistent_history(self, baseline: float, leads: list[dict], observation: VisionLeadObservation, ego: float) -> None:
     # A gradual cut-in can pass the per-frame association gate while its range
     # change implies a different car's velocity. Require sustained disagreement
-    # in both the private state and range slope; never relax close/urgent leads.
+    # in both the private state and range slope. Disagreement alone must not
+    # discard a closing approach when the model overestimates the lead speed.
     eligible = (observation.probability >= 0.9 and ego > 5.0 and
                 observation.distance > max(30.0, 1.5 * ego) and baseline > ego - 3.0 and
                 min(lead['aLeadK'] for lead in leads) >= -0.15)
@@ -129,7 +130,12 @@ class _DistanceTrack:
     if eligible and len(self.range_history) >= 7 and self.range_history[-1][0] - self.range_history[0][0] >= 0.6:
       rate, rate_std, mean_ego = self.range_motion()
       upper_speed = mean_ego + rate + 2.0 * rate_std
-      inconsistent = baseline - max(float(self.x[1]), upper_speed) > self.HANDOFF_SPEED_MARGIN
+      # The range trend (with its two-sigma margin) and private speed must agree.
+      # Reuse the pre-closing horizon: falling back to the faster model here
+      # would erase the same evidence that qualifies the early braking cue.
+      closing = ego - max(upper_speed, float(self.x[1]))
+      closing_approach = closing > 0.0 and observation.distance < self.PRE_CLOSING_TTC * closing
+      inconsistent = not closing_approach and baseline - max(float(self.x[1]), upper_speed) > self.HANDOFF_SPEED_MARGIN
     self.handoff_time = self.handoff_time + self.dt if inconsistent else 0.0
     if self.handoff_time >= self.HANDOFF_CONFIRM_TIME:
       # Re-anchor at the current distance with fresh covariance. No old speed

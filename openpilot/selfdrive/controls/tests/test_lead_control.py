@@ -273,7 +273,7 @@ class TestE2EAssistColor(unittest.TestCase):
 
 
 class TestVisionLeadHandoff(unittest.TestCase):
-  def run_track(self, distance, velocity=29., accel=0., probability=.99, ego=30.):
+  def run_track(self, distance, velocity=29., accel=0., probability=.99, ego=30., lateral=0.):
     tracker = VisionLeadTracker()
     results = []
     for i in range(100):
@@ -281,14 +281,17 @@ class TestVisionLeadHandoff(unittest.TestCase):
       gap = distance(t)
       speed = velocity(t) if callable(velocity) else velocity
       a = accel(t) if callable(accel) else accel
-      observation = VisionLeadObservation(gap, 0., 5., probability)
+      y = lateral(t) if callable(lateral) else lateral
+      observation = VisionLeadObservation(gap, y, 5., probability)
       raw = {'present': True, 'radar': False, 'dRel': gap, 'vLead': speed, 'vLeadK': speed, 'vRel': speed-ego, 'aLeadK': a}
       output = tracker.update([observation, observation], [raw, dict(raw)], t, ego)
       results.append((t, gap, output, tracker.slots[0].age))
     return results
 
-  def test_cut_in_reanchors_without_hiding_current_range(self):
-    rows = self.run_track(lambda t: 85. - 15. * min(t, 2.))
+  def test_far_ambiguous_handoff_reanchors_without_hiding_current_range(self):
+    # With ample closing time, retain the old protection against interpreting
+    # a gradual target handoff as the replacement car's velocity.
+    rows = self.run_track(lambda t: 145. - 8. * min(t, 2.))
     resets = [r for r in rows[1:] if r[3] == 0.]
     self.assertTrue(resets)
     for _, gap, outputs, _ in resets:
@@ -302,6 +305,47 @@ class TestVisionLeadHandoff(unittest.TestCase):
     rows = self.run_track(lambda t: 85. - 15. * t, velocity=15.)
     self.assertFalse(any(r[3] == 0. for r in rows[1:]))
 
+  def test_high_closing_rate_survives_optimistic_model_speed(self):
+    # 120 km/h approaching 80 km/h, while the model still reports 112 km/h.
+    rows = self.run_track(lambda t: 95. - (40. / 3.6) * t, velocity=112. / 3.6, ego=120. / 3.6)
+    self.assertFalse(any(r[3] == 0. for r in rows[1:]))
+    self.assertLess(rows[60][2][0]['vLead'] * 3.6, 90.)
+
+  def test_ambiguous_short_closing_sequence_keeps_braking_evidence(self):
+    # The original reset regression also describes a genuinely slower lead.
+    # Speed disagreement cannot establish identity while the gap runs out.
+    rows = self.run_track(lambda t: 85. - 15. * min(t, 2.))
+    self.assertFalse(any(r[3] == 0. for r in rows[1:]))
+    self.assertLess(min(r[2][0]['vLead'] for r in rows), 25.)
+
+  def test_abrupt_cut_in_starts_fresh_history(self):
+    rows = self.run_track(lambda t: 95. if t < 2. else 60.)
+    self.assertEqual(rows[40][3], 0.)
+    for lead in rows[40][2]:
+      self.assertEqual(lead['dRel'], 60.)
+      self.assertEqual(lead['vLead'], 29.)
+
+  def test_lateral_target_change_starts_fresh_history(self):
+    rows = self.run_track(lambda t: 95. - 10. * t, lateral=lambda t: 0. if t < 2. else 1.)
+    self.assertEqual(rows[40][3], 0.)
+
+  def test_cut_out_does_not_carry_slow_speed_to_farther_lead(self):
+    rows = self.run_track(lambda t: 70. - 10. * t if t < 2. else 100., velocity=lambda t: 20. if t < 2. else 30.)
+    self.assertEqual(rows[40][3], 0.)
+    self.assertEqual(rows[40][2][0]['vLead'], 30.)
+    self.assertEqual(rows[40][2][0]['dRel'], 100.)
+
+  def test_alternating_range_noise_does_not_create_slow_lead(self):
+    rows = self.run_track(lambda t: 90. + 2.2 * (-1) ** round(t / .05))
+    self.assertGreaterEqual(min(r[2][0]['vLead'] for r in rows), 29.)
+
+  def test_steady_following_with_range_noise_stays_stable(self):
+    rows = self.run_track(lambda t: 70. + .3 * math.sin(20. * t), velocity=30.)
+    speeds = [r[2][0]['vLead'] for r in rows[60:]]
+    self.assertFalse(any(r[3] == 0. for r in rows[1:]))
+    self.assertLess(max(speeds) - min(speeds), .2)
+    self.assertLess(max(abs(v - 30.) for v in speeds), .2)
+
   def test_short_gap_does_not_reset_from_model_disagreement(self):
     rows = self.run_track(lambda t: 40. - 5. * t)
     self.assertFalse(any(r[3] == 0. for r in rows[1:]))
@@ -311,7 +355,7 @@ class TestVisionLeadHandoff(unittest.TestCase):
     self.assertFalse(any(r[3] == 0. for r in rows[1:]))
 
   def test_stopped_lead_after_reset_gets_immediate_model_constraint(self):
-    rows = self.run_track(lambda t: 85. - 15. * min(t, 2.), velocity=lambda t: 29. if t < 1. else 0.)
+    rows = self.run_track(lambda t: 145. - 8. * min(t, 2.), velocity=lambda t: 29. if t < 1. else 0.)
     self.assertTrue(any(r[3] == 0. for r in rows[1:20]))
     for t, gap, outputs, _ in rows:
       if t >= 1.:
