@@ -762,6 +762,7 @@ def retry_after_seconds(error: Exception) -> float:
 class OSMSpeedLimit:
   """Match cached roads on the map thread; only downloads run in the background."""
   def __init__(self):
+    from openpilot.selfdrive.mapd.speed_preview import SpeedPreviewer
     self._lock = threading.Lock()
     self._fix: GpsFix | None = None
     self._cache: tuple[tuple[Road, ...], GpsFix | None, float] = ((), None, -math.inf)
@@ -786,6 +787,8 @@ class OSMSpeedLimit:
     self.control_reason = 'noPosition'
     self.zone_type = 'none'
     self.zone_source = ''
+    self.preview = None
+    self._previewer = SpeedPreviewer()
 
   def _offline_with_live_speeds(self, offline_roads: tuple[Road, ...], live_roads: tuple[Road, ...]) -> tuple[Road, ...]:
     if offline_roads is self._offline_speed_inputs[0] and live_roads is self._offline_speed_inputs[1]:
@@ -825,12 +828,13 @@ class OSMSpeedLimit:
     if changed:
       self._wake.set()
 
-  def update(self, fix: GpsFix | None, now: float) -> tuple[GpsFix, float | None, float | None, float] | None:
+  def update(self, fix: GpsFix | None, now: float, *, advance=False, prediction=None) -> tuple[GpsFix, float | None, float | None, float] | None:
     self.control = self.control_match = self.speed_match = None
     self.speed_source = 'none'
     self.control_reason = 'noPosition'
     self.zone_type = 'none'
     self.zone_source = ''
+    self.preview = None
     if fix is not None and (fix.speed < 0 or not 0 <= now - fix.timestamp <= GPS_MAX_AGE):
       fix = None  # reverse heading is retained by MapPosition, not walked as a forward road path
     with self._lock:
@@ -897,8 +901,10 @@ class OSMSpeedLimit:
       if in_coverage:
         restriction = zone_limit(zones, match, self.clock.utc(now), now - zones_at < ZONE_TTL)
     ahead = 0.
-    if match is not None and speed is None and advisory is None and restriction is None:
+    if not advance and match is not None and speed is None and advisory is None and restriction is None:
       speed, ahead = tracker.merge_limit(match, fix)
+    if advance and restriction is None and not unresolved and 0 <= now - gps_time <= GPS_MAX_AGE:
+      self.preview = self._previewer.update(tracker, match, fix, prediction)
     if match is not None and speed is not None and ahead == 0.:
       self.zone_type = road_zone(match.road.tags, match.forward, match.local_time)
     if restriction is not None:

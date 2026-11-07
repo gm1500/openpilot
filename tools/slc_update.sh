@@ -62,7 +62,7 @@ test -s openpilot/common/libparams_c.so
 python - <<'PY'
 from openpilot.common.params import Params
 p = Params()
-for key in ('SlcOffsetType', 'SlcOffsetValue', 'SlcChangePolicy', 'SlcResumePolicy',
+for key in ('SlcOffsetType', 'SlcOffsetValue', 'SlcChangePolicy', 'SlcResumePolicy', 'SlcAdvancedSpeedLimit',
             'OfflineMapRegion', 'OfflineMapRequest', 'OfflineMapStatus', 'OfflineMapUpdateSchedule', 'OfflineMapUpdateWeekday'):
   p.check_key(key)
 print('[BUILD] All SLC parameter keys verified.')

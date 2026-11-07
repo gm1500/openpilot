@@ -47,12 +47,13 @@ class VCruiseHelper:
     return self.v_cruise_kph != V_CRUISE_UNSET
 
   def update_v_cruise(self, CS, enabled, is_metric, *, map_enabled=False, map_speed=None, map_gps_time=0., now=0.,
-                      automatic_e2e=False, e2e_ready=False, slc_settings=None):
+                      automatic_e2e=False, e2e_ready=False, slc_settings=None, map_preview=None, map_way_id=0):
     self.v_cruise_kph_last = self.v_cruise_kph
     self.map_cruise.settings = slc_settings if slc_settings is not None else SLCSettings()
     self.map_cruise.metric = is_metric
     self.map_cruise.current_kph = self.v_cruise_kph
-    self.map_cruise.update(map_enabled, map_speed, map_gps_time, now, automatic_e2e)
+    self.map_cruise.update(map_enabled, map_speed, map_gps_time, now, automatic_e2e,
+                           preview=map_preview, way_id=map_way_id, v_ego=CS.vEgo)
     map_applied = False
 
     if CS.cruiseState.available:
