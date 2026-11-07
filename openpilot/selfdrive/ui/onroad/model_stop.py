@@ -14,6 +14,9 @@ from openpilot.selfdrive.ui.onroad.braking import braking_active, fresh_ui_messa
 DEFAULT_FRONT_OFFSET = 1.52
 MAX_MODEL_AGE = .3
 SMOOTH_TIME = .12
+APPROACH_SMOOTH_TIME = .5
+APPROACH_DISPLAY_HOLD = .25
+APPROACH_DISPLAY_FADE = .15
 PATH_HALF_WIDTH = .9  # shared with the C3x path ribbon
 
 
@@ -33,6 +36,8 @@ class StopMarker:
   standstill: bool = False
   label: str = 'MODEL STOP'
   held: bool = False  # display-only retention; never fed back into the planner
+  trajectory_only: bool = False
+  opacity: float = 1.
 
 
 class ModelStop:
@@ -47,6 +52,8 @@ class ModelStop:
     self._started_frame = None
     self._update_time = None
     self._speed = 0.
+    self._approach_distance = None
+    self._approach_seen = None
 
   def update(self, sm, started_frame, now):
     if self._started_frame != started_frame:
@@ -70,17 +77,36 @@ class ModelStop:
     dt = now - self._update_time if self._update_time is not None else 0.
     state = sm['selfdriveState']
     candidate = None
-    # Ordinary/conditional ACC uses the published target, without UI smoothing.
+    # Confirmed stops keep the published distance. Both stages project within
+    # the latest path; green additionally filters/retains its preview distance.
     if getattr(state, 'enabled', False) and not state.experimentalMode:
       self._distance = self._timestamp = None
       if not fresh('longitudinalPlan'):
         self.reset()
         return
       plan = sm['longitudinalPlan']
+      approach_allowed = (fresh('carControl') and sm['carControl'].longActive and
+                          not (getattr(car, 'gasPressed', False) or getattr(car, 'brakePressed', False)))
       if plan.stopTarget.active and math.isfinite(plan.stopTarget.distance) and plan.stopTarget.distance >= 0.:
         candidate = self.predict_target(sm['modelV2'], speed, plan.stopTarget.distance)
-      elif plan.e2eStopActive:
+      elif (approach_allowed and getattr(plan.stopTarget, 'approaching', False) and
+            math.isfinite(plan.stopTarget.approachDistance) and plan.stopTarget.approachDistance >= 0.):
+        self._approach_seen = sm.logMonoTime['longitudinalPlan'] * 1e-9
+        candidate = self.predict_approach(sm['modelV2'], speed, plan.stopTarget.approachDistance, dt)
+      elif plan.e2eStopActive and not getattr(plan.stopTarget, 'approaching', False):
         candidate = StopMarker(None, 0., None, speed < .3, 'STOP TARGET')
+      elif approach_allowed and self._approach_seen is not None:
+        age = now - self._approach_seen
+        intent = model_intent(sm['modelV2'], speed)
+        accel = getattr(getattr(sm['modelV2'], 'action', None), 'desiredAcceleration', math.nan)
+        if (0 <= age < APPROACH_DISPLAY_HOLD + APPROACH_DISPLAY_FADE and
+            intent.valid and intent.slowing and math.isfinite(accel) and accel <= .1):
+          # Display-only debounce while fresh data still describes slowing.
+          # Departure, pedal takeover and unhealthy messages never retain green.
+          candidate = self.predict_approach(sm['modelV2'], speed, None, dt)
+          if candidate is not None:
+            opacity = min(1., (APPROACH_DISPLAY_HOLD + APPROACH_DISPLAY_FADE - age) / APPROACH_DISPLAY_FADE)
+            candidate = replace(candidate, opacity=opacity)
     else:
       timestamp = sm.logMonoTime['modelV2'] * 1e-9
       if self._timestamp is not None and timestamp < self._timestamp:
@@ -96,7 +122,7 @@ class ModelStop:
       if lead_stop is not None:
         intent = model_intent(sm['modelV2'], speed)
         raw_stop = None
-        if candidate is not None and candidate.label == 'STOP TARGET' and candidate.distance is not None:
+        if candidate is not None and candidate.label in ('STOP TARGET', 'E2E APPROACH') and candidate.distance is not None:
           # The selected detector can qualify geometry before near-zero speed.
           # Compare the planner's raw observation, not a different UI detector.
           raw_stop = getattr(sm['longitudinalPlan'], 'e2eStopDistance', candidate.distance)
@@ -116,7 +142,7 @@ class ModelStop:
     braking = braking_active(sm, started_frame, now) and not getattr(car, 'gasPressed', False)
     # A pedal takeover must not replace the last planner target with a different
     # raw prediction. Keep ONLY its display while any fresh brake source holds.
-    if (previous is not None and braking and
+    if (previous is not None and not previous.trajectory_only and braking and
         (candidate is None or previous.label == 'STOP TARGET' and candidate.label != 'STOP TARGET')):
       distance = previous.distance
       if distance is not None:
@@ -124,31 +150,51 @@ class ModelStop:
         candidate = self.predict_target(sm['modelV2'], speed, distance)
       else:
         candidate = StopMarker(None, previous.yaw, None, speed < .3)
-      candidate = replace(candidate, label=previous.label, held=True)
+      candidate = replace(candidate, label=previous.label, held=True, trajectory_only=previous.trajectory_only)
     elif previous is not None and previous.held and not braking and candidate is not None and candidate.label == 'MODEL STOP':
       candidate = None  # release the held stop on this frame; do not relabel it
 
     self.marker = candidate
+    if candidate is None or not candidate.trajectory_only:
+      self._approach_distance = self._approach_seen = None
     if candidate is None:
       self._distance = self._timestamp = None
     self._update_time, self._speed = now, speed
 
-  def predict_target(self, model, speed, distance):
-    """Project the published planner distance without a second UI filter."""
+  def predict_approach(self, model, speed, distance, dt):
+    if self._approach_distance is None:
+      self._approach_distance = distance
+    else:
+      predicted = max(0., self._approach_distance - .5 * (self._speed + speed) * dt)
+      alpha = 1. - math.exp(-dt / APPROACH_SMOOTH_TIME)
+      self._approach_distance = predicted if distance is None else predicted + alpha * (distance - predicted)
+    if self._approach_distance is None:
+      return None
+    # The planner and UI may be on adjacent model frames. Clamp the preview to
+    # current road geometry instead of sending a distant cue to the stop dock.
+    marker = self.predict_target(model, speed, self._approach_distance, preview=True)
+    if marker.position is None:
+      return None
+    return replace(marker, label='E2E APPROACH', trajectory_only=True)
+
+  def predict_target(self, model, speed, distance, *, preview=False):
+    """Clip only the drawing to current geometry; preserve a confirmed distance."""
     marker = StopMarker(None, 0., distance, speed < .3, 'STOP TARGET')
     arrays = (model.position.x, model.position.y, model.position.z, model.orientation.y, model.orientation.z)
     if any(len(a) != len(ModelConstants.T_IDXS) or not all(math.isfinite(x) for x in a) for a in arrays):
       return marker
     path = np.asarray(arrays[:3], dtype=float).T
     arc = np.r_[0., np.cumsum(np.linalg.norm(np.diff(path[:, :2], axis=0), axis=1))]
-    if distance > arc[-1] + 1e-6:
-      return marker  # no invented projection beyond the available path
+    # Planner and UI consume adjacent model frames. A shorter new path is not
+    # missing geometry: use its endpoint instead of bouncing a distant target
+    # to the bottom-of-screen dock. Never extrapolate beyond the available road.
+    projected_distance = min(distance, float(arc[-1]))
     unique = np.r_[True, np.diff(arc) > 1e-6]
-    point = np.array([np.interp(distance, arc[unique], path[unique, i]) for i in range(3)])
-    pitch = float(np.interp(distance, arc[unique], np.unwrap(model.orientation.y)[unique]))
-    yaw = float(np.interp(distance, arc[unique], np.unwrap(model.orientation.z)[unique]))
+    point = np.array([np.interp(projected_distance, arc[unique], path[unique, i]) for i in range(3)])
+    pitch = float(np.interp(projected_distance, arc[unique], np.unwrap(model.orientation.y)[unique]))
+    yaw = float(np.interp(projected_distance, arc[unique], np.unwrap(model.orientation.z)[unique]))
     point += self.offset * np.array([math.cos(yaw) * math.cos(pitch), math.sin(yaw) * math.cos(pitch), -math.sin(pitch)])
-    return StopMarker(tuple(point), yaw, distance, speed < .3, 'STOP TARGET')
+    return StopMarker(tuple(point), yaw, projected_distance if preview else distance, speed < .3, 'STOP TARGET')
 
   def predict(self, model, speed, timestamp):
     intent = model_intent(model, speed)
@@ -198,5 +244,5 @@ def distance_label(marker, metric):
   if marker.distance is None:
     return 'STOP REQUEST'
   distance = marker.distance if metric else marker.distance / .3048
-  prefix = '' if marker.label == 'STOP TARGET' else '~'
+  prefix = '' if marker.label in ('STOP TARGET', 'E2E APPROACH') else '~'
   return f'{prefix}{distance:.1f} {"m" if metric else "ft"}'
