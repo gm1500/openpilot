@@ -63,3 +63,10 @@ void ZstdFileWriter::flushCache(bool last_chunk) {
 
   input_cache_.clear();  // Clear cache after compression
 }
+
+// End a frame so a completed event prefix remains readable after abrupt power loss.
+// zstd begins a fresh frame on the next write. Ordinary loggerd never calls this.
+void ZstdFileWriter::flush() {
+  if (!input_cache_.empty()) flushCache(true);
+  util::safe_fflush(file_);
+}

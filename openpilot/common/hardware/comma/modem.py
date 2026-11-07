@@ -3,6 +3,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import select
 import signal
 import string
@@ -13,6 +14,7 @@ import termios
 import time
 
 from contextlib import contextmanager
+from datetime import datetime
 from ipaddress import IPv4Address, AddressValueError
 
 from enum import Enum
@@ -65,7 +67,28 @@ INITIAL_STATE: dict[str, object] = {
   "network_type": "unknown", "operator": "", "band": "", "channel": 0,
   "registration": "unknown", "temperatures": [], "extra": "",
   "tx_bytes": 0, "rx_bytes": 0,
+  "network_timezone": None, "network_timezone_mono": 0.,
 }
+
+
+def parse_network_timezone(value: str | None) -> int | None:
+  """QLTS=2 reports local network time; its signed quarter-hours include DST."""
+  if not value:
+    return None
+  match = re.fullmatch(r'(\d{2}|\d{4})/(\d{2})/(\d{2}),(\d{2}):(\d{2}):(\d{2})([+-]\d{2}),\s*([012])',
+                       value.replace('"', '').strip())
+  if match is None:
+    return None
+  year, month, day, hour, minute, second, quarters, _ = map(int, match.groups())
+  if year < 100:
+    year += 2000
+  try:
+    datetime(year, month, day, hour, minute, second)
+  except ValueError:
+    return None
+  if not 2020 <= year < 2100 or not -48 <= quarters <= 56:
+    return None
+  return quarters*15*60  # Do not add the DST indicator a second time.
 
 
 @contextmanager
@@ -217,6 +240,7 @@ class Modem:
     self._roaming_allowed = True
     self.running = True
     self.S = INITIAL_STATE.copy()
+    self._next_time_poll = 0.
 
   @staticmethod
   def _read_param(key):
@@ -563,6 +587,19 @@ class Modem:
       return {}
     return {"tx_bytes": tx, "rx_bytes": rx}
 
+  def _poll_network_time(self) -> dict:
+    now = time.monotonic()
+    if now < self._next_time_poll or not self.S.get('modem_version', '').startswith('EG25'):
+      return {}
+    self._next_time_poll = now+60.
+    # The existing AT owner/lock handles this read-only query. No other process
+    # opens the serial port, changes modem settings, or needs a data connection.
+    try:
+      offset = parse_network_timezone(self._atv('AT+QLTS=2', '+QLTS:'))
+    except OSError:
+      return {}
+    return {'network_timezone': offset, 'network_timezone_mono': now} if offset is not None else {}
+
   def _poll(self):
     s: dict = {}
     for fn in (self._poll_signal, self._poll_operator, self._poll_band,
@@ -595,6 +632,9 @@ class Modem:
         self._check_iccid(state)
         prev = state
         state = handlers[state]()
+        if state in (State.SEARCHING, State.CONNECTING, State.CONNECTED):
+          if network_time := self._poll_network_time():
+            self._publish_state(**network_time)
         if state != prev:
           self._publish_state(state=state.value)
           logging.info(f"{prev.value} -> {state.value}")
