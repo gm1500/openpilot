@@ -231,6 +231,7 @@ struct LanePolicyState {
 
 struct VirtualLaneBoundary {
   available @0 :Bool;
-  held @1 :Bool; # short real-line anchored continuity across an outward opening
+  held @1 :Bool; # active hold or memory-assisted reacquisition, anchored to real paint
   y @2 :List(Float32); # filtered boundary at model lane x stations, valid through 55 m
+  memoryOnly @3 :Bool; # display-only width prior; not available for steering
 }

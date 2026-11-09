@@ -8,7 +8,7 @@ import pytest
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.modeld.lane_policy import DT, LanePolicy, anchor_correction, curve_reversal_frames, soften_correction
 from openpilot.selfdrive.modeld.road_edge_policy import RoadEdgePolicy
-from openpilot.selfdrive.ui.onroad.lane_policy_style import active_edge, boundary_colors, EDGE_ORANGE, EDGE_YELLOW, PAINT_BLUE, PAINT_GREEN
+from openpilot.selfdrive.ui.onroad.lane_policy_style import active_edge, boundary_colors, EDGE_YELLOW, PAINT_BLUE, PAINT_GREEN
 
 
 def model_output(offset=0.3, width=3.6, left_prob=0.99, right_prob=0.1, curvature=0.0, edge_std=0.3):
@@ -136,8 +136,8 @@ def test_held_boundary_also_moves_inside_an_observed_narrowing():
   narrowed = model_output(width=4.0)
   narrowed['road_edges'][0, 1, :, 0] -= 0.5
   tick(p, narrowed)
-  assert p.road_edges.edges[1].held
-  assert p.road_edges.edges[1].width <= 3.5 + 1e-8
+  assert not p.road_edges.edges[1].available
+  assert p.road_edges.edges[1].memory_width is None
   tick(p, narrowed, 8)
   assert not p.active  # the large change must be qualified again
 
@@ -359,7 +359,7 @@ def test_established_opening_freezes_width_and_follows_current_paint(side):
   assert p.edges[side].available and not p.edges[side].held
 
 
-@pytest.mark.parametrize('speed,frames', [(0.0, 25), (10.0, 25), (30.0, 13)])
+@pytest.mark.parametrize('speed,frames', [(0.0, 40), (10.0, 40), (30.0, 20)])
 def test_opening_bridge_has_time_and_distance_limits(speed, frames):
   p = RoadEdgePolicy()
   x = np.asarray(ModelConstants.X_IDXS)
@@ -404,7 +404,7 @@ def test_intermittent_good_frames_cannot_refresh_an_opening_forever():
     p.update(model_output(), x, 10.0)
   opening = model_output()
   opening['road_edges'][0, 1, :, 0] += 2.0
-  for n in range(26):
+  for n in range(41):
     p.update(model_output() if n % 4 in (2, 3) else opening, x, 10.0)
   assert not p.edges[1].available
 
@@ -626,13 +626,13 @@ def test_recorded_curb_and_barrier_qualify_despite_moderate_uncertainty(name, st
     m['lane_lines'][0, 1 + side, :, 0] = np.pad(missing, (0, 33 - len(missing)), mode='edge')
     m['road_edges'][0, side, :, 0] = np.pad(edge, (0, 33 - len(edge)), mode='edge')
     m['desire_state'][0, 3] = desire
-    p.update(m, 0.001, speed, lane_policy_enabled=True, blinkers_active=blinkers, frame_time=stamp)
+    p.update(m, 0.001, speed, lane_policy_enabled=True, blinkers_active=blinkers, frame_time=stamp, lateral_active=True)
     if start <= stamp <= end:
       assert p.active and p.edge_side == side, stamp
   assert not p.road_edges.edges[side].available  # the later opening still releases
 
 
-@pytest.mark.parametrize('speed,frames', [(0.0, 12), (30.0, 6)])
+@pytest.mark.parametrize('speed,frames', [(0.0, 20), (30.0, 10)])
 def test_dropped_model_frames_do_not_extend_bridge_time_or_distance(speed, frames):
   p = RoadEdgePolicy()
   x = np.asarray(ModelConstants.X_IDXS)
@@ -670,7 +670,7 @@ def test_bridge_compares_narrow_corridor_end_to_its_previous_boundary_not_median
 
 
 @pytest.mark.parametrize('side', [0, 1])
-def test_held_virtual_boundary_is_orange_until_observed_again_or_expired(side):
+def test_held_virtual_boundary_is_yellow_until_observed_again_or_expired(side):
   from openpilot.cereal import log
 
   p = LanePolicy()
@@ -685,10 +685,10 @@ def test_held_virtual_boundary_is_orange_until_observed_again_or_expired(side):
   p.fill_state(msg.lanePolicy, True, True, False)
   state = msg.lanePolicy
   assert state.edges[side].held
-  assert boundary_colors(state, side, True) == (None, EDGE_ORANGE)
+  assert boundary_colors(state, side, True) == (None, EDGE_YELLOW)
   assert boundary_colors(state, 1 - side, True) == (PAINT_GREEN, None)
   assert active_edge(state, side, True)  # only this virtual side gains thickness
-  assert boundary_colors(state, side, False) == (None, EDGE_ORANGE)
+  assert boundary_colors(state, side, False) == (None, EDGE_YELLOW)
   assert not active_edge(state, side, False)
   np.testing.assert_allclose(state.edges[side].y, p.road_edges.edges[side].y)
   m['road_edges'][0, side, :, 0] += 2.0 if side == 0 else -2.0
@@ -697,7 +697,187 @@ def test_held_virtual_boundary_is_orange_until_observed_again_or_expired(side):
   assert not state.edges[side].held
   assert boundary_colors(state, side, True) == (None, PAINT_GREEN)
   m['road_edges'][0, side, :, 0] += -2.0 if side == 0 else 2.0
-  tick(p, m, 30, lateral_active=True)
+  tick(p, m, 41, lateral_active=True)
   p.fill_state(state, True, True, False)
-  assert not state.edges[side].available and len(state.edges[side].y) == 0
+  assert not state.edges[side].available and state.edges[side].memoryOnly
+  assert boundary_colors(state, side, True) == (None, EDGE_YELLOW)
+  assert not active_edge(state, side, True)
+  tick(p, m, 100, lateral_active=True)
+  p.fill_state(state, True, True, False)
+  assert not state.edges[side].memoryOnly and len(state.edges[side].y) == 0
   assert boundary_colors(state, side, True) == (None, None)
+
+
+@pytest.mark.parametrize('speed,frames', [(0.0, 100), (10.0, 100), (30.0, 66)])
+def test_width_memory_expires_by_time_or_distance_without_steering(speed, frames):
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  for _ in range(30):
+    p.update(model_output(), x, speed)
+  opening = model_output()
+  opening['road_edges'][0, 1, :, 0] += 2.0
+  for n in range(frames):
+    p.update(opening, x, speed)
+    assert p.edges[1].memory_width is not None
+    if n >= 41:
+      assert not p.edges[1].available and p.edges[1].y is None
+  p.update(opening, x, speed)
+  assert p.edges[1].memory_width is None and p.edges[1].memory_y is None
+  assert not p.edges[1].available
+
+
+def memory_gap_policy(side=1, count=45):
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  normal = model_output(left_prob=0.99 if side else 0.1, right_prob=0.1 if side else 0.99)
+  for _ in range(30):
+    p.update(normal, x, 10.0)
+  opening = model_output(left_prob=0.99 if side else 0.1, right_prob=0.1 if side else 0.99)
+  opening['road_edges'][0, side, :, 0] += 2.0 if side else -2.0
+  for _ in range(count):
+    p.update(opening, x, 10.0)
+  return p, x, normal, opening
+
+
+@pytest.mark.parametrize('side', [0, 1])
+def test_matching_moderate_edge_reacquires_without_refreshing_or_widening_memory(side):
+  p, x, normal, _ = memory_gap_policy(side)
+  edge = p.edges[side]
+  assert not edge.available and edge.memory_width is not None
+  width, age = edge.memory_width, edge.memory_time
+  normal['road_edges_stds'][:] = 0.6
+  normal['road_edges'][0, side, :, 0] += 0.1 if side else -0.1
+  for _ in range(5):
+    p.update(normal, x, 10.0)
+    assert not edge.available
+  p.update(normal, x, 10.0)
+  assert edge.available and edge.memory_guided
+  assert edge.width == pytest.approx(width)
+  assert edge.memory_time == pytest.approx(age + 0.3)
+  for _ in range(24):
+    p.update(normal, x, 10.0)
+  assert edge.available and not edge.memory_guided  # full stable evidence now earned
+  assert edge.memory_time == 0.0
+
+
+@pytest.mark.parametrize('issue', ['no_paint', 'weak_paint', 'anchor_jump', 'inward', 'wrong_width', 'too_uncertain', 'two_edges'])
+def test_memory_does_not_bypass_current_anchor_or_edge_geometry(issue):
+  p, x, normal, _ = memory_gap_policy()
+  if issue == 'no_paint':
+    normal['lane_lines_prob'][0, 3] = 0.69
+  elif issue == 'weak_paint':
+    normal['lane_lines_prob'][0, 3] = 0.90
+  elif issue == 'anchor_jump':
+    normal['lane_lines'][0, 1, :, 0] -= 0.4
+  elif issue == 'inward':
+    normal['road_edges'][0, 1, :, 0] -= 0.5
+  elif issue == 'wrong_width':
+    normal['road_edges'][0, 1, :, 0] += 0.4
+  elif issue == 'too_uncertain':
+    normal['road_edges_stds'][:] = 0.8
+  else:
+    normal['lane_lines_prob'][:] = 0.1
+  for _ in range(6):
+    p.update(normal, x, 10.0)
+    assert not p.edges[1].available
+
+
+def test_intermittent_returns_do_not_keep_memory_alive_forever():
+  p, x, normal, opening = memory_gap_policy()
+  normal['road_edges_stds'][:] = 0.6
+  for n in range(56):
+    p.update(normal if n % 8 < 6 else opening, x, 10.0)
+  assert p.edges[1].memory_width is None
+  assert not p.edges[1].available
+
+
+@pytest.mark.parametrize('inactive_frames,remembered', [(20, True), (100, False)])
+def test_brief_disengagement_retains_reference_but_five_seconds_discards_it(inactive_frames, remembered):
+  p, x, normal, opening = memory_gap_policy(count=1)
+  for _ in range(inactive_frames):
+    p.update(normal, x, 10.0, lateral_active=False)
+  assert (p.edges[1].memory_width is not None) == remembered
+  p.update(opening, x, 10.0, lateral_active=False)
+  if not remembered:
+    assert p.edges[1].memory_width is None
+
+
+@pytest.mark.parametrize('reset_reason', ['blinker', 'lane_change', 'toggle', 'frame_gap'])
+def test_lane_policy_clears_cached_width_on_reset(reset_reason):
+  p = LanePolicy()
+  normal = model_output()
+  tick(p, normal, 30, lateral_active=True)
+  assert p.road_edges.edges[1].memory_width is not None
+  options = {'lateral_active': True}
+  if reset_reason == 'blinker':
+    options['blinkers_active'] = True
+  elif reset_reason == 'lane_change':
+    normal['desire_state'][0, 3] = 0.5
+  elif reset_reason == 'toggle':
+    options['lane_policy_enabled'] = False
+  else:
+    tick(p, normal, frame_time=10.0, lateral_active=True)
+    options['frame_time'] = 10.5
+  tick(p, normal, **options)
+  assert p.road_edges.edges[1].memory_width is None
+
+
+def test_memory_only_ui_tracks_paint_and_cannot_activate_steering():
+  from openpilot.cereal import log
+
+  p = LanePolicy()
+  normal = model_output()
+  tick(p, normal, 30, lateral_active=True)
+  opening = model_output()
+  opening['road_edges'][0, 1, :, 0] += 2.0
+  tick(p, opening, 41, lateral_active=True)
+  opening['lane_lines'][0, 1, :, 0] -= 0.1
+  tick(p, opening, lateral_active=True)
+  assert not p.active
+  state = log.ModelDataV2.new_message().lanePolicy
+  p.fill_state(state, True, True, False)
+  assert state.edges[1].memoryOnly and not state.edges[1].available
+  np.testing.assert_allclose(state.edges[1].y, opening['lane_lines'][0, 1, :, 0] + 3.6, atol=1e-6)
+  assert boundary_colors(state, 1, True) == (None, EDGE_YELLOW)
+  assert not active_edge(state, 1, True)
+  p.fill_state(state, False, True, False)
+  assert not state.edges[1].memoryOnly and len(state.edges[1].y) == 0
+
+
+def test_joint_motion_of_observed_boundaries_drops_memory_without_losing_current_geometry():
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  for _ in range(30):
+    p.update(model_output(), x, 10.0)
+  moved = model_output(offset=0.0)
+  p.update(moved, x, 10.0)
+  assert p.edges[1].available and not p.edges[1].held
+  assert p.edges[1].memory_width is None
+  np.testing.assert_allclose(p.edges[1].y, moved['road_edges'][0, 1, :, 0])
+
+
+def test_memory_reacquisition_publishes_thick_yellow_then_observed_green():
+  from openpilot.cereal import log
+
+  p = LanePolicy()
+  normal = model_output()
+  tick(p, normal, 30, lateral_active=True)
+  opening = model_output()
+  opening['road_edges'][0, 1, :, 0] += 2.0
+  tick(p, opening, 41, lateral_active=True)
+  normal['road_edges_stds'][:] = 0.6
+  tick(p, normal, 5, lateral_active=True)
+  assert not p.active
+  tick(p, normal, lateral_active=True)
+  assert p.active and p.edge_side == 1 and p.road_edges.edges[1].memory_guided
+  state = log.ModelDataV2.new_message().lanePolicy
+  p.fill_state(state, True, True, False)
+  assert state.edges[1].held and not state.edges[1].memoryOnly
+  assert active_edge(state, 1, True)
+  assert boundary_colors(state, 1, True) == (None, EDGE_YELLOW)
+  p.fill_state(state, True, True, True)
+  assert not active_edge(state, 1, True)
+  tick(p, normal, 24, lateral_active=True)
+  p.fill_state(state, True, True, False)
+  assert not state.edges[1].held and active_edge(state, 1, True)
+  assert boundary_colors(state, 1, True) == (None, PAINT_GREEN)

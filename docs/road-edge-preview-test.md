@@ -34,7 +34,8 @@ both painted lines must be strong for 0.75 s before switching back.
 | Moderate-uncertainty qualification | 30 strong observed frames within 2.0 s; temporal width span/latest deviation at most 0.20 m, spatial width span at most 0.50 m |
 | Median-width smoothing | 1 s time constant; change at most 0.20 m/s; immediate inward geometry cap kept separate |
 | Ordinary short hold | At most 0.30 s or 5 m, whichever comes first |
-| Established curb, outward opening | At most 1.25 s or 20 m, with stronger continuous paint support |
+| Established curb, outward opening | At most 2.0 s or 30 m, with stronger continuous paint support |
+| Width reference after active hold | At most 5.0 s or 100 m since full observed qualification; never steering permission by itself |
 | Established curb, uncertainty increase | At most 0.50 s or 8 m; edge standard deviation must stay at or below 1.0 |
 | Immediate rejection | Narrowing below minimum, loss of anchor, invalid geometry or lane-change intent |
 
@@ -314,21 +315,58 @@ UI colours and the speed-dependent curve-pause POC are unchanged. On-device
 steering behaviour remains to be evaluated.
 
 
-### Held-boundary display (speed-pause POC)
+### Longer hold and width memory (speed-pause POC)
 
-A qualified road edge is yellow while available and green while observed and
-actively centering. During bounded interpolation, the virtual boundary is orange,
-even while centering. Its coordinates are the policy's frozen width offset from
-the current confident opposite painted line, not the model's outward opening.
-Only the selected virtual side is thickened while lateral control is active.
-Disengagement/override removes thickness; expiry removes the virtual boundary.
-Painted lines retain their blue/green scheme.
+The active opening hold is now capped at **2 seconds or 30 metres**, whichever
+comes first. The ordinary 0.30 s / 5 m and uncertainty 0.50 s / 8 m budgets remain
+unchanged. A remembered width is a prior, not permission to follow an unseen edge
+for its entire lifetime. At least one current confident painted line is required.
 
-A fresh replay of the ten supplied segments (12,000 model frames) found the
-longest successfully recovered existing hold was about 1.1 seconds. Keep the
-existing active opening budget at 1.25 seconds or 20 metres, whichever is reached
-first. Ordinary loss and increased uncertainty retain their shorter budgets.
-This display change does not extend steering permission, implement a longer-lived
-width cache, or change disengagement reset timing. Longer-lived width memory
-should be evaluated separately as a reacquisition prior. Replay assesses
-selection continuity, not closed-loop steering performance.
+After active hold ends, keep the last fully qualified width for up to **5 seconds
+or 100 metres** since its last full confirmation. Render it offset from current
+paint as a **thin yellow** virtual line, with `memoryOnly=true` and
+`available=false`. It cannot supply the centerline. During active interpolation
+or memory-assisted reacquisition, the selected virtual boundary is **thick
+yellow**. Disengagement or steering override immediately removes thickness.
+Fresh observed candidates remain yellow; fresh observed active edges remain
+green. Painted lines keep blue/green. The virtual line disappears when its
+reference expires or its supporting painted anchor becomes invalid.
+
+Reacquisition using memory requires six consecutive matching observations
+(0.30 s at 20 Hz), paint probability at least 0.92, edge uncertainty at most 0.65,
+spatial width spread at most 0.50 m, and median width within 0.20 m of the saved
+reference. It freezes the saved width, capped inward by current geometry. This
+is stronger evidence than a missing edge but less than full acquisition, hence
+the yellow display while used. Only the original full qualification windows
+(15 strong or 30 stable moderate-uncertainty observations) can renew the memory
+clock and teach new width. Short returns cannot keep it alive indefinitely.
+
+Blinkers, lane-change intent, toggle-off, stale/backwards model timestamps and
+lost paint discard the reference. Paint below 0.85 discards memory; large inward
+changes require requalification. An anchor jump invalidates memory/held steering,
+while simultaneous motion of valid observed paint and curb may retain observed
+centering. Five seconds without lateral control (including driver override)
+discards the prior; continuously observed boundaries can still qualify normally.
+There is no two-road-edge fallback and no change to centering gains or the
+speed-dependent reversal pause.
+
+#### Replay against the preceding POC
+
+Ten supplied segments, 12,000 model frames, compared against `968c678`:
+
+| Metric | Previous | Width-memory POC |
+| --- | ---: | ---: |
+| Qualified edge available | 110.25 s | 110.90 s |
+| Edge selected while controlling | 105.70 s | 105.80 s |
+| Previously active frames lost | — | 0 |
+| Display-only remembered boundary | — | 3.80 s |
+| Active memory-assisted reacquisition | — | 0 s |
+
+The added 0.10 s of active selection is in the right-barrier clip (route ending
+`1d6913bdff`, segment 7). Most gaps end on other confidence/geometry gates rather
+than the old timeout. This replay does not demonstrate a large availability gain
+or exercise faster memory-assisted reacquisition; that behavior is covered by
+synthetic tests and needs new recorded examples. Replay evaluates policy
+selection against recorded model geometry, not closed-loop steering quality.
+The earlier 1.1 s longest successful hold was constrained by the original cap
+and did not establish that a longer hold would fail.

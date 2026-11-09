@@ -287,8 +287,10 @@ class LanePolicy:
     state.leftSource, state.rightSource = sources
     for message, edge in zip(state.init('edges', 2), self.road_edges.edges, strict=True):
       message.available = enabled and edge.available
-      message.held = enabled and edge.available and edge.held
-      message.y = edge.y.tolist() if enabled and edge.available else []
+      message.held = enabled and edge.available and (edge.held or edge.memory_guided)
+      message.memoryOnly = enabled and not edge.available and edge.memory_y is not None
+      y = edge.y if message.available else edge.memory_y if message.memoryOnly else None
+      message.y = y.tolist() if y is not None else []
 
   def update_motion(self, offset: float, geometric_rate: float, allowed: bool,
                     frame_time: float | None = None) -> tuple[float, bool]:
@@ -398,7 +400,7 @@ class LanePolicy:
       if lane_change_prob > MAX_LANE_CHANGE_PROB:
         return self._fallback(e2e_curvature, "stock-e2e fallback: lane-change intent")
       x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
-      self.road_edges.update(model_output, x, v_ego, frame_time)
+      self.road_edges.update(model_output, x, v_ego, frame_time, lateral_active and not steering_pressed)
       previous_edge = self.edge_side
       center, strong = self._centerline(model_output, x)
       if previous_edge != self.edge_side:

@@ -162,7 +162,7 @@ class ModelRenderer(Widget):
     for i, virtual in enumerate(self._virtual_edges):
       virtual.raw_points = np.empty((0, 3), dtype=np.float32)
       state = model.lanePolicy
-      if state.valid and state.enabled and len(state.edges) == 2 and state.edges[i].available:
+      if state.valid and state.enabled and len(state.edges) == 2 and (state.edges[i].available or state.edges[i].memoryOnly):
         y = np.asarray(state.edges[i].y, dtype=np.float32)
         raw = self._road_edges[i].raw_points
         if len(y) == len(raw) and np.isfinite(y).all():
