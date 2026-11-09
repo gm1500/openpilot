@@ -8,7 +8,7 @@ import pytest
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.modeld.lane_policy import DT, LanePolicy, anchor_correction, curve_reversal_frames, soften_correction
 from openpilot.selfdrive.modeld.road_edge_policy import RoadEdgePolicy
-from openpilot.selfdrive.ui.onroad.lane_policy_style import active_edge, boundary_colors, EDGE_YELLOW, PAINT_BLUE, PAINT_GREEN
+from openpilot.selfdrive.ui.onroad.lane_policy_style import active_edge, boundary_colors, EDGE_ORANGE, EDGE_YELLOW, PAINT_BLUE, PAINT_GREEN
 
 
 def model_output(offset=0.3, width=3.6, left_prob=0.99, right_prob=0.1, curvature=0.0, edge_std=0.3):
@@ -323,7 +323,7 @@ def test_published_filtered_geometry_and_side_sources():
 
 def test_yellow_candidate_green_active_only_virtual_side_thickens():
   state = NS(valid=True, enabled=True, active=True, leftSource='painted', rightSource='roadEdge',
-             edges=[NS(available=True), NS(available=True)])
+             edges=[NS(available=True, held=False), NS(available=True, held=False)])
   assert boundary_colors(state, 0, True) == (PAINT_GREEN, None)
   assert boundary_colors(state, 1, True) == (None, PAINT_GREEN)
   assert active_edge(state, 1, True) and not active_edge(state, 0, True)
@@ -667,3 +667,37 @@ def test_bridge_compares_narrow_corridor_end_to_its_previous_boundary_not_median
   opening['road_edges'][0, 1, x < 15.0, 0] -= 0.4
   p.update(opening, x, 10.0)
   assert not p.edges[1].available
+
+
+@pytest.mark.parametrize('side', [0, 1])
+def test_held_virtual_boundary_is_orange_until_observed_again_or_expired(side):
+  from openpilot.cereal import log
+
+  p = LanePolicy()
+  m = model_output(left_prob=0.99 if side else 0.1, right_prob=0.1 if side else 0.99)
+  tick(p, m, 20, lateral_active=True)
+  msg = log.ModelDataV2.new_message()
+  p.fill_state(msg.lanePolicy, True, True, False)
+  assert boundary_colors(msg.lanePolicy, side, True) == (None, PAINT_GREEN)
+  # An outward opening freezes the confirmed width, with current paint as anchor.
+  m['road_edges'][0, side, :, 0] += -2.0 if side == 0 else 2.0
+  tick(p, m, 1, lateral_active=True)
+  p.fill_state(msg.lanePolicy, True, True, False)
+  state = msg.lanePolicy
+  assert state.edges[side].held
+  assert boundary_colors(state, side, True) == (None, EDGE_ORANGE)
+  assert boundary_colors(state, 1 - side, True) == (PAINT_GREEN, None)
+  assert active_edge(state, side, True)  # only this virtual side gains thickness
+  assert boundary_colors(state, side, False) == (None, EDGE_ORANGE)
+  assert not active_edge(state, side, False)
+  np.testing.assert_allclose(state.edges[side].y, p.road_edges.edges[side].y)
+  m['road_edges'][0, side, :, 0] += 2.0 if side == 0 else -2.0
+  tick(p, m, 3, lateral_active=True)
+  p.fill_state(state, True, True, False)
+  assert not state.edges[side].held
+  assert boundary_colors(state, side, True) == (None, PAINT_GREEN)
+  m['road_edges'][0, side, :, 0] += -2.0 if side == 0 else 2.0
+  tick(p, m, 30, lateral_active=True)
+  p.fill_state(state, True, True, False)
+  assert not state.edges[side].available and len(state.edges[side].y) == 0
+  assert boundary_colors(state, side, True) == (None, None)

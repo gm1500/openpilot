@@ -312,3 +312,23 @@ paint evidence, dropped-frame expiry, and recorded curb/barrier regressions.
 Centering gains, correction limits, existing hold budgets, lane-change handling,
 UI colours and the speed-dependent curve-pause POC are unchanged. On-device
 steering behaviour remains to be evaluated.
+
+
+### Held-boundary display (speed-pause POC)
+
+A qualified road edge is yellow while available and green while observed and
+actively centering. During bounded interpolation, the virtual boundary is orange,
+even while centering. Its coordinates are the policy's frozen width offset from
+the current confident opposite painted line, not the model's outward opening.
+Only the selected virtual side is thickened while lateral control is active.
+Disengagement/override removes thickness; expiry removes the virtual boundary.
+Painted lines retain their blue/green scheme.
+
+A fresh replay of the ten supplied segments (12,000 model frames) found the
+longest successfully recovered existing hold was about 1.1 seconds. Keep the
+existing active opening budget at 1.25 seconds or 20 metres, whichever is reached
+first. Ordinary loss and increased uncertainty retain their shorter budgets.
+This display change does not extend steering permission, implement a longer-lived
+width cache, or change disengagement reset timing. Longer-lived width memory
+should be evaluated separately as a reacquisition prior. Replay assesses
+selection continuity, not closed-loop steering performance.
