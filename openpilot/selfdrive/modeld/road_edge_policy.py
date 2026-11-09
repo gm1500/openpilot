@@ -35,12 +35,97 @@ EDGE_MAX_ANCHOR_STEP = 0.20  # m/frame near the car; do not bridge a painted-lin
 EDGE_FIT_START, EDGE_FIT_END = 5.0, 55.0
 
 
+class PaintWidthMemory:
+  """Recent two-paint evidence for edge acquisition; never a steering boundary."""
+  def __init__(self):
+    self.reset()
+
+  def reset(self):
+    self.width = None
+    self.age = self.distance = 0.0
+    self.history = deque(maxlen=EDGE_ARM_FRAMES)
+    self.previous = None
+    self.continuous = np.zeros(2, dtype=bool)
+    self.used = [False, False]
+
+  def update(self, lines, probs, x, speed, dt, allowed):
+    if not allowed:
+      self.reset()
+      return
+    anchor = (x >= 0.0) & (x <= 20.0)
+    near = (x >= 0.0) & (x <= 10.0)
+    horizon = (x >= 0.0) & (x <= EDGE_FIT_END)
+    fit = (x >= EDGE_FIT_START) & (x <= EDGE_FIT_END)
+    if not np.any(near) or np.count_nonzero(fit) < 4:
+      self.reset()
+      return
+    shape = lines[:, anchor]
+    self.continuous = (np.zeros(2, dtype=bool) if self.previous is None else
+                       np.max(np.abs(shape - self.previous), axis=1) <= EDGE_MAX_ANCHOR_STEP + 1e-6)
+    self.previous = shape.copy()
+    finite = np.isfinite(lines).all(axis=1) & np.isfinite(probs)
+    if self.width is not None:
+      self.age += dt
+      self.distance += max(speed, 0.0) * dt
+      retained = finite & (probs >= EDGE_BRIDGE_RETAIN_PROB)
+      if (self.age > EDGE_MEMORY_TIME + 1e-6 or self.distance > EDGE_MEMORY_DISTANCE + 1e-6 or
+          not np.any(retained) or not np.all(self.continuous[retained])):
+        self.width = None
+        self.history.clear()
+    strong = np.all(finite) and np.min(probs) >= EDGE_ARM_PROB
+    if not strong:
+      self.history.clear()
+      return
+    widths = lines[1] - lines[0]
+    low, median, high = np.percentile(widths[fit], (10, 50, 90))
+    valid = (np.min(widths[horizon]) >= EDGE_MIN_WIDTH and np.max(widths[horizon]) <= EDGE_MAX_WIDTH and
+             high - low <= EDGE_STABLE_SPREAD and np.max(lines[0, near]) <= -0.3 and np.min(lines[1, near]) >= 0.3)
+    if not valid:
+      self.width = None
+      self.history.clear()
+      return
+    if self.width is not None and abs(median - self.width) > EDGE_STABLE_HISTORY_SPREAD:
+      # Do not let a slowly filtered old lane width survive a confident change.
+      self.width = None
+      self.history.clear()
+    if not np.all(self.continuous):
+      self.history.clear()
+    self.history.append(float(median))
+    if len(self.history) == self.history.maxlen:
+      low, center, high = np.percentile(self.history, (10, 50, 90))
+      if high - low <= EDGE_STABLE_HISTORY_SPREAD and abs(median - center) <= EDGE_STABLE_HISTORY_SPREAD:
+        self.width = float(center)
+        self.age = self.distance = 0.0
+        self.used = [False, False]
+
+  def seed(self, candidate, side, opposite, missing_prob, opposite_prob, edge, edge_std, x, speed, dt):
+    if (self.width is None or self.used[side] or candidate.available or candidate.memory_width is not None or
+        not np.isfinite(missing_prob) or missing_prob >= 0.70 or not np.isfinite(opposite_prob) or
+        opposite_prob < EDGE_ARM_PROB or not self.continuous[1 - side] or
+        not np.isfinite(edge_std) or not 0.0 <= edge_std <= EDGE_RETAIN_STD):
+      return
+    fit = (x >= EDGE_FIT_START) & (x <= EDGE_FIT_END)
+    horizon = (x >= 0.0) & (x <= EDGE_FIT_END)
+    widths = candidate.direction * (edge - opposite)
+    if (not np.isfinite(widths).all() or abs(np.median(widths[fit]) - self.width) > EDGE_STABLE_HISTORY_SPREAD or
+        np.max(np.abs(widths[horizon] - self.width)) > EDGE_MAX_HISTORY_SPREAD):
+      return
+    # Transfer the source's age, not a fresh lease. Each confirmed paint window
+    # may seed a side once; rejected observations cannot repeatedly revive it.
+    candidate.memory_width = candidate.memory_median = self.width
+    candidate.memory_from_paint = True
+    candidate.memory_time = max(0.0, self.age - dt)
+    candidate.memory_distance = max(0.0, self.distance - max(speed, 0.0) * dt)
+    self.used[side] = True
+
+
 class EdgeBoundary:
   def __init__(self):
     self.reset()
 
   def forget_memory(self):
     self.memory_width = self.memory_median = None
+    self.memory_from_paint = False
     self.memory_y = None
     self.memory_time = self.memory_distance = 0.0
     self.memory_returns = 0
@@ -147,6 +232,12 @@ class EdgeBoundary:
     # Compare observations, not the conservative output cap.
     compatible = self.observed_width is None or abs(median - self.observed_width) <= EDGE_MAX_HISTORY_SPREAD
     observed = geometric and compatible and edge_std <= EDGE_RETAIN_STD
+    if self.memory_from_paint and observed:
+      horizon = (x >= 0.0) & (x <= EDGE_FIT_END)
+      if np.max(np.abs(widths[horizon] - self.memory_median)) > EDGE_MAX_HISTORY_SPREAD:
+        # Matching average width cannot hide a peeling-away or bowed boundary.
+        self.reset()
+        return
     if anchor_jump:
       # A simultaneous motion of fresh paint and curb need not drop observed
       # centering, but old width memory must never bridge an anchor jump.
@@ -216,6 +307,7 @@ class EdgeBoundary:
       self.width = min(self.filtered_width, float(low), float(np.min(widths[near])))
       if qualified_width is not None:
         self.memory_width, self.memory_median = self.width, float(median)
+        self.memory_from_paint = False
         self.memory_time = self.memory_distance = 0.0
         self.memory_y = opposite + direction * self.memory_width
     elif self.available:
@@ -251,6 +343,7 @@ class EdgeBoundary:
 class RoadEdgePolicy:
   def __init__(self):
     self.edges = [EdgeBoundary(), EdgeBoundary()]
+    self.paint_memory = PaintWidthMemory()
     self.edges[0].direction, self.edges[1].direction = -1, 1
     self.last_time = None
     self.inactive_time = 0.0
@@ -258,6 +351,7 @@ class RoadEdgePolicy:
   def reset(self):
     for edge in self.edges:
       edge.reset()
+    self.paint_memory.reset()
     self.last_time = None
     self.inactive_time = 0.0
 
@@ -278,7 +372,12 @@ class RoadEdgePolicy:
       probs = np.asarray(output['lane_lines_prob'][0, 1::2], dtype=float)
       if lines.shape != (4, len(x)) or edges.shape != (2, len(x)) or stds.shape != (2,) or probs.shape != (4,):
         raise ValueError('invalid boundary arrays')
+      self.paint_memory.update(lines[1:3], probs[1:3], x, speed, dt, self.inactive_time < EDGE_DISENGAGE_TIME - 1e-6)
       for side, candidate in enumerate(self.edges):
+        if candidate.memory_from_paint and (self.paint_memory.width is None or
+                                           abs(candidate.memory_median - self.paint_memory.width) > EDGE_STABLE_HISTORY_SPREAD):
+          candidate.reset()
+        self.paint_memory.seed(candidate, side, lines[2 - side], probs[1 + side], probs[2 - side], edges[side], stds[side], x, speed, dt)
         if self.inactive_time >= EDGE_DISENGAGE_TIME - 1e-6:
           if candidate.held or candidate.memory_guided:
             candidate.reset()

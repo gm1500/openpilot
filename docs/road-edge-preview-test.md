@@ -370,3 +370,52 @@ synthetic tests and needs new recorded examples. Replay evaluates policy
 selection against recorded model geometry, not closed-loop steering quality.
 The earlier 1.1 s longest successful hold was constrained by the original cap
 and did not establish that a longer hold would fail.
+
+### Painted-lane width as a guarded edge prior
+
+`RoadEdgePolicy` now keeps its own recent two-paint width reference, independent
+of `LanePolicy.width` and that existing one-line hold's 9.95 s smoothing. It does
+not reuse the old filter or teach painted width from a road edge.
+
+Acquisition requires 15 consecutive observations with both inner painted-line
+probabilities at least 0.92, a corridor bracketing the vehicle, widths within
+3.0–4.6 m at every station through 55 m, spatial width spread at most 0.50 m and
+temporal span/latest deviation at most 0.20 m. Near paint must move continuously.
+A confident changed or implausible painted corridor invalidates the old reference
+before collecting a new window.
+
+The reference expires after 5 s / 100 m without renewed two-line evidence, on
+lost/jumping remaining paint, on the existing policy resets (blinkers, lane-change
+intent, toggle-off, stale/backwards frames), or after 5 s without lateral control.
+Transfer into an edge candidate inherits the reference's original age/distance;
+it cannot restart the clock. Each confirmed paint window may seed each side once.
+
+It can assist acquisition only after paint on that side falls below 0.70, with
+the opposite painted line still at least 0.92 and continuous. The road edge must
+have uncertainty at most 0.65, median width within 0.20 m of the remembered width,
+and all near-to-55 m stations within 0.30 m of the expected boundary. Shape
+agreement is checked on subsequent observed frames too, not just the first seed.
+Six agreeing observations are still required before use. Large openings cannot
+start centering from paint memory alone. Existing qualified edge candidates are
+not overwritten by a paint prior.
+
+The virtual boundary always uses the current confident painted line's geometry
+plus/minus the remembered width. It never replays a stored curve. Paint-assisted
+memory follows the yellow display rules: thin when not actively controlling,
+thick on the virtual side while used for centering. Full observed edge
+qualification returns it to ordinary edge tracking/green active display. Existing
+2 s / 30 m supported-opening and shorter uncertainty hold limits are unchanged.
+
+Validation against `6f63771`: 140 focused tests and all 12,000 supplied replay
+frames. Active edge time remained 105.80 s, available edge time 110.90 s; no
+active selections were lost or added, and returned curvature was identical.
+These recordings contain no eligible successful paint-assisted acquisition, so
+this is regression evidence, not demonstrated real-drive benefit. Synthetic
+tests cover both sides, live curve geometry, post-seed divergence, shoulder
+spacing, expired references, repeated seeding, reset paths, and display state.
+
+The added recorded fixture covers segment 15's mismatch: painted width around
+3.39 m versus a left-edge corridor around 4.3–4.5 m near 38 s. The edge does not
+receive accelerated qualification. Substituting that wider corridor would change
+the target midpoint by roughly half a metre; these observations must not be
+accepted merely because paint confidence and average edge uncertainty look good.
