@@ -419,3 +419,68 @@ The added recorded fixture covers segment 15's mismatch: painted width around
 receive accelerated qualification. Substituting that wider corridor would change
 the target midpoint by roughly half a metre; these observations must not be
 accepted merely because paint confidence and average edge uncertainty look good.
+
+### Stable inward lane estimates constrain the curb corridor
+
+The route ending `03e12d7807`, segments 9–15, contains an important disagreement:
+while one painted anchor remains confident, a weaker same-side lane estimate
+sometimes sits inside the accepted curb. The prior policy ignores that estimate
+below its painted-line threshold and centres the wider paint-to-curb corridor.
+The model's weak line may represent paint or an inferred boundary; the video
+alone does not establish that each estimate is a real marking.
+
+The test branch now uses consistent inward estimates to constrain the virtual
+boundary. This does not change the perception model or promote a weak line into
+an independent steering source. The curb must still qualify under every existing
+gate and the opposite painted line remains the geometry anchor.
+
+- Earn 15 observations with opposite paint probability at least 0.92 and inward
+  line probability at least 0.10. Brief dips to 0.05 may pause, but cannot earn,
+  qualification for at most 0.25 s within the existing 1.25 s observation window.
+- Require the inward line to bracket the vehicle and form a 3.0–4.6 m corridor
+  at every station through 55 m. Its spatial width spread must be at most 0.35 m,
+  and temporal width span/latest deviation at most 0.20 m.
+- Require the line to remain 0.10–0.80 m inside the observed edge throughout that
+  horizon. Crossings, outward lines, speculative probabilities, and uncertain
+  or held edges cannot earn this evidence.
+- Apply only a width constraint, reconstructed from the **current opposite line's
+  shape**. Acquisition and release move this width at no more than 0.20 m/s.
+  An actual inward curb cap still takes effect immediately.
+- Confidence loss on the weak side retains a previously confirmed constraint
+  for up to 5 s or 100 m, then smoothly unwinds it toward the qualified curb.
+  Only another complete qualifying window renews this reference. Opposite paint
+  below 0.85, anchor jumps, lane-change/reset conditions and long disengagement
+  clear it. It cannot extend active edge hold or permit memory-only steering.
+
+The constraint does not alter raw curb width, edge admission, opening detection,
+paint-width learning, centering gains, or the speed-dependent curve pause. UI
+geometry follows the constrained boundary using the existing edge/memory colours.
+Two confident painted lines still take priority after the existing handback time.
+These are experimental evidence thresholds, not proof that a low-probability
+line is a physical boundary or that a particular tire clearance is guaranteed.
+
+#### Replay and checks
+
+Compared against `158c664`, preserving state across consecutive segments:
+
+| Metric | Before | With inward constraint |
+| --- | ---: | ---: |
+| New seven segments: available edge | 88.95 s | 88.95 s |
+| New seven segments: active controlling edge | 75.55 s | 75.55 s |
+| Earlier eleven segments: active controlling edge | 107.45 s | 107.45 s |
+| Previously active frames lost, all eighteen segments | — | 0 |
+
+In the new samples, the virtual midpoint moves at least 5 mm away from the curb
+for 54.35 s of active edge centering. Among those frames, the median shift is
+15.5 cm, the 90th percentile 22.9 cm, and the maximum 33.3 cm. These describe the
+**inferred target**, not measured vehicle movement or curb clearance. Segment 9's
+bookmark already uses confident painted lines, so this edge-only change does not
+alter it. Segment 12 does not earn sufficient inward-line evidence and remains
+unchanged. Other sections also retain the original target when the new gates fail.
+
+Validation covers 21,600 recorded model frames and 166 focused tests, including
+an eight-second anonymized boundary trace, both sides, live curve geometry,
+confidence pauses, false/crossing lines, narrow corridors, source priority,
+expiry, output slew and reset paths. Recorded model actions already include the
+recording policy's correction. This is open-loop boundary/selection regression;
+closed-loop curb clearance and handling still require a controlled vehicle test.

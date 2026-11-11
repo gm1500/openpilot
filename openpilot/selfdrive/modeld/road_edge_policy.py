@@ -33,6 +33,90 @@ EDGE_HOLD_STD = 1.0
 EDGE_BRIDGE_RETAIN_PROB = 0.85
 EDGE_MAX_ANCHOR_STEP = 0.20  # m/frame near the car; do not bridge a painted-line jump
 EDGE_FIT_START, EDGE_FIT_END = 5.0, 55.0
+INNER_LINE_ARM_PROB, INNER_LINE_PAUSE_PROB = 0.10, 0.05
+INNER_LINE_MIN_GAP, INNER_LINE_MAX_GAP = 0.10, 0.80
+INNER_LINE_MAX_SPREAD = 0.35
+
+
+class InnerLineConstraint:
+  """Stable inward lane evidence may narrow a curb corridor, never qualify it."""
+  def __init__(self):
+    self.reset()
+
+  def reset(self):
+    self.width = self.applied_width = None
+    self.age = self.distance = self.clock = self.pause = 0.0
+    self.history = deque(maxlen=EDGE_ARM_FRAMES)
+    self.previous_anchor = None
+
+  def update(self, candidate, opposite, line, edge, opposite_prob, line_prob, edge_std, x, speed, dt, allowed):
+    near = (x >= 0.0) & (x <= 20.0)
+    fit = (x >= EDGE_FIT_START) & (x <= EDGE_FIT_END)
+    horizon = (x >= 0.0) & (x <= EDGE_FIT_END)
+    anchor = opposite[near]
+    if (not allowed or not np.isfinite(opposite).all() or not np.isfinite(opposite_prob) or
+        opposite_prob < EDGE_BRIDGE_RETAIN_PROB or np.count_nonzero(fit) < 4 or
+        (self.previous_anchor is not None and np.max(np.abs(anchor - self.previous_anchor)) > EDGE_MAX_ANCHOR_STEP + 1e-6)):
+      self.reset()
+      return
+    self.previous_anchor = anchor.copy()
+    self.clock += dt
+    self.age += dt
+    self.distance += max(speed, 0.0) * dt
+    direction = candidate.direction
+    widths = direction * (line - opposite)
+    gaps = direction * (edge - line)
+    geometry = np.isfinite(widths).all() and np.isfinite(gaps).all() and np.isfinite(line_prob)
+    median = float(np.median(widths[fit])) if geometry else 0.0
+    if geometry:
+      low, high = np.percentile(widths[fit], (10, 90))
+      geometry = (np.min(widths[horizon]) >= EDGE_MIN_WIDTH and np.max(widths[horizon]) <= EDGE_MAX_WIDTH and
+                  high - low <= INNER_LINE_MAX_SPREAD and np.min(direction * line[x <= 10.0]) >= 0.3 and
+                  np.min(gaps[horizon]) >= INNER_LINE_MIN_GAP and np.max(gaps[horizon]) <= INNER_LINE_MAX_GAP)
+    # Qualification must accompany fresh curb observations. A weak line cannot
+    # renew either the edge's lease or this constraint across an opening.
+    observed = (not candidate.held and candidate.observed_frames > 0 and
+                np.isfinite(edge_std) and 0.0 <= edge_std <= EDGE_RETAIN_STD)
+    while self.history and self.clock - self.history[0][0] > EDGE_ARM_WINDOW:
+      self.history.popleft()
+    earns = geometry and observed and opposite_prob >= EDGE_ARM_PROB and line_prob >= INNER_LINE_ARM_PROB
+    if earns:
+      self.pause = 0.0
+      self.history.append((self.clock, median))
+      if len(self.history) == self.history.maxlen:
+        low, center, high = np.percentile([width for _, width in self.history], (10, 50, 90))
+        if high - low <= EDGE_STABLE_HISTORY_SPREAD and abs(median - center) <= EDGE_STABLE_HISTORY_SPREAD:
+          self.width = float(center)
+          self.age = self.distance = 0.0
+    else:
+      self.pause += dt
+      agrees = bool(self.history) and abs(median - np.median([width for _, width in self.history])) <= EDGE_STABLE_HISTORY_SPREAD
+      if (not geometry or not observed or line_prob < INNER_LINE_PAUSE_PROB or not agrees or
+          self.pause > EDGE_ARM_PAUSE_TIME + 1e-6):
+        self.history.clear()
+    if self.age > EDGE_MEMORY_TIME + 1e-6 or self.distance > EDGE_MEMORY_DISTANCE + 1e-6:
+      self.width = None
+    raw_width = candidate.width if candidate.available else (
+      float(np.min(direction * (candidate.memory_y - opposite))) if candidate.memory_y is not None else None)
+    if raw_width is None:
+      self.applied_width = None
+      return
+    if self.width is None and self.applied_width is None:
+      return
+    target = min(raw_width, self.width) if self.width is not None else raw_width
+    previous = raw_width if self.applied_width is None else self.applied_width
+    # Smooth both acquiring the inward bound and releasing it after expiry.
+    # Raw curb narrowing still wins immediately. Never feed the cap into curb
+    # qualification, filtered width, opening detection or paint-width learning.
+    self.applied_width = min(raw_width, previous + float(np.clip(target - previous, -EDGE_MAX_WIDTH_RATE * dt, EDGE_MAX_WIDTH_RATE * dt)))
+    if self.width is None and self.applied_width >= raw_width:
+      self.applied_width = None
+      return
+    if candidate.available:
+      candidate.y = opposite + direction * self.applied_width
+    if candidate.memory_y is not None:
+      memory_width = float(np.min(direction * (candidate.memory_y - opposite)))
+      candidate.memory_y = opposite + direction * min(memory_width, self.applied_width)
 
 
 class PaintWidthMemory:
@@ -121,6 +205,7 @@ class PaintWidthMemory:
 
 class EdgeBoundary:
   def __init__(self):
+    self.inner_line = InnerLineConstraint()
     self.reset()
 
   def forget_memory(self):
@@ -133,6 +218,7 @@ class EdgeBoundary:
   def reset(self, keep_memory=False):
     if not keep_memory:
       self.forget_memory()
+      self.inner_line.reset()
       self.previous_anchor = None
     self.memory_guided = False
     self.memory_returns = 0
@@ -385,5 +471,7 @@ class RoadEdgePolicy:
         candidate.update(lines[2 - side], edges[side], probs[2 - side], stds[side], x, speed, dt)
         if self.inactive_time >= EDGE_DISENGAGE_TIME - 1e-6:
           candidate.forget_memory()
+        candidate.inner_line.update(candidate, lines[2 - side], lines[1 + side], edges[side], probs[2 - side], probs[1 + side],
+                                    stds[side], x, speed, dt, self.inactive_time < EDGE_DISENGAGE_TIME - 1e-6)
     except (KeyError, IndexError, TypeError, ValueError):
       self.reset()
