@@ -287,7 +287,9 @@ class LanePolicy:
     state.leftSource, state.rightSource = sources
     for message, edge in zip(state.init('edges', 2), self.road_edges.edges, strict=True):
       message.available = enabled and edge.available
-      message.held = enabled and edge.available and (edge.held or edge.memory_guided)
+      paint_constrained = (edge.inner_line.from_paint and edge.inner_line.applied_width is not None and
+                           edge.width is not None and edge.inner_line.applied_width < edge.width - 1e-6)
+      message.held = enabled and edge.available and (edge.held or edge.memory_guided or paint_constrained)
       message.memoryOnly = enabled and not edge.available and edge.memory_y is not None
       y = edge.y if message.available else edge.memory_y if message.memoryOnly else None
       message.y = y.tolist() if y is not None else []

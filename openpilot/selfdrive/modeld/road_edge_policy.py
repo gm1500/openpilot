@@ -45,17 +45,19 @@ class InnerLineConstraint:
 
   def reset(self):
     self.width = self.applied_width = None
+    self.from_paint = False
+    self.paint_returns = 0
     self.age = self.distance = self.clock = self.pause = 0.0
     self.history = deque(maxlen=EDGE_ARM_FRAMES)
     self.previous_anchor = None
 
-  def update(self, candidate, opposite, line, edge, opposite_prob, line_prob, edge_std, x, speed, dt, allowed):
+  def update(self, candidate, opposite, line, edge, opposite_prob, line_prob, edge_std, x, speed, dt, allowed, paint_memory):
     near = (x >= 0.0) & (x <= 20.0)
     fit = (x >= EDGE_FIT_START) & (x <= EDGE_FIT_END)
     horizon = (x >= 0.0) & (x <= EDGE_FIT_END)
     anchor = opposite[near]
     if (not allowed or not np.isfinite(opposite).all() or not np.isfinite(opposite_prob) or
-        opposite_prob < EDGE_BRIDGE_RETAIN_PROB or np.count_nonzero(fit) < 4 or
+        opposite_prob < 0.70 or np.count_nonzero(fit) < 4 or
         (self.previous_anchor is not None and np.max(np.abs(anchor - self.previous_anchor)) > EDGE_MAX_ANCHOR_STEP + 1e-6)):
       self.reset()
       return
@@ -63,6 +65,18 @@ class InnerLineConstraint:
     self.clock += dt
     self.age += dt
     self.distance += max(speed, 0.0) * dt
+    if opposite_prob < EDGE_BRIDGE_RETAIN_PROB:
+      # The ordinary observed-curb policy may still retain this painted anchor.
+      # Discard the learned constraint, but unwind its output at the normal
+      # width rate instead of jumping outward to the curb on a confidence dip.
+      self.width = None
+      self.from_paint = False
+      self.paint_returns = 0
+      self.history.clear()
+    if self.from_paint and (paint_memory.width is None or abs(self.width - paint_memory.width) > EDGE_STABLE_HISTORY_SPREAD):
+      self.width = None
+      self.from_paint = False
+      self.paint_returns = 0
     direction = candidate.direction
     widths = direction * (line - opposite)
     gaps = direction * (edge - line)
@@ -80,6 +94,9 @@ class InnerLineConstraint:
     while self.history and self.clock - self.history[0][0] > EDGE_ARM_WINDOW:
       self.history.popleft()
     earns = geometry and observed and opposite_prob >= EDGE_ARM_PROB and line_prob >= INNER_LINE_ARM_PROB
+    paint_matches = (earns and paint_memory.width is not None and
+                     np.max(np.abs(widths[horizon] - paint_memory.width)) <= EDGE_STABLE_HISTORY_SPREAD)
+    self.paint_returns = self.paint_returns + 1 if paint_matches else 0
     if earns:
       self.pause = 0.0
       self.history.append((self.clock, median))
@@ -87,6 +104,7 @@ class InnerLineConstraint:
         low, center, high = np.percentile([width for _, width in self.history], (10, 50, 90))
         if high - low <= EDGE_STABLE_HISTORY_SPREAD and abs(median - center) <= EDGE_STABLE_HISTORY_SPREAD:
           self.width = float(center)
+          self.from_paint = False
           self.age = self.distance = 0.0
     else:
       self.pause += dt
@@ -94,8 +112,16 @@ class InnerLineConstraint:
       if (not geometry or not observed or line_prob < INNER_LINE_PAUSE_PROB or not agrees or
           self.pause > EDGE_ARM_PAUSE_TIME + 1e-6):
         self.history.clear()
+    if self.width is None and self.paint_returns >= EDGE_MEMORY_FRAMES:
+      # A recent strong two-paint width can confirm the inward constraint with
+      # six fresh agreeing observations. It does not seed or qualify the wider
+      # curb. Inherit its age/distance; weak lines cannot renew painted memory.
+      self.width = paint_memory.width
+      self.age, self.distance = paint_memory.age, paint_memory.distance
+      self.from_paint = True
     if self.age > EDGE_MEMORY_TIME + 1e-6 or self.distance > EDGE_MEMORY_DISTANCE + 1e-6:
       self.width = None
+      self.from_paint = False
     raw_width = candidate.width if candidate.available else (
       float(np.min(direction * (candidate.memory_y - opposite))) if candidate.memory_y is not None else None)
     if raw_width is None:
@@ -127,6 +153,7 @@ class PaintWidthMemory:
   def reset(self):
     self.width = None
     self.age = self.distance = 0.0
+    self.clock = self.pause = 0.0
     self.history = deque(maxlen=EDGE_ARM_FRAMES)
     self.previous = None
     self.continuous = np.zeros(2, dtype=bool)
@@ -136,6 +163,9 @@ class PaintWidthMemory:
     if not allowed:
       self.reset()
       return
+    self.clock += dt
+    while self.history and self.clock - self.history[0][0] > EDGE_ARM_WINDOW:
+      self.history.popleft()
     anchor = (x >= 0.0) & (x <= 20.0)
     near = (x >= 0.0) & (x <= 10.0)
     horizon = (x >= 0.0) & (x <= EDGE_FIT_END)
@@ -157,13 +187,21 @@ class PaintWidthMemory:
         self.width = None
         self.history.clear()
     strong = np.all(finite) and np.min(probs) >= EDGE_ARM_PROB
-    if not strong:
+    if not np.all(finite):
       self.history.clear()
       return
     widths = lines[1] - lines[0]
     low, median, high = np.percentile(widths[fit], (10, 50, 90))
     valid = (np.min(widths[horizon]) >= EDGE_MIN_WIDTH and np.max(widths[horizon]) <= EDGE_MAX_WIDTH and
              high - low <= EDGE_STABLE_SPREAD and np.max(lines[0, near]) <= -0.3 and np.min(lines[1, near]) >= 0.3)
+    if not strong:
+      self.pause += dt
+      agrees = bool(self.history) and abs(median - np.median([width for _, width in self.history])) <= EDGE_STABLE_HISTORY_SPREAD
+      if (not valid or not np.all(self.continuous) or np.min(probs) < EDGE_ARM_PAUSE_PROB or
+          not agrees or self.pause > EDGE_ARM_PAUSE_TIME + 1e-6):
+        self.history.clear()
+      return  # Paused observations cannot teach width or refresh its lease.
+    self.pause = 0.0
     if not valid:
       self.width = None
       self.history.clear()
@@ -174,9 +212,9 @@ class PaintWidthMemory:
       self.history.clear()
     if not np.all(self.continuous):
       self.history.clear()
-    self.history.append(float(median))
+    self.history.append((self.clock, float(median)))
     if len(self.history) == self.history.maxlen:
-      low, center, high = np.percentile(self.history, (10, 50, 90))
+      low, center, high = np.percentile([width for _, width in self.history], (10, 50, 90))
       if high - low <= EDGE_STABLE_HISTORY_SPREAD and abs(median - center) <= EDGE_STABLE_HISTORY_SPREAD:
         self.width = float(center)
         self.age = self.distance = 0.0
@@ -472,6 +510,6 @@ class RoadEdgePolicy:
         if self.inactive_time >= EDGE_DISENGAGE_TIME - 1e-6:
           candidate.forget_memory()
         candidate.inner_line.update(candidate, lines[2 - side], lines[1 + side], edges[side], probs[2 - side], probs[1 + side],
-                                    stds[side], x, speed, dt, self.inactive_time < EDGE_DISENGAGE_TIME - 1e-6)
+                                    stds[side], x, speed, dt, self.inactive_time < EDGE_DISENGAGE_TIME - 1e-6, self.paint_memory)
     except (KeyError, IndexError, TypeError, ValueError):
       self.reset()

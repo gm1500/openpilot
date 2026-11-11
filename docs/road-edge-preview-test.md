@@ -377,8 +377,8 @@ and did not establish that a longer hold would fail.
 of `LanePolicy.width` and that existing one-line hold's 9.95 s smoothing. It does
 not reuse the old filter or teach painted width from a road edge.
 
-Acquisition requires 15 consecutive observations with both inner painted-line
-probabilities at least 0.92, a corridor bracketing the vehicle, widths within
+Acquisition requires 15 strong observations within 1.25 s, with both inner
+painted-line probabilities at least 0.92, a corridor bracketing the vehicle, widths within
 3.0–4.6 m at every station through 55 m, spatial width spread at most 0.50 m and
 temporal span/latest deviation at most 0.20 m. Near paint must move continuously.
 A confident changed or implausible painted corridor invalidates the old reference
@@ -450,7 +450,9 @@ gate and the opposite painted line remains the geometry anchor.
   for up to 5 s or 100 m, then smoothly unwinds it toward the qualified curb.
   Only another complete qualifying window renews this reference. Opposite paint
   below 0.85, anchor jumps, lane-change/reset conditions and long disengagement
-  clear it. It cannot extend active edge hold or permit memory-only steering.
+  discard the reference. When ordinary observed-edge retention still permits
+  centering, a confidence-only loss unwinds the applied constraint gradually.
+  It cannot extend active edge hold or permit memory-only steering.
 
 The constraint does not alter raw curb width, edge admission, opening detection,
 paint-width learning, centering gains, or the speed-dependent curve pause. UI
@@ -484,3 +486,70 @@ confidence pauses, false/crossing lines, narrow corridors, source priority,
 expiry, output slew and reset paths. Recorded model actions already include the
 recording policy's correction. This is open-loop boundary/selection regression;
 closed-loop curb clearance and handling still require a controlled vehicle test.
+
+### Follow-up: confidence-resilient width learning and constraint release
+
+The same seven segments expose two further weaknesses: a modest paint-confidence
+step used to discard all partial width-learning progress, and an opposite-anchor
+confidence dip below 0.85 immediately removed an inward constraint even while
+ordinary observed-curb centering remained valid down to 0.70. That second
+transition could move the target toward the curb abruptly.
+
+Paint-width learning now uses 15 **strong** observations within 1.25 s. Confidence
+between 0.85 and 0.92 on either side may pause progress for at most 0.25 s, provided
+both line shapes stay continuous, the corridor remains valid, and its width stays
+within 0.20 m of the earned history. Paused frames never teach width, renew its
+age/distance or replenish an edge hold. Weak, changed, jumping or stale evidence
+still clears partial learning; the reference remains bounded by 5 s / 100 m.
+
+A recent two-paint reference can also confirm the inward constraint after six
+consecutive fresh observations (0.30 s at 20 Hz). Every station through 55 m must
+match that learned width within 0.20 m, while all existing inward-line confidence,
+curb-gap, width and bracketing tests still pass. The curb must qualify separately;
+a narrower learned lane cannot accelerate admission of a wider shoulder. The
+constraint inherits the painted reference's age and distance. Its disappearance
+or a confident incompatible width invalidates the transferred reference, and
+only a full independent inward-line qualification can renew it. When this
+paint-memory constraint actually narrows an available edge, the virtual side uses
+memory yellow, thick only while actively used for centering.
+
+On an opposite-anchor dip below 0.85, discard the inward width reference as before.
+If the normal observed-curb policy still allows centering, unwind the applied
+constraint at the existing 0.20 m/s width rate instead of snapping outward. This
+is a release transition, not new permission to follow weak paint: loss below
+0.70, anchor jumps, invalid curb geometry and other policy resets still release
+the edge normally. Fresh curb narrowing retains its immediate inward cap.
+
+Compared with `5e28ef8`, replay of the seven new segments gives:
+
+| Measurement | Before | Updated |
+| --- | ---: | ---: |
+| Strong observations qualifying/refreshing painted width | 44.75 s | 50.85 s |
+| Valid painted-width reference available | 59.15 s | 65.40 s |
+| Active target constrained inward by more than 5 mm | 54.35 s | 58.30 s |
+| Edge available | 88.95 s | 88.95 s |
+| Active controlling edge | 75.55 s | 75.55 s |
+
+The target differs during 4.30 s of active centering, with all those changes
+inward relative to the preceding version (median 15.2 cm, maximum 26.1 cm).
+The largest difference is near segment 10, 1.5 s, following the abrupt loss of
+its inward constraint. Returned curvature differs for 4.10 s because target
+changes can be suppressed by existing deadbands or guards. These are target
+comparisons, not measured curb clearance or vehicle displacement.
+
+Across the earlier eleven segments, reference availability increases from
+16.00 to 17.70 s and inward-constrained active time from 80.70 to 85.00 s. Active
+edge time remains 107.45 s. No previously active frames are lost in all 21,600
+replayed model frames. Faster paint-assisted edge acquisition is still not
+exercised by these recordings. Six-frame inward-constraint transfer occurs before
+active use; its active yellow state, age inheritance and rejection paths have
+synthetic coverage. The observed benefit is more resilient width learning and
+smoother constraint release, without additional edge-centering engagement time.
+
+Validation: 189 focused tests, including a new anonymized four-second painted-line
+trace, short versus disjoint/stale confidence dips, both boundary sides, current
+shape agreement, source change/expiry, independent curb qualification, gradual
+release and yellow memory display. Existing regression fixtures, Python lint,
+compilation and whitespace checks pass. Hold budgets, curve-pause interpolation,
+centering gains and correction limits remain unchanged. Closed-loop handling
+still requires vehicle evaluation.
