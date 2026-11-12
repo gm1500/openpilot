@@ -89,6 +89,39 @@ def test_noisy_inward_caps_do_not_ratchet_width_or_disqualify_a_steady_curb():
     assert p.edges[1].width == pytest.approx(4.0)
 
 
+@pytest.mark.parametrize('side', [0, 1])
+@pytest.mark.parametrize('distance', [18.75, 31.6875, 54.1875])
+@pytest.mark.parametrize('std', [0.3, 0.8])
+def test_virtual_edge_and_memory_stay_inside_every_inward_sample(side, distance, std):
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  m = model_output(width=4.0, left_prob=0.99 if side else 0.0, right_prob=0.0 if side else 0.99)
+  for _ in range(30):
+    p.update(m, x, 10.0)
+  direction = -1 if side == 0 else 1
+  m['road_edges'][0, side, x == distance, 0] -= direction * 0.25
+  m['road_edges_stds'][:] = std
+  p.update(m, x, 10.0)
+  e = p.edges[side]
+  assert e.available
+  for boundary in (e.y, e.memory_y):
+    assert boundary is not None
+    assert np.max(direction * (boundary - m['road_edges'][0, side, :, 0])[x <= 55.0]) <= 1e-8
+
+
+@pytest.mark.parametrize('side', [0, 1])
+def test_single_deep_inward_intrusion_rejects_even_when_percentiles_pass(side):
+  p = RoadEdgePolicy()
+  x = np.asarray(ModelConstants.X_IDXS)
+  m = model_output(width=4.0, left_prob=0.99 if side else 0.0, right_prob=0.0 if side else 0.99)
+  for _ in range(30):
+    p.update(m, x, 10.0)
+  m['road_edges'][0, side, x == 31.6875, 0] -= (-1 if side == 0 else 1) * 1.1
+  p.update(m, x, 10.0)
+  assert not p.edges[side].available
+  assert p.edges[side].memory_y is None
+
+
 def test_recorded_steady_curb_keeps_continuity_after_qualification():
   # Five seconds of boundary observations; no GPS, images or vehicle identifiers.
   frames = json.loads((Path(__file__).parent / 'fixtures' / 'steady_curb.json').read_text())['frames']
