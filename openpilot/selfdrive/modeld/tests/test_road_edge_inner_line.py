@@ -158,6 +158,7 @@ def test_policy_resets_discard_the_constraint(reset):
     options['frame_time'] = 11.0
   elif reset == 'disengage':
     options['lateral_active'] = False
+    m = inward_line(probability=0.0)
     count = 100
   elif reset == 'anchor_jump':
     m['lane_lines'][0, 1, :, 0] += 0.3
@@ -165,6 +166,34 @@ def test_policy_resets_discard_the_constraint(reset):
     m['road_edges'][0, 1, :, 0] += 0.3
   tick(p, m, count, **options)
   assert p.road_edges.edges[1].inner_line.width is None
+
+
+@pytest.mark.parametrize('side', [0, 1])
+def test_disengaged_preview_uses_fresh_inner_evidence_but_cannot_hold_old_width(side):
+  p = RoadEdgePolicy()
+  m = inward_line(side)
+  update(p, m, 220, lateral_active=False)
+  e = p.edges[side]
+  assert e.available and not e.held
+  assert e.memory_width is None and p.paint_memory.width is None
+  assert e.inner_line.width == pytest.approx(3.6)
+  np.testing.assert_allclose(e.y, m['lane_lines'][0, 1 + side, :, 0])
+  update(p, inward_line(side, probability=0.0), 6, lateral_active=False)
+  assert e.inner_line.width is None
+  assert e.available  # loss of the weak line does not invent stronger evidence
+  assert e.memory_width is None
+
+
+@pytest.mark.parametrize('side', [0, 1])
+def test_disengaged_weak_line_never_qualifies_an_uncertain_or_wide_edge(side):
+  for std, width in [(0.8, 4.0), (0.3, 6.0)]:
+    p = RoadEdgePolicy()
+    m = inward_line(side)
+    opposite = m['lane_lines'][0, 2 - side, :, 0]
+    m['road_edges'][0, side, :, 0] = opposite + (-1 if side == 0 else 1) * width
+    m['road_edges_stds'][:] = std
+    update(p, m, 240, lateral_active=False)
+    assert not p.edges[side].available
 
 
 def test_two_confident_painted_lines_still_win():

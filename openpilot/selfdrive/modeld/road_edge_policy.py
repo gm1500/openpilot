@@ -56,7 +56,7 @@ class InnerLineConstraint:
     fit = (x >= EDGE_FIT_START) & (x <= EDGE_FIT_END)
     horizon = (x >= 0.0) & (x <= EDGE_FIT_END)
     anchor = opposite[near]
-    if (not allowed or not np.isfinite(opposite).all() or not np.isfinite(opposite_prob) or
+    if (not np.isfinite(opposite).all() or not np.isfinite(opposite_prob) or
         opposite_prob < 0.70 or np.count_nonzero(fit) < 4 or
         (self.previous_anchor is not None and np.max(np.abs(anchor - self.previous_anchor)) > EDGE_MAX_ANCHOR_STEP + 1e-6)):
       self.reset()
@@ -65,6 +65,10 @@ class InnerLineConstraint:
     self.clock += dt
     self.age += dt
     self.distance += max(speed, 0.0) * dt
+    if not allowed and self.from_paint:
+      self.width = None
+      self.from_paint = False
+      self.paint_returns = 0
     if opposite_prob < EDGE_BRIDGE_RETAIN_PROB:
       # The ordinary observed-curb policy may still retain this painted anchor.
       # Discard the learned constraint, but unwind its output at the normal
@@ -94,7 +98,7 @@ class InnerLineConstraint:
     while self.history and self.clock - self.history[0][0] > EDGE_ARM_WINDOW:
       self.history.popleft()
     earns = geometry and observed and opposite_prob >= EDGE_ARM_PROB and line_prob >= INNER_LINE_ARM_PROB
-    paint_matches = (earns and paint_memory.width is not None and
+    paint_matches = (allowed and earns and paint_memory.width is not None and
                      np.max(np.abs(widths[horizon] - paint_memory.width)) <= EDGE_STABLE_HISTORY_SPREAD)
     self.paint_returns = self.paint_returns + 1 if paint_matches else 0
     if earns:
@@ -119,7 +123,12 @@ class InnerLineConstraint:
       self.width = paint_memory.width
       self.age, self.distance = paint_memory.age, paint_memory.distance
       self.from_paint = True
-    if self.age > EDGE_MEMORY_TIME + 1e-6 or self.distance > EDGE_MEMORY_DISTANCE + 1e-6:
+    # Disengagement expires learned bounds, not fresh inward evidence. The
+    # preview must not widen toward a railing just because steering is off.
+    # Without the memory lease, only the short qualification pause may bridge
+    # missing evidence; a weak line still cannot qualify or renew the curb.
+    hold_time = EDGE_MEMORY_TIME if allowed else EDGE_ARM_PAUSE_TIME
+    if self.age > hold_time + 1e-6 or self.distance > EDGE_MEMORY_DISTANCE + 1e-6:
       self.width = None
       self.from_paint = False
     raw_width = candidate.width if candidate.available else (
@@ -327,6 +336,7 @@ class EdgeBoundary:
     # Both bounds must bracket the car; a nearby parallel road is not our lane.
     fit = (x >= EDGE_FIT_START) & (x <= EDGE_FIT_END)
     near = (x >= 0.0) & (x <= 10.0)
+    horizon = (x >= 0.0) & (x <= EDGE_FIT_END)
     direction = self.direction
     valid = (np.isfinite(opposite).all() and np.isfinite(edge).all() and
              np.isfinite(opposite_prob) and np.isfinite(edge_std) and edge_std >= 0 and
@@ -336,9 +346,10 @@ class EdgeBoundary:
       return
     widths = direction * (edge - opposite)
     low, median, high = np.percentile(widths[fit], (10, 50, 90))
+    inward_width = float(np.min(widths[horizon]))
     # A narrowed/inverted corridor, lost real line, or an implausible near edge
     # invalidates immediately. Only brief outward openings/uncertainty may coast.
-    hard_invalid = (low < EDGE_MIN_WIDTH or np.min(widths[near]) < EDGE_MIN_WIDTH or
+    hard_invalid = (inward_width < EDGE_MIN_WIDTH or
                     np.max(direction * opposite[near]) > -0.3 or np.min(direction * edge[near]) < 0.3)
     if hard_invalid:
       self.reset()
@@ -370,14 +381,14 @@ class EdgeBoundary:
         return
       self.forget_memory()
       self._clear_qualification()
-    if self.memory_width is not None and min(low, np.min(widths[near])) < self.memory_width - EDGE_MAX_HISTORY_SPREAD:
+    if self.memory_width is not None and inward_width < self.memory_width - EDGE_MAX_HISTORY_SPREAD:
       # A currently observed, compatible edge can cap inward immediately. An
       # unsupported inward jump must discard the prior and qualify again.
       if not observed or self.held or self.memory_guided:
         self.reset()
         return
       self.forget_memory()
-    self.memory_y = (opposite + direction * min(self.memory_width, float(low), float(np.min(widths[near])))
+    self.memory_y = (opposite + direction * min(self.memory_width, inward_width)
                      if self.memory_width is not None else None)
     # A single returning frame must not replenish a long gap's time/distance
     # budget. Keep the width frozen until three consecutive observations agree.
@@ -428,7 +439,10 @@ class EdgeBoundary:
       # beyond a credible edge merely because its earlier width was greater.
       # The instantaneous inward cap is not fed back into the width filter.
       # Otherwise repeated noisy lows ratchet it down and reject good geometry.
-      self.width = min(self.filtered_width, float(low), float(np.min(widths[near])))
+      # Percentiles qualify the overall shape, but cannot hide a single inward
+      # intrusion. Bound every sample used by lane centering, including bends
+      # beyond the near-car window, without teaching the cap into the filter.
+      self.width = min(self.filtered_width, inward_width)
       if qualified_width is not None:
         self.memory_width, self.memory_median = self.width, float(median)
         self.memory_from_paint = False
@@ -444,7 +458,7 @@ class EdgeBoundary:
       # Compare like geometry: a valid curved corridor's lower width can be
       # below its median. Freeze the pre-gap cap so inward steps cannot ratchet
       # the extension reference inward from one held frame to the next.
-      outward = min(low, np.min(widths[near])) >= self.gap_width - EDGE_MAX_HISTORY_SPREAD
+      outward = inward_width >= self.gap_width - EDGE_MAX_HISTORY_SPREAD
       self.gap_extendable &= outward
       hold_time, hold_distance = EDGE_HOLD_TIME, EDGE_HOLD_DISTANCE
       if self.gap_extendable:
@@ -456,7 +470,7 @@ class EdgeBoundary:
       self.held = True
       # Even a held hypothesis must not extend beyond a newly observed inward
       # edge. This cap cannot turn a large jump into an accepted observation.
-      self.width = min(self.width, float(low), float(np.min(widths[near])))
+      self.width = min(self.width, inward_width)
     else:
       self.observed_frames = 0
       self._clear_qualification()
