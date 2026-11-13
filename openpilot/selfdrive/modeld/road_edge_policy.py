@@ -36,6 +36,9 @@ EDGE_FIT_START, EDGE_FIT_END = 5.0, 55.0
 INNER_LINE_ARM_PROB, INNER_LINE_PAUSE_PROB = 0.10, 0.05
 INNER_LINE_MIN_GAP, INNER_LINE_MAX_GAP = 0.10, 0.80
 INNER_LINE_MAX_SPREAD = 0.35
+WIDTH_SUPPORT_TIME = 8.0  # s of confirmed paint, not time spent holding a width
+WIDTH_MEMORY_WEIGHT = 4.0
+WIDTH_POSITION_RATE = 0.20  # m/s of width; at most 0.10 m/s of center movement
 
 
 class InnerLineConstraint:
@@ -250,6 +253,101 @@ class PaintWidthMemory:
     self.used[side] = True
 
 
+class WidthReference:
+  """Independent painted-width evidence for positioning an already qualified edge.
+
+  A lower quartile of qualified window medians represents a repeatedly observed
+  narrow width. Neither raw minima, edge observations nor our outputs teach it.
+  """
+  def __init__(self):
+    self.reset()
+
+  def reset(self):
+    self.width = self.typical = None
+    self.support = self.confidence = self.variation = 0.0
+    self.samples = deque(maxlen=round(WIDTH_SUPPORT_TIME / DT))
+
+  def update(self, paint, dt):
+    if paint.width is None:
+      self.reset()
+      return
+    if self.typical is not None and abs(paint.width - self.typical) > EDGE_STABLE_HISTORY_SPREAD:
+      self.reset()
+    if paint.age == 0.0:
+      # PaintWidthMemory only resets age after a fresh, stable two-line window.
+      self.support = min(WIDTH_SUPPORT_TIME, self.support + dt) if self.samples else EDGE_ARM_FRAMES * DT
+      self.samples.append(paint.width)
+      low, self.width, self.typical, high = np.percentile(self.samples, (10, 25, 50, 90))
+      self.variation = float(high - low)
+    if self.width is None:
+      return
+    maturity = 0.25 + 0.75 * min(self.support / WIDTH_SUPPORT_TIME, 1.0)
+    quality = float(np.interp(self.variation, [0.0, EDGE_STABLE_HISTORY_SPREAD], [1.0, 0.5]))
+    freshness = max(0.0, 1.0 - paint.age / EDGE_MEMORY_TIME) * max(0.0, 1.0 - paint.distance / EDGE_MEMORY_DISTANCE)
+    self.confidence = maturity * quality * freshness
+
+  def apply(self, candidate, opposite, opposite_prob, missing_prob, edge_std, x, output, dt):
+    candidate.width_weighted = False
+    boundary = candidate.y if candidate.available else candidate.memory_y
+    if boundary is None:
+      candidate.position_width = None
+      return
+    horizon = (x >= 0.0) & (x <= EDGE_FIT_END)
+    base_width = float(np.min(candidate.direction * (boundary - opposite)[horizon]))
+    target = base_width
+    if (self.width is not None and self.confidence > 0.0 and opposite_prob >= EDGE_BRIDGE_RETAIN_PROB and
+        missing_prob < 0.70 and base_width > self.width):
+      # A widening estimate competes with independent paint memory. Existing
+      # inward constraints have already run and cannot be relaxed by this blend.
+      edge_weight = float(np.interp(edge_std, [0.20, EDGE_RETAIN_STD], [1.0, 0.25]))
+      center_difference = (base_width - self.width) / 2.0
+      edge_weight *= float(np.interp(center_difference, [0.10, 0.40], [1.0, 0.15]))
+      edge_weight *= self._path_weight(output, x, opposite, candidate.direction, self.width, base_width)
+      memory_weight = WIDTH_MEMORY_WEIGHT * self.confidence
+      target = (memory_weight * self.width + edge_weight * base_width) / (memory_weight + edge_weight)
+    if candidate.position_width is None:
+      if target >= base_width - 1e-6:
+        return
+      # A newly qualified edge has no prior edge target to slew from. Choose
+      # the weighted target before LanePolicy starts its existing engage ramp.
+      candidate.position_width = target
+    else:
+      candidate.position_width += float(np.clip(target - candidate.position_width, -WIDTH_POSITION_RATE * dt, WIDTH_POSITION_RATE * dt))
+    candidate.position_width = min(candidate.position_width, base_width)
+    candidate.width_weighted = bool(candidate.position_width < base_width - 1e-6)
+    if candidate.available:
+      candidate.y = opposite + candidate.direction * candidate.position_width
+    if candidate.memory_y is not None:
+      memory_width = float(np.min(candidate.direction * (candidate.memory_y - opposite)[horizon]))
+      candidate.memory_y = opposite + candidate.direction * min(memory_width, candidate.position_width)
+    if not candidate.width_weighted:
+      candidate.position_width = None
+
+  @staticmethod
+  def _path_weight(output, x, opposite, direction, reference_width, edge_width):
+    # E2E can lower trust in a wider edge; it never becomes a centering target
+    # or qualifies a boundary. No extrapolation or comparison of curve origins.
+    try:
+      plan = np.asarray(output['plan'][0, :, :2], dtype=float)
+      if (plan.ndim != 2 or plan.shape[1] != 2 or len(plan) < 4 or not np.isfinite(plan).all() or
+          np.any(np.diff(plan[:, 0]) <= 0.0) or plan[0, 0] > 8.0 or plan[-1, 0] < 30.0):
+        return 1.0
+      shared = (x >= 8.0) & (x <= min(EDGE_FIT_END, plan[-1, 0]))
+      if np.count_nonzero(shared) < 4:
+        return 1.0
+      e2e = np.interp(x[shared], plan[:, 0], plan[:, 1])
+      remembered = opposite[shared] + direction * reference_width / 2.0
+      current = opposite[shared] + direction * edge_width / 2.0
+      remembered_error = np.abs(remembered - e2e)
+      # Require consistent support across the fit, not a single crossing point.
+      improvement = np.percentile(np.abs(current - e2e) - remembered_error, 25)
+      if np.percentile(remembered_error, 90) > 0.35:
+        return 1.0
+      return float(np.interp(improvement, [0.05, 0.25], [1.0, 0.10]))
+    except (KeyError, IndexError, TypeError, ValueError):
+      return 1.0
+
+
 class EdgeBoundary:
   def __init__(self):
     self.inner_line = InnerLineConstraint()
@@ -270,6 +368,8 @@ class EdgeBoundary:
     self.memory_guided = False
     self.memory_returns = 0
     self.available = self.held = False
+    self.width_weighted = False
+    self.position_width = None
     self.width = None
     self.filtered_width = self.observed_width = None
     self.observed_frames = 0
@@ -482,6 +582,7 @@ class RoadEdgePolicy:
   def __init__(self):
     self.edges = [EdgeBoundary(), EdgeBoundary()]
     self.paint_memory = PaintWidthMemory()
+    self.width_reference = WidthReference()
     self.edges[0].direction, self.edges[1].direction = -1, 1
     self.last_time = None
     self.inactive_time = 0.0
@@ -490,6 +591,7 @@ class RoadEdgePolicy:
     for edge in self.edges:
       edge.reset()
     self.paint_memory.reset()
+    self.width_reference.reset()
     self.last_time = None
     self.inactive_time = 0.0
 
@@ -504,6 +606,12 @@ class RoadEdgePolicy:
       self.last_time = frame_time
     self.inactive_time = 0.0 if lateral_active else self.inactive_time + dt
     try:
+      # Turn intent changes the road association. Ordinary curves do not. The
+      # caller also resets all memory on blinkers and lane-change intent.
+      desire = np.asarray(output['desire_state'][0], dtype=float)
+      if not np.isfinite(desire[:5]).all() or float(desire[1] + desire[2]) > 0.10:
+        self.reset()
+        return
       lines = np.asarray(output['lane_lines'][0, :, :, 0], dtype=float)
       edges = np.asarray(output['road_edges'][0, :, :, 0], dtype=float)
       stds = np.asarray(output['road_edges_stds'][0, :, 0, 0], dtype=float)
@@ -511,6 +619,7 @@ class RoadEdgePolicy:
       if lines.shape != (4, len(x)) or edges.shape != (2, len(x)) or stds.shape != (2,) or probs.shape != (4,):
         raise ValueError('invalid boundary arrays')
       self.paint_memory.update(lines[1:3], probs[1:3], x, speed, dt, self.inactive_time < EDGE_DISENGAGE_TIME - 1e-6)
+      self.width_reference.update(self.paint_memory, dt)
       for side, candidate in enumerate(self.edges):
         if candidate.memory_from_paint and (self.paint_memory.width is None or
                                            abs(candidate.memory_median - self.paint_memory.width) > EDGE_STABLE_HISTORY_SPREAD):
@@ -525,5 +634,6 @@ class RoadEdgePolicy:
           candidate.forget_memory()
         candidate.inner_line.update(candidate, lines[2 - side], lines[1 + side], edges[side], probs[2 - side], probs[1 + side],
                                     stds[side], x, speed, dt, self.inactive_time < EDGE_DISENGAGE_TIME - 1e-6, self.paint_memory)
+        self.width_reference.apply(candidate, lines[2 - side], probs[2 - side], probs[1 + side], stds[side], x, output, dt)
     except (KeyError, IndexError, TypeError, ValueError):
       self.reset()

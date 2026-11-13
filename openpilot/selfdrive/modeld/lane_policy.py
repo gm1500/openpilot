@@ -289,7 +289,7 @@ class LanePolicy:
       message.available = enabled and edge.available
       paint_constrained = (edge.inner_line.from_paint and edge.inner_line.applied_width is not None and
                            edge.width is not None and edge.inner_line.applied_width < edge.width - 1e-6)
-      message.held = enabled and edge.available and (edge.held or edge.memory_guided or paint_constrained)
+      message.held = enabled and edge.available and (edge.held or edge.memory_guided or paint_constrained or edge.width_weighted)
       message.memoryOnly = enabled and not edge.available and edge.memory_y is not None
       y = edge.y if message.available else edge.memory_y if message.memoryOnly else None
       message.y = y.tolist() if y is not None else []

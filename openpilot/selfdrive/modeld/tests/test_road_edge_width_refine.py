@@ -79,7 +79,10 @@ def test_recent_paint_width_confirms_inward_constraint_after_six_fresh_matches(s
   assert e.inner_line.age == pytest.approx(p.paint_memory.age)
   assert e.inner_line.distance == pytest.approx(p.paint_memory.distance)
   actual = e.direction * (e.y - m['lane_lines'][0, 2 - side, :, 0])
-  np.testing.assert_allclose(actual, 4.0 - 0.20 * DT)
+  assert e.inner_line.applied_width == pytest.approx(4.0 - 0.20 * DT)
+  # The independent width-confidence POC may already be farther inward; the
+  # inner-line limiter must still cap it without changing its own slew/lease.
+  assert np.max(actual) <= e.inner_line.applied_width + 1e-8
   # Only a full independent inward qualification can renew the reference.
   update(p, m, 9, speed=10.0)
   assert not e.inner_line.from_paint and e.inner_line.age == 0
