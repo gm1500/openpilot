@@ -9,6 +9,7 @@ import time
 import numpy as np
 
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
+from openpilot.selfdrive.modeld.road_edge_policy import EDGE_RECOVERY_FRAMES, RoadEdgePolicy
 
 DT = 1.0 / ModelConstants.MODEL_RUN_FREQ
 ARM_LINE_PROB = 0.92
@@ -47,7 +48,8 @@ BIAS_RELEASE_PREVIEW = 0.35                 # s
 BIAS_RELEASE_GAIN = 0.003                   # 1/(m^2 s)
 BIAS_RELEASE_RATE = 0.00008                 # 1/(m s)
 CURVE_THRESHOLD = 0.00060                   # 1/m, guard lane-target reversals in curves
-CURVE_REVERSAL_TIME = 0.15                  # s
+CURVE_REVERSAL_SPEEDS = (0.0, 100.0 / 3.6)  # m/s; low speed through highway speed
+CURVE_REVERSAL_TIMES = (0.30, 0.05)         # s; POC, rounded to model frames
 TURN_THRESHOLD = 0.00015                    # 1/m, detect meaningful E2E direction changes
 TURN_RELEASE_TIME = 0.35                    # s
 MAX_CORRECTION = 0.00045                    # 1/m
@@ -65,6 +67,10 @@ def is_enabled(value: bytes | bool | None) -> bool:
 
 def sign(value: float) -> int:
   return 1 if value > 0.0 else -1 if value < 0.0 else 0
+
+
+def curve_reversal_frames(v_ego: float) -> int:
+  return round(float(np.interp(v_ego, CURVE_REVERSAL_SPEEDS, CURVE_REVERSAL_TIMES)) / DT)
 
 
 def inner_probs(model_output: dict[str, np.ndarray]) -> tuple[float, float]:
@@ -171,6 +177,7 @@ class LanePolicy:
     self.last_mode = None
     self.last_mode_time = self.last_anchor_time = 0.0
     self.error_logged = False
+    self.road_edges = RoadEdgePolicy()
     self.reset()
 
   @property
@@ -178,7 +185,11 @@ class LanePolicy:
     """Legacy HUD status: confidence arming or temporary one-line hold."""
     return self.holding_line or (not self.active and self.arm_time > 0.0)
 
-  def reset(self) -> None:
+  def reset(self, reset_edges: bool = True) -> None:
+    if reset_edges:
+      self.road_edges.reset()
+    self.edge_side = None
+    self.paint_return_frames = 0
     self.curve_release_frames = 0
     self.active = self.holding_line = False
     self.arm_time = self.line_loss_time = self.correction = 0.0
@@ -206,8 +217,8 @@ class LanePolicy:
       self.logger.info(f"ui-lp-full-center: {mode}")
       self.last_mode, self.last_mode_time = mode, now
 
-  def _fallback(self, e2e: float, reason: str) -> float:
-    self.reset()
+  def _fallback(self, e2e: float, reason: str, reset_edges: bool = True) -> float:
+    self.reset(reset_edges)
     self._mode(reason)
     return float(e2e)
 
@@ -225,6 +236,8 @@ class LanePolicy:
       self.last_anchor_time = now
 
   def _centerline(self, output: dict[str, np.ndarray], x: np.ndarray) -> tuple[np.ndarray | None, bool]:
+    previous_edge = self.edge_side
+    self.edge_side = None
     left, right = output['lane_lines'][0, 1:3, :, 0].astype(np.float64)
     left_prob, right_prob = inner_probs(output)
     fit = (x >= WIDTH_FIT_START) & (x <= WIDTH_FIT_END)
@@ -234,12 +247,27 @@ class LanePolicy:
     valid_right = np.isfinite(right_prob) and right_prob >= RETAIN_LINE_PROB and np.all(np.isfinite(right[fit]))
     if valid_left and valid_right:
       width, valid_width = lane_width(left, right, fit)
-      if valid_width:
-        strong = min(left_prob, right_prob) >= ARM_LINE_PROB
+      strong = min(left_prob, right_prob) >= ARM_LINE_PROB
+      edge_retained = previous_edge is not None and self.road_edges.edges[previous_edge].available
+      self.paint_return_frames = self.paint_return_frames + 1 if strong and valid_width else 0
+      if valid_width and (not edge_retained or self.paint_return_frames >= round(ARM_TIME / DT)):
         self.line_loss_time, self.holding_line = 0.0, False
         if strong:
           self.width = width if self.width is None else self.width + min(DT / WIDTH_TIME, 1.0) * (width - self.width)
         return 0.5 * (left + right), strong
+    else:
+      self.paint_return_frames = 0
+    # A qualified edge replaces only the missing/weak painted side. Strong
+    # two-line geometry always wins; never teach its width from a road edge.
+    for side, candidate in enumerate(self.road_edges.edges):
+      opposite_valid = valid_right if side == 0 else valid_left
+      missing_prob = left_prob if side == 0 else right_prob
+      if candidate.available and opposite_valid and math.isfinite(missing_prob) and (missing_prob < RETAIN_LINE_PROB or previous_edge == side):
+        self.edge_side = side
+        self.holding_line = False
+        self.line_loss_time = 0.0
+        opposite = right if side == 0 else left
+        return 0.5 * (opposite + candidate.y), not candidate.held and (right_prob if side == 0 else left_prob) >= ARM_LINE_PROB
     # Preserve the existing left-line priority when two visible lines disagree.
     if self.active and self.width is not None and (valid_left or valid_right):
       self.line_loss_time += DT
@@ -247,6 +275,24 @@ class LanePolicy:
         self.holding_line = True
         return (left + self.width / 2.0 if valid_left else right - self.width / 2.0), False
     return None, False
+
+  def fill_state(self, state, enabled: bool, lateral_active: bool, steering_pressed: bool) -> None:
+    state.valid, state.enabled = True, enabled
+    state.active = enabled and self.active and lateral_active and not steering_pressed
+    sources = ['none', 'none']
+    if enabled and (self.active or self.arm_time > 0.0):
+      sources = ['painted', 'painted']
+      if self.edge_side is not None:
+        sources[self.edge_side] = 'roadEdge'
+    state.leftSource, state.rightSource = sources
+    for message, edge in zip(state.init('edges', 2), self.road_edges.edges, strict=True):
+      message.available = enabled and edge.available
+      paint_constrained = (edge.inner_line.from_paint and edge.inner_line.applied_width is not None and
+                           edge.width is not None and edge.inner_line.applied_width < edge.width - 1e-6)
+      message.held = enabled and edge.available and (edge.held or edge.memory_guided or paint_constrained or edge.width_weighted)
+      message.memoryOnly = enabled and not edge.available and edge.memory_y is not None
+      y = edge.y if message.available else edge.memory_y if message.memoryOnly else None
+      message.y = y.tolist() if y is not None else []
 
   def update_motion(self, offset: float, geometric_rate: float, allowed: bool,
                     frame_time: float | None = None) -> tuple[float, bool]:
@@ -313,15 +359,16 @@ class LanePolicy:
         self.turn_release = TURN_RELEASE_TIME
       self.last_turn_sign = direction
 
-  def _guard_correction(self, correction: float, e2e: float) -> tuple[float, bool]:
+  def _guard_correction(self, correction: float, e2e: float, v_ego: float) -> tuple[float, bool]:
     """Release stale alignment during lane-target or E2E turn reversals."""
     # A wider reversal deadband ignores small sign noise around centre. The
-    # three-frame pause cannot be extended by reversals during the pause.
+    # speed-dependent pause is captured at entry. Neither speed changes nor
+    # reversals during the pause can extend it.
     target_sign = sign(correction) if abs(correction) >= 2.0 * CORRECTION_DEADBAND else 0
     if abs(e2e) >= CURVE_THRESHOLD:
       if target_sign:
         if self.curve_release_frames == 0 and self.last_curve_sign and target_sign != self.last_curve_sign:
-          self.curve_release_frames = round(CURVE_REVERSAL_TIME / DT)
+          self.curve_release_frames = curve_reversal_frames(v_ego)
         self.last_curve_sign = target_sign
     else:
       self.last_curve_sign = 0
@@ -355,12 +402,29 @@ class LanePolicy:
       if lane_change_prob > MAX_LANE_CHANGE_PROB:
         return self._fallback(e2e_curvature, "stock-e2e fallback: lane-change intent")
       x = np.asarray(ModelConstants.X_IDXS, dtype=np.float64)
+      self.road_edges.update(model_output, x, v_ego, frame_time, lateral_active and not steering_pressed)
+      previous_edge = self.edge_side
       center, strong = self._centerline(model_output, x)
+      if previous_edge != self.edge_side:
+        self.reset_motion()
+        self.reset_bias()
       if center is None:
-        return self._fallback(e2e_curvature, "stock-e2e fallback: lane geometry or confidence")
+        return self._fallback(e2e_curvature, "stock-e2e fallback: lane geometry or confidence", reset_edges=False)
       if not self.active:
-        self.arm_time = min(self.arm_time + DT, ARM_TIME) if strong else 0.0
-        if self.arm_time < ARM_TIME:
+        if strong:
+          # The edge already earned a full window of strong painted-anchor
+          # observations. Reuse it instead of waiting a second 0.75 seconds.
+          # Held edges remain ineligible, and recovery must still settle.
+          self.arm_time = ARM_TIME if self.edge_side is not None else min(self.arm_time + DT, ARM_TIME)
+        else:
+          # A short bounded edge hold pauses qualification; it cannot earn
+          # engagement time or erase good frames while its paint stays strong.
+          held_edge = (self.edge_side is not None and self.road_edges.edges[self.edge_side].held and
+                       inner_probs(model_output)[1 - self.edge_side] >= ARM_LINE_PROB)
+          if not held_edge:
+            self.arm_time = 0.0
+        edge_settled = self.edge_side is None or self.road_edges.edges[self.edge_side].observed_frames >= EDGE_RECOVERY_FRAMES
+        if self.arm_time < ARM_TIME or not edge_settled:
           self._mode("stock-e2e fallback: arming lane confidence")
           return float(e2e_curvature)
         self.active, self.line_loss_time = True, 0.0
@@ -369,13 +433,14 @@ class LanePolicy:
       correction, error, lookahead = anchor_correction(model_output, center, x, v_ego, path_blend)
       offset, heading = near_geometry(center, x)
       self._track_turn(e2e_curvature)
-      feedback_allowed = lateral_active and not steering_pressed and strong and v_ego >= 10.0 and abs(e2e_curvature) * v_ego ** 2 < 1.5
+      feedback_allowed = (lateral_active and not steering_pressed and strong and self.edge_side is None and
+                          v_ego >= 10.0 and abs(e2e_curvature) * v_ego ** 2 < 1.5)
       motion_allowed = feedback_allowed and abs(offset) <= BIAS_MAX_OFFSET and self.turn_release <= 0.0
       geometric_rate = v_ego * heading
       rate, ready = self.update_motion(offset, geometric_rate, motion_allowed, frame_time)
       if strong and correction * offset > 0.0:
         correction *= approach_scale(offset, rate)
-      correction, guarded = self._guard_correction(soften_correction(correction), e2e_curvature)
+      correction, guarded = self._guard_correction(soften_correction(correction), e2e_curvature, v_ego)
       if guarded:
         rate, ready = geometric_rate, False
       correction += self.update_bias(offset, rate, correction, feedback_allowed and ready)
@@ -386,7 +451,7 @@ class LanePolicy:
       self.correction += float(np.clip(correction - self.correction, -step, step))
       self._record(lookahead, error, e2e_curvature, offset, rate, geometric_rate, ready, path_blend)
       self.error_logged = False
-      self._mode("anchor lane center hold" if self.holding_line else "E2E path fit")
+      self._mode("road-edge lane center" if self.edge_side is not None else "anchor lane center hold" if self.holding_line else "E2E path fit")
       return float(e2e_curvature + self.correction)
     except (KeyError, IndexError, TypeError, ValueError, FloatingPointError, np.linalg.LinAlgError) as err:
       if not self.error_logged and self.logger is not None:
