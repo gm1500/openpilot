@@ -15,6 +15,7 @@ from openpilot.common.simple_kalman import KF1D
 from openpilot.selfdrive.controls.lib.vision_lead_confidence import LeadUncertainty, VisionLeadConfidenceFilter
 from openpilot.selfdrive.controls.lib.vision_lead_tracker import VisionLeadObservation, VisionLeadTracker
 from openpilot.selfdrive.controls.lib.lead_transition import LeadTransitionRecovery
+from openpilot.selfdrive.controls.lib.lead_reacquisition import LeadReacquisitionShadow
 
 
 # Default lead acceleration decay set to 50% at 1s
@@ -187,6 +188,9 @@ class RadarD:
     self.vision_lead_tracker = VisionLeadTracker()
     self.vision_confidence_filter = VisionLeadConfidenceFilter()
     self.lead_transition_recovery = LeadTransitionRecovery()
+    self.lead_reacquisition_shadow = LeadReacquisitionShadow()
+    self.last_reacquisition_log = -math.inf
+    self.reacquisition_was_active = False
     self.last_vision_log = 0.0
 
     self.v_ego = 0.0
@@ -269,11 +273,32 @@ class RadarD:
       leads = self.lead_transition_recovery.update(
         observations, raw_leads, leads, [uncertainty.speed_std for uncertainty in uncertainties],
         timestamp, self.v_ego, yaw_rate, valid)
+      # Read-only experiment: its candidates never replace `leads`. A failure
+      # disables only the observer for this process lifetime, not lead control.
+      if self.lead_reacquisition_shadow is not None:
+        try:
+          shadow = self.lead_reacquisition_shadow
+          shadow.update(observations, raw_leads, leads, self.vision_lead_tracker.slots,
+                        timestamp, self.v_ego, yaw_rate, valid)
+          active = any(status.active for status in shadow.status)
+          if active != self.reacquisition_was_active or (active and timestamp - self.last_reacquisition_log >= .1):
+            for i, status in enumerate(shadow.status):
+              cloudlog.info(" ".join((
+                f"lead-reacquire-shadow: slot={i} reason={status.reason} active={int(status.active)}",
+                f"age={status.age:.3f} dr={status.delta_distance:.3f} dv={status.delta_speed:.3f}",
+                f"std_ratio={status.std_ratio:.2f} frames={shadow.bridge_frames[i]}",
+              )))
+            self.last_reacquisition_log = timestamp
+            self.reacquisition_was_active = active
+        except Exception:
+          cloudlog.exception("lead-reacquire-shadow disabled after observer failure")
+          self.lead_reacquisition_shadow = None
       for i, field in enumerate(('leadOne', 'leadTwo')):
         setattr(self.radar_state, field, leads[i])
         if timestamp - self.last_vision_log >= 1.0:
           track = self.vision_lead_tracker.slots[i]
           confidence = self.vision_confidence_filter.status[i]
+          shadow = self.lead_reacquisition_shadow
           cloudlog.info(" ".join((
             f"lead-pre: slot={i} mode={track.mode if track else 'fallback'}",
             f"age={track.age if track else 0.0:.2f} ready={int(track.ready) if track else 0}",
@@ -283,6 +308,8 @@ class RadarD:
             f"conf_dr={leads[i].get('dRel', 0.0) - baseline[i].get('dRel', 0.0):.3f}",
             f"conf_da={leads[i].get('aLeadK', 0.0) - baseline[i].get('aLeadK', 0.0):.3f}",
             f"lead_transition={self.lead_transition_recovery.reason} dv={self.lead_transition_recovery.correction:.2f}",
+            f"reacquire_shadow={shadow.status[i].reason if shadow is not None else 'disabled'}",
+            f"shadow_frames={shadow.bridge_frames[i] if shadow is not None else 0}",
           )))
       if timestamp - self.last_vision_log >= 1.0:
         self.last_vision_log = timestamp
@@ -290,6 +317,8 @@ class RadarD:
       self.vision_lead_tracker.reset()
       self.vision_confidence_filter.reset()
       self.lead_transition_recovery.reset()
+      if self.lead_reacquisition_shadow is not None:
+        self.lead_reacquisition_shadow.reset('missing_model')
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
