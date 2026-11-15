@@ -11,6 +11,8 @@ import math
 
 import numpy as np
 
+from openpilot.selfdrive.controls.lib.lead_continuity import LeadContinuity
+
 
 # Route-derived adaptive range tracker calibration.
 # Uploaded routes show raw dRel jitter rising from roughly 0.06 m inside 5 m
@@ -69,6 +71,8 @@ class _DistanceTrack:
   STOPPED_LEAD_CONFIRM_TIME = 0.30
   HANDOFF_SPEED_MARGIN = 5.0  # m/s; substantial range/model disagreement only
   HANDOFF_CONFIRM_TIME = 0.25
+  SINGLE_CLOSING_MAX_OFFSET = 6.0  # m/s below model, only with continuous observed motion
+  SINGLE_CLOSING_RATE = 2.5  # m/s per second; does not change Kalman covariance
 
   def __init__(self, observation: VisionLeadObservation, timestamp: float, ego: float):
     self.x = np.array([observation.distance, ego], dtype=float)
@@ -92,6 +96,8 @@ class _DistanceTrack:
     self.closing_response_offset = 0.0
     self.stopped_lead_time = 0.0
     self.handoff_time = 0.0
+    self.continuity = LeadContinuity()
+    self.single_closing_offset = 0.0
 
   def reset_output(self) -> None:
     # Unsupported or missing output must not leave a stale range/transition
@@ -105,6 +111,8 @@ class _DistanceTrack:
     self.closing_response_offset = 0.0
     self.stopped_lead_time = 0.0
     self.handoff_time = 0.0
+    self.continuity.reset('not_accepted')
+    self.single_closing_offset = 0.0
 
   def range_motion(self) -> tuple[float, float, float]:
     """Causal range slope, its standard error, and mean ego speed."""
@@ -123,7 +131,7 @@ class _DistanceTrack:
     # change implies a different car's velocity. Require sustained disagreement
     # in both the private state and range slope. Disagreement alone must not
     # discard a closing approach when the model overestimates the lead speed.
-    eligible = (observation.probability >= 0.9 and ego > 5.0 and
+    eligible = (not self.continuity.continuous and observation.probability >= 0.9 and ego > 5.0 and
                 observation.distance > max(30.0, 1.5 * ego) and baseline > ego - 3.0 and
                 min(lead['aLeadK'] for lead in leads) >= -0.15)
     inconsistent = False
@@ -297,6 +305,28 @@ class _DistanceTrack:
     else:
       self.pre_closing_offset = 0.0
 
+    # A coherent single target can establish a slower velocity before the
+    # long-range Kalman covariance qualifies. Use an upper confidence bound,
+    # corroborate closing with the private state, and only lower published
+    # speed. Never count the two model slots as independent measurements.
+    upper = self.continuity.speed_upper
+    available = 0.0
+    if (upper is not None and self.continuity.continuous and ego - max(upper, float(self.x[1])) > 2.0
+        and self.time >= self.uncertain_handoff_until):
+      available = min(self.SINGLE_CLOSING_MAX_OFFSET, max(0.0, baseline - upper))
+    step = self.SINGLE_CLOSING_RATE * self.dt
+    self.single_closing_offset += float(np.clip(available - self.single_closing_offset, -step, step))
+    # A falling model speed or disappearing closing trend must not turn the
+    # previous correction into an extra slowdown below the current evidence.
+    self.single_closing_offset = min(self.single_closing_offset, available)
+    # Ambiguity must not carry a range-derived cue into a possible new car.
+    if not self.continuity.continuous:
+      self.single_closing_offset = 0.0
+    if self.single_closing_offset > 0.0:
+      target = min(target, max(0.0, baseline - self.single_closing_offset))
+      if not use_distance:
+        mode = 'pre-closing'
+
     closing = ego - baseline
     closing_time = 8.0 if self.time < self.uncertain_handoff_until else 5.0
     urgent = min(lead['aLeadK'] for lead in leads) < -0.5 or (closing > 0.0 and min(lead['dRel'] for lead in leads) < closing_time * closing)
@@ -388,7 +418,8 @@ class VisionLeadTracker:
         return [(valid, merged)]
     return [([i], observations[i]) for i in valid]
 
-  def update(self, observations: list[VisionLeadObservation], leads: list[dict], timestamp: float, ego: float, valid: bool = True) -> list[dict]:
+  def update(self, observations: list[VisionLeadObservation], leads: list[dict], timestamp: float, ego: float, valid: bool = True,
+             yaw_rate: float | None = None) -> list[dict]:
     if not valid or len(observations) != 2 or len(leads) != 2 or not all(math.isfinite(v) for v in (timestamp, ego)):
       self.reset()
       return leads
@@ -473,6 +504,7 @@ class VisionLeadTracker:
       if not supported:
         track.reset_output()
         continue
+      track.continuity.observe(observation, timestamp, ego, yaw_rate, len(groups) == 1)
       speed = track.speed([leads[i] for i in accepted], observation, ego)
       urgent_range = track.mode in ('braking', 'stop-hold', 'stopped-lead') or timestamp < track.uncertain_handoff_until
       filtered_group_distance = track.filtered_range(observation.distance, speed, ego, track.mode == 'distance' and not urgent_range)
@@ -485,7 +517,8 @@ class VisionLeadTracker:
         d_rel = filtered_group_distance + (leads[i]['dRel'] - observation.distance)
         # Fallback hypotheses can disagree on model speed. The immature cue
         # must not replace either baseline with the other slot's lower speed.
-        slot_speed = max(0.0, leads[i]['vLead'] - track.pre_closing_offset) if track.mode == 'pre-closing' else speed
+        offset = max(track.pre_closing_offset, track.single_closing_offset)
+        slot_speed = max(0.0, leads[i]['vLead'] - offset) if track.mode == 'pre-closing' else speed
         output[i] = dict(leads[i], dRel=d_rel, vLead=slot_speed, vLeadK=slot_speed, vRel=slot_speed - ego)
 
     # Brief missing observations retain only private history, never lead presence.

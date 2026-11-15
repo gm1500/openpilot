@@ -21,7 +21,7 @@ class TestHighwayClosing(unittest.TestCase):
         raw.append({'present': True, 'radar': False, 'dRel': distance, 'yRel': lateral, 'vLead': speed, 'vLeadK': speed,
                     'vRel': speed - ego, 'aLeadK': accel, 'aLeadTau': .3, 'modelProb': filtered_prob, 'radarTrackId': -1}
                    if present else {'present': False})
-      leads = tracker.update(observations, raw, timestamp, ego, valid)
+      leads = tracker.update(observations, raw, timestamp, ego, valid, yaw_rate=yaw)
       leads = confidence.update(raw, leads, uncertainties, tracker.slots, timestamp, ego, valid)
       leads = recovery.update(observations, raw, leads, [u.speed_std for u in uncertainties], timestamp, ego, yaw, valid)
       self.assertEqual(recovery.correction, 0.)

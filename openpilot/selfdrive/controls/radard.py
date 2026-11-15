@@ -261,11 +261,11 @@ class RadarD:
         ))
       valid = self.radar_state_valid and self.ready
       raw_leads = leads
-      baseline = self.vision_lead_tracker.update(observations, raw_leads, timestamp, self.v_ego, valid)
-      leads = self.vision_confidence_filter.update(raw_leads, baseline, uncertainties, self.vision_lead_tracker.slots,
-                                                  timestamp, self.v_ego, valid)
       model = sm['modelV2']
       yaw_rate = float(model.orientationRate.z[0]) if len(model.orientationRate.z) else None
+      baseline = self.vision_lead_tracker.update(observations, raw_leads, timestamp, self.v_ego, valid, yaw_rate=yaw_rate)
+      leads = self.vision_confidence_filter.update(raw_leads, baseline, uncertainties, self.vision_lead_tracker.slots,
+                                                  timestamp, self.v_ego, valid)
       leads = self.lead_transition_recovery.update(
         observations, raw_leads, leads, [uncertainty.speed_std for uncertainty in uncertainties],
         timestamp, self.v_ego, yaw_rate, valid)
@@ -277,6 +277,7 @@ class RadarD:
           cloudlog.info(" ".join((
             f"lead-pre: slot={i} mode={track.mode if track else 'fallback'}",
             f"age={track.age if track else 0.0:.2f} ready={int(track.ready) if track else 0}",
+            f"continuity={track.continuity.reason if track else 'missing'} single_dv={track.single_closing_offset if track else 0.0:.2f}",
             f"v={leads[i].get('vLead', 0.0):.2f}",
             f"confidence={confidence.reason} gains={confidence.range_gain:.3f},{confidence.accel_gain:.3f}",
             f"conf_dr={leads[i].get('dRel', 0.0) - baseline[i].get('dRel', 0.0):.3f}",
