@@ -88,40 +88,55 @@ class TestE2ESlowingAssist(unittest.TestCase):
       self.assertFalse(self.assist.braking)
       self.assertIsNone(self.assist.accel_limit)
 
-  def test_gate_uses_model_lead_speed_instead_of_ego_or_derived_speed(self):
-    self.assertEqual(self.enter(v_ego=20 / 3.6, model_lead_speed=60 / 3.6), (0.5, False, False))
-    self.assertEqual(self.enter(model_lead_speed=55 / 3.6), (0.5, False, False))
-    self.assertEqual(self.enter(v_ego=80 / 3.6, model_lead_speed=54.9 / 3.6), (-0.5, False, True))
+  def test_either_lead_speed_can_qualify_but_ego_speed_cannot(self):
+    cases = [(60., 54.9, 80., True), (54.9, 60., 80., True),
+             (55., 55., 20., False), (60., 60., 20., False),
+             (60., 55., 80., False), (55., 60., 80., False)]
+    for model, derived, ego, qualifies in cases:
+      with self.subTest(model=model, derived=derived, ego=ego):
+        self.assist.reset()
+        lead = SimpleNamespace(present=True, dRel=20., vLead=derived / 3.6, vRel=(derived - ego) / 3.6)
+        expected = (-.5, False, True) if qualifies else (.5, False, False)
+        self.assertEqual(self.enter(lead=lead, v_ego=ego / 3.6, model_lead_speed=model / 3.6), expected)
 
   def test_lead_speed_crossing_keeps_latch_until_go_then_requires_new_qualification(self):
-    self.enter(model_lead_speed=54.9 / 3.6)
+    lead = SimpleNamespace(present=True, dRel=20., vLead=60 / 3.6, vRel=0.)
+    self.enter(lead=lead, model_lead_speed=54.9 / 3.6)
     for speed in (55., 54., 60., 54., 70.):
-      self.assertEqual(self.step(model_lead_speed=speed / 3.6), (-0.5, False, True))
+      self.assertEqual(self.step(lead=lead, model_lead_speed=speed / 3.6), (-0.5, False, True))
       self.assertTrue(self.assist.braking)
-    self.assertEqual(self.step(model_lead_speed=60 / 3.6, regular_accel=-3.), (-3., False, False))
+    self.assertEqual(self.step(lead=lead, model_lead_speed=60 / 3.6, regular_accel=-3.), (-3., False, False))
     self.assertTrue(self.assist.braking)
     previous = -3.
     for _ in range(80):
-      accel, _, _ = self.step(model_lead_speed=60 / 3.6, e2e_accel=.3)
-      self.assertLessEqual(accel - previous, RELEASE_JERK * 0.05 + 1e-8)
+      accel, _, _ = self.step(lead=lead, model_lead_speed=60 / 3.6, e2e_accel=.3)
+      self.assertLessEqual(accel - previous, RELEASE_JERK * .05 + 1e-8)
       previous = accel
     self.assertFalse(self.assist.braking)
     for _ in range(10):
-      self.assertEqual(self.step(model_lead_speed=60 / 3.6), (0.5, False, False))
-    self.assertEqual(self.step(model_lead_speed=55 / 3.6), (0.5, False, False))
-    self.assertEqual(self.step(model_lead_speed=54.9 / 3.6), (0.5, False, False))
-    self.assertEqual(self.step(model_lead_speed=55 / 3.6), (0.5, False, False))
-    self.assertEqual(self.enter(model_lead_speed=54.9 / 3.6), (-0.5, False, True))
+      self.assertEqual(self.step(lead=lead, model_lead_speed=60 / 3.6), (0.5, False, False))
+    for speed in (55., 54.9, 55.):
+      self.assertEqual(self.step(lead=lead, model_lead_speed=speed / 3.6), (0.5, False, False))
+    self.assertEqual(self.enter(lead=lead, model_lead_speed=54.9 / 3.6), (-0.5, False, True))
 
-  def test_missing_or_nonfinite_model_speed_cannot_enter_and_releases_existing_cap(self):
-    for speed in (None, math.nan, math.inf, -math.inf):
+  def test_missing_model_speed_uses_accepted_derived_speed_and_preserves_latch(self):
+    for speed in (None, math.nan, math.inf, -math.inf, -1.):
       self.assist.reset()
-      self.assertEqual(self.enter(model_lead_speed=speed), (0.5, False, False))
-      self.enter()
-      accel, stop, _ = self.step(model_lead_speed=speed)
-      self.assertAlmostEqual(accel, -0.45)
-      self.assertFalse(stop)
-      self.assertFalse(self.assist.braking)
+      self.assertEqual(self.enter(model_lead_speed=speed), (-.5, False, True))
+      self.assertTrue(self.assist.braking)
+      fast = SimpleNamespace(present=True, dRel=20., vLead=60 / 3.6, vRel=0.)
+      self.assertEqual(self.step(model_lead_speed=speed, lead=fast), (-.5, False, True))
+      self.assist.reset()
+      self.assertEqual(self.enter(model_lead_speed=speed, lead=fast), (.5, False, False))
+      self.assertEqual(self.enter(model_lead_speed=speed, lead=SimpleNamespace(present=False)), (.5, False, False))
+
+  def test_derived_speed_entry_still_requires_sustained_e2e_braking(self):
+    for _ in range(20):
+      self.assertEqual(self.step(model_lead_speed=70 / 3.6, e2e_accel=.2), (.5, False, False))
+    self.assertEqual(self.step(model_lead_speed=70 / 3.6), (.5, False, False))
+    self.assertEqual(self.enter(model_lead_speed=70 / 3.6), (-.5, False, True))
+    self.assertEqual(self.step(model_lead_speed=70 / 3.6, regular_accel=-3.), (-3., False, False))
+    self.assertEqual(self.step(eligible=False), (.5, False, False))
 
   def test_far_paced_lead_does_not_inherit_scene_braking(self):
     lead = SimpleNamespace(present=True, dRel=90., vLead=60 / 3.6, vRel=0.)

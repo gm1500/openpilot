@@ -51,10 +51,14 @@ class E2ESlowingAssist:
       self.reset()
       return regular_accel, False, False
 
-    valid_model_speed = model_lead_speed is not None and math.isfinite(model_lead_speed)
-    slow_lead = valid_model_speed and model_lead_speed < ASSIST_MAX_LEAD_SPEED
+    valid_model_speed = model_lead_speed is not None and math.isfinite(model_lead_speed) and model_lead_speed >= 0.0
+    # vLead is the accepted velocity published by radard, including qualified
+    # range-derived motion. Private/unaccepted tracks cannot qualify assistance.
+    valid_derived_speed = lead.present and lead.vLead >= 0.0
+    slow_lead = ((valid_model_speed and model_lead_speed < ASSIST_MAX_LEAD_SPEED) or
+                 (valid_derived_speed and lead.vLead < ASSIST_MAX_LEAD_SPEED))
     holding_stop = self.braking and e2e_stop and v_ego < 0.3
-    if not valid_model_speed or (not slow_lead and not self.braking) or not lead.present:
+    if not (valid_model_speed or valid_derived_speed) or (not slow_lead and not self.braking) or not lead.present:
       # A disappearing lead cannot create a new stop request, or cancel a
       # previously latched stop that the fresh model still requests at rest.
       # The speed threshold gates entry only. Once latched, use the existing

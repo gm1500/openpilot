@@ -5,8 +5,11 @@
 Use bounded early closing cues before mature range-derived lead velocity takes
 over. Inconsistent cut-ins reset tracking history without hiding current range.
 Urgent braking and stopped-lead constraints retain priority. Selective E2E lead
-slowing qualifies below a model-estimated lead speed of 55 km/h, releases on
-confirmed departure or override, and cannot weaken ordinary braking.
+slowing qualifies when either the model-estimated lead speed or radard's accepted
+lead speed (including qualified range-derived velocity) is below 55 km/h. This
+is an OR gate; ego speed is not the threshold. Either valid source can qualify
+entry, but an accepted lead and sustained E2E braking are still required.
+It releases on confirmed departure or override, and cannot weaken ordinary braking.
 
 ## Model-requested stops
 
