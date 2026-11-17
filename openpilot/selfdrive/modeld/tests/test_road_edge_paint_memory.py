@@ -138,6 +138,58 @@ def test_seed_inherits_age_and_expires_during_reacquisition():
   assert not p.road_edges.edges[1].available
 
 
+@pytest.mark.parametrize('side', [0, 1])
+@pytest.mark.parametrize('probs', [(0.837, 0.682), (0.1, 0.1)])
+def test_confidence_dip_retains_width_until_a_matching_anchor_returns(side, probs):
+  p = learned()
+  tick(p, model_output(left_prob=probs[0], right_prob=probs[1], edge_std=2), 40)
+  paint = p.road_edges.paint_memory
+  assert paint.width == pytest.approx(3.6)
+  assert paint.age == pytest.approx(2.0)
+  assert paint.distance == pytest.approx(20.0)
+  assert not any(e.available for e in p.road_edges.edges)
+
+  m = model_output(left_prob=0.99 if side else 0.1, right_prob=0.1 if side else 0.99, edge_std=0.6)
+  tick(p, m, 5)
+  assert not p.road_edges.edges[side].available
+  tick(p, m)
+  edge = p.road_edges.edges[side]
+  assert edge.available and edge.memory_guided and edge.memory_from_paint
+  assert edge.memory_time == pytest.approx(2.3)
+  assert paint.age == pytest.approx(2.3)
+  np.testing.assert_allclose(edge.y, m['lane_lines'][0, 2 - side, :, 0] + edge.direction * 3.6)
+
+
+@pytest.mark.parametrize('side', [0, 1])
+@pytest.mark.parametrize('problem', ['anchor_jump', 'wide_edge', 'inward_edge'])
+def test_retained_width_cannot_excuse_bad_geometry_on_return(side, problem):
+  p = learned()
+  tick(p, model_output(left_prob=0.1, right_prob=0.1, edge_std=2), 40)
+  m = model_output(left_prob=0.99 if side else 0.1, right_prob=0.1 if side else 0.99, edge_std=0.6)
+  if problem == 'anchor_jump':
+    m['lane_lines'][0, 2 - side, :, 0] += 0.4
+    m['road_edges'][0, side, :, 0] += 0.4
+  else:
+    m['road_edges'][0, side, :, 0] += (1 if side else -1) * (0.6 if problem == 'wide_edge' else -0.8)
+  tick(p, m, 6)
+  assert not p.road_edges.edges[side].available
+  if problem == 'anchor_jump':
+    assert p.road_edges.paint_memory.width is None
+
+
+@pytest.mark.parametrize('speed,frames', [(0.0, 100), (30.0, 66)])
+def test_confidence_dropout_cannot_extend_time_or_distance_lifetime(speed, frames):
+  p = learned()
+  m = model_output(left_prob=0.1, right_prob=0.1, edge_std=0.3)
+  for _ in range(frames):
+    p.update(m, 0.001, speed, lane_policy_enabled=True, lateral_active=True)
+  assert p.road_edges.paint_memory.width == pytest.approx(3.6)
+  p.update(m, 0.001, speed, lane_policy_enabled=True, lateral_active=True)
+  assert p.road_edges.paint_memory.width is None
+  assert p.road_edges.width_reference.width is None
+  assert not any(e.available for e in p.road_edges.edges)
+
+
 def test_painted_reference_expires_at_distance_limit():
   p = learned()
   m = model_output(edge_std=2)

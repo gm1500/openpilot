@@ -212,14 +212,12 @@ def test_trusted_memory_and_matching_e2e_cannot_qualify_bad_boundaries(problem):
   assert not any(e.available for e in p.edges)
 
 
-@pytest.mark.parametrize('reason', ['lost_anchor', 'anchor_jump', 'time', 'distance', 'disengage', 'turn'])
+@pytest.mark.parametrize('reason', ['anchor_jump', 'time', 'distance', 'disengage', 'turn'])
 def test_association_and_age_resets_clear_reference(reason):
   p = trained()
   m = wider()
   kwargs, count, speed = {}, 1, 10.0
-  if reason == 'lost_anchor':
-    m['lane_lines_prob'][0, 3] = 0.1
-  elif reason == 'anchor_jump':
+  if reason == 'anchor_jump':
     m['lane_lines'][0, 1, :, 0] -= 0.3
   elif reason == 'time':
     count, speed = 101, 0.0
@@ -231,6 +229,23 @@ def test_association_and_age_resets_clear_reference(reason):
     m['desire_state'][0, 1] = 0.5
   advance(p, m, count, speed, **kwargs)
   assert p.width_reference.width is None
+
+
+def test_lost_anchor_retains_aging_reference_without_qualifying_an_edge():
+  p = trained()
+  support, samples = p.width_reference.support, list(p.width_reference.samples)
+  m = wider()
+  m['lane_lines_prob'][0, 3] = 0.1
+  confidence = p.width_reference.confidence
+  for _ in range(40):
+    advance(p, m)
+    assert p.width_reference.width == pytest.approx(3.6)
+    assert p.width_reference.confidence < confidence
+    confidence = p.width_reference.confidence
+    assert not any(e.available or e.width_weighted for e in p.edges)
+  assert p.width_reference.support == support
+  assert list(p.width_reference.samples) == samples
+  assert p.paint_memory.age == pytest.approx(2.0)
 
 
 @pytest.mark.parametrize('reason', ['blinker', 'lane_change', 'toggle', 'frame_gap'])

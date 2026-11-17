@@ -36,8 +36,11 @@ not an independent perception sensor.
 
 Confidence combines support duration, width stability, and remaining time and
 distance budgets. Holding never increases support or refreshes the lease.
-Blinkers, lane-change intent, model turn intent, a lost/discontinuous anchor,
+Blinkers, lane-change intent, model turn intent, a reliable anchor discontinuity,
 long disengagement and stale frames invalidate the corresponding association.
+Brief confidence loss retains the learned scalar width within its original
+lifetime while use still requires current qualified geometry and a reliable
+anchor; see [width retention](road-edge-width-retention.md).
 Ordinary curves do not reset it. Turn detection uses model desire and the
 existing blinker/geometry gates; this is not map-based road identity tracking.
 

@@ -194,8 +194,12 @@ class PaintWidthMemory:
       self.age += dt
       self.distance += max(speed, 0.0) * dt
       retained = finite & (probs >= EDGE_BRIDGE_RETAIN_PROB)
+      # A confidence dip suspends use of the prior; it does not disprove the
+      # learned scalar width. Keep aging it without renewal until expiry or a
+      # reliable anchor contradicts its association. Seeding and positioning
+      # still require current qualified geometry and a confident live anchor.
       if (self.age > EDGE_MEMORY_TIME + 1e-6 or self.distance > EDGE_MEMORY_DISTANCE + 1e-6 or
-          not np.any(retained) or not np.all(self.continuous[retained])):
+          not np.all(self.continuous[retained])):
         self.width = None
         self.history.clear()
     strong = np.all(finite) and np.min(probs) >= EDGE_ARM_PROB
