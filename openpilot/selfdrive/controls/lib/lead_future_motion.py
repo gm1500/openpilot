@@ -22,7 +22,7 @@ class FutureMotion:
   speed_std: float
 
   @classmethod
-  def from_model(cls, lead):
+  def from_model(cls, lead, max_speed_std=8.0):
     if not 0.9 <= lead.prob <= 1.0 or min(len(lead.t), len(lead.x), len(lead.xStd)) < 3:
       return None
     t, x, std = ([float(values[i]) for i in range(3)] for values in (lead.t, lead.x, lead.xStd))
@@ -38,7 +38,7 @@ class FutureMotion:
     # Unknown cross-horizon covariance: use the sum of absolute contributions,
     # not an independent-noise assumption or reduced uncertainty from two slots.
     speed_std = max(1.0, 0.75 * std[0] + std[1] + 0.25 * std[2])
-    if (not 0.0 <= speed <= 70.0 or not -5.0 <= acceleration <= 3.0 or speed_std > 8.0
+    if (not 0.0 <= speed <= 70.0 or not -5.0 <= acceleration <= 3.0 or speed_std > max_speed_std
         or x[1] < x[0] or x[2] < x[1] or not -0.5 <= speed + 4.0 * acceleration <= 70.0):
       return None
     return cls(speed, acceleration, speed_std)

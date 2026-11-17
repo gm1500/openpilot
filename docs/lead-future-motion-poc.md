@@ -1,6 +1,8 @@
 # Future lead position estimator POC
 
 Branch: `batmobile-future-lead-prediction-poc`.
+The branch now also includes the guarded [responsive lead stage](lead-responsive-poc.md)
+and derived-speed E2E assist gate. The original bounded stage described below remains.
 Built on `39e6e244945d0f1198f70db8c8f3a5772a7fbb23`, retaining the
 learned lane-width retention changes and all preceding batmobile fixes.
 

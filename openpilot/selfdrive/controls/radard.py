@@ -17,6 +17,7 @@ from openpilot.selfdrive.controls.lib.vision_lead_tracker import VisionLeadObser
 from openpilot.selfdrive.controls.lib.lead_transition import LeadTransitionRecovery
 from openpilot.selfdrive.controls.lib.lead_reacquisition import LeadReacquisitionShadow
 from openpilot.selfdrive.controls.lib.lead_future_motion import LeadFutureMotion
+from openpilot.selfdrive.controls.lib.lead_responsive_motion import LeadResponsiveMotion
 
 
 # Default lead acceleration decay set to 50% at 1s
@@ -190,6 +191,7 @@ class RadarD:
     self.vision_confidence_filter = VisionLeadConfidenceFilter()
     self.lead_transition_recovery = LeadTransitionRecovery()
     self.lead_future_motion = LeadFutureMotion()
+    self.lead_responsive_motion = LeadResponsiveMotion()
     self.lead_reacquisition_shadow = LeadReacquisitionShadow()
     self.last_reacquisition_log = -math.inf
     self.reacquisition_was_active = False
@@ -277,6 +279,14 @@ class RadarD:
         timestamp, self.v_ego, yaw_rate, valid)
       leads = self.lead_future_motion.update(leads_v3, raw_leads, leads, self.vision_lead_tracker.slots,
                                             timestamp, self.v_ego, valid)
+      if self.lead_responsive_motion is not None:
+        try:
+          leads = self.lead_responsive_motion.update(leads_v3, observations, raw_leads, leads,
+                                                    timestamp, self.v_ego, yaw_rate, valid)
+        except Exception:
+          # A failed POC must leave the already accepted lead output intact.
+          cloudlog.exception("responsive lead motion disabled after estimator failure")
+          self.lead_responsive_motion = None
       # Read-only experiment: its candidates never replace `leads`. A failure
       # disables only the observer for this process lifetime, not lead control.
       if self.lead_reacquisition_shadow is not None:
@@ -303,6 +313,7 @@ class RadarD:
           track = self.vision_lead_tracker.slots[i]
           confidence = self.vision_confidence_filter.status[i]
           future = self.lead_future_motion.status[i]
+          responsive = self.lead_responsive_motion
           shadow = self.lead_reacquisition_shadow
           cloudlog.info(" ".join((
             f"lead-pre: slot={i} mode={track.mode if track else 'fallback'}",
@@ -315,6 +326,9 @@ class RadarD:
             f"lead_transition={self.lead_transition_recovery.reason} dv={self.lead_transition_recovery.correction:.2f}",
             f"future_motion={future.reason} future_v={future.speed:.2f} future_std={future.speed_std:.2f}",
             f"future_w={future.weight:.3f} future_dv={future.delta_speed:.3f} future_dr={future.delta_distance:.3f}",
+            f"responsive={responsive.reason if responsive is not None else 'disabled'}",
+            f"responsive_dv={responsive.delta if responsive is not None else 0.0:.3f}",
+            f"responsive_fast={int(responsive.motion.fast_response) if responsive is not None else 0}",
             f"reacquire_shadow={shadow.status[i].reason if shadow is not None else 'disabled'}",
             f"shadow_frames={shadow.bridge_frames[i] if shadow is not None else 0}",
           )))
@@ -325,6 +339,8 @@ class RadarD:
       self.vision_confidence_filter.reset()
       self.lead_transition_recovery.reset()
       self.lead_future_motion.reset()
+      if self.lead_responsive_motion is not None:
+        self.lead_responsive_motion.reset()
       if self.lead_reacquisition_shadow is not None:
         self.lead_reacquisition_shadow.reset('missing_model')
 
