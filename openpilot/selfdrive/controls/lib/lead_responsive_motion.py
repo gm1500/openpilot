@@ -113,11 +113,11 @@ class LeadResponsiveMotion(LeadCombinedMotionExperiment):
       self.reason = 'uncorroborated_closing'
       self.future_weight, self.delta = 0., 0.
       return baseline
-    # A biased forecast and a mildly low current-model speed can agree while
-    # a paced lead is not actually closing. Require the observed range's upper
-    # confidence bound to support every added downward correction.
-    observed_upper = float(self.motion.kalman.x[1]) + 2. * self.motion.fit.error
-    desired = max(0., min(baseline[i]['vLead'] - max(output[i]['vLead'], observed_upper) for i in accepted))
+    # Let the qualified retained-motion estimate catch a large closing-speed
+    # difference without flooring it at the range's upper confidence bound.
+    # Keep the range uncertainty/association checks, model closing veto and
+    # gradual entry. Correlated range/model bias can still add unwanted slowing.
+    desired = max(0., min(baseline[i]['vLead'] - output[i]['vLead'] for i in accepted))
     self.extra_slowing = min(desired, self.extra_slowing + self.CORRECTION_RATE * dt)
     if self.extra_slowing == 0.:
       self.future_weight = 0.

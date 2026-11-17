@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
@@ -55,13 +56,71 @@ class TestResponsiveLeadMotion(unittest.TestCase):
       args = self.inputs(t, 140. - 5. * t, speed=32., baseline_speed=24.)
       self.assertEqual(experiment.update(*args), args[3])
 
-  def test_wrong_current_and_future_velocity_need_observed_closing(self):
+  def test_wrong_future_alone_cannot_create_closing(self):
     experiment = LeadResponsiveMotion()
+    for i in range(120):
+      args = self.inputs(i * .05, 140., speed=33.)
+      for model in args[0]:
+        model.x = [141.52 + 22. * t for t in model.t]
+      self.assertEqual(experiment.update(*args), args[3])
+
+  def test_correlated_model_bias_can_add_slowing_but_entry_remains_bounded(self):
+    # Known intermediate-policy tradeoff: a mildly low current-model speed and
+    # wrong future speed can add slowing even with constant observed distance.
+    # Keep this case visible; it no longer has the strict range-bound veto.
+    experiment = LeadResponsiveMotion()
+    previous = peak = 0.
     for i in range(120):
       args = self.inputs(i * .05, 140., speed=32.3)
       for model in args[0]:
         model.x = [141.52 + 22. * t for t in model.t]
-      self.assertEqual(experiment.update(*args), args[3])
+      output = experiment.update(*args)
+      correction = args[3][0]['vLead'] - output[0]['vLead']
+      self.assertGreaterEqual(correction, 0.)
+      self.assertLessEqual(correction - previous, experiment.CORRECTION_RATE * .05 + 1e-8)
+      previous, peak = correction, max(peak, correction)
+    self.assertGreater(peak, 0.)
+    self.assertLess(peak, 1.5)  # Regression bound for this deterministic fixture.
+
+  def test_large_closing_difference_reaches_retained_estimate(self):
+    experiment = LeadResponsiveMotion(use_future=False, use_buffer=False)
+    for i in range(120):
+      t = i * .05
+      args = self.inputs(t, 145. - 8. * t, speed=32.)
+      output = experiment.update(*args)
+    # Ego is 33 m/s, true lead speed is 25 m/s, model still says 32 m/s.
+    self.assertAlmostEqual(output[0]['vLead'], 25., delta=.1)
+    self.assertLess(output[0]['vLead'], experiment.motion.fit.speed + 2. * experiment.motion.fit.error - .5)
+
+  def test_existing_slower_estimate_takes_over_without_waiting_for_ramp(self):
+    experiment = LeadResponsiveMotion()
+    for i in range(90):
+      args = self.inputs(i * .05, 145. - 8. * i * .05, speed=32.)
+      output = experiment.update(*args)
+    self.assertLess(output[0]['vLead'], args[3][0]['vLead'])
+    # Once the normal tracker catches the slowdown, a stale private estimate
+    # must never weaken that response, even after a correction was active.
+    args = self.inputs(4.5, 109., speed=32., baseline_speed=20.)
+    self.assertEqual(experiment.update(*args), args[3])
+    self.assertEqual(experiment.extra_slowing, 0.)
+
+  def test_target_discontinuity_does_not_carry_extra_slowing_to_another_lead(self):
+    for change in ('range', 'lateral', 'distinct'):
+      with self.subTest(change=change):
+        experiment = LeadResponsiveMotion()
+        for i in range(90):
+          args = self.inputs(i * .05, 145. - 8. * i * .05, speed=32.)
+          experiment.update(*args)
+        self.assertGreater(experiment.extra_slowing, 0.)
+        for i in range(4):
+          args = self.inputs(4.5 + i * .05, 130. if change == 'range' else 109., speed=32.)
+          if change != 'range':
+            for slot in ([0, 1] if change == 'lateral' else [1]):
+              args[1][slot] = replace(args[1][slot], lateral=2.)
+              args[2][slot] = dict(args[2][slot], yRel=2.)
+              args[3][slot] = dict(args[3][slot], yRel=2.)
+          self.assertEqual(experiment.update(*args), args[3])
+          self.assertEqual(experiment.extra_slowing, 0.)
 
   def test_additional_slowing_enters_gradually_and_preserves_fields(self):
     experiment = LeadResponsiveMotion()
