@@ -245,6 +245,9 @@ class RadarD:
       model_v_ego = self.v_ego
     leads_v3 = sm['modelV2'].leadsV3
     if len(leads_v3) > 1:
+      # Every motion stage must receive the same two slots as the observations
+      # and accepted leads, even when the model publishes additional predictions.
+      leads_v3 = [leads_v3[i] for i in range(2)]
       for i in range(2):
         # Asymmetric filter on lead prob to keep lead when uncertain
         lead_prob = leads_v3[i].prob

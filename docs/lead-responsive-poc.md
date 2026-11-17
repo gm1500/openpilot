@@ -6,6 +6,37 @@ future-position range correction. The intermediate guard prioritizes earlier
 pickup of a large closing-speed difference; following distance and planner
 gains are unchanged.
 
+## Model-input integration correction
+
+The November 17 drive on `e12ae44` exposed a caller mismatch: modelV2 publishes
+three lead predictions, while radard constructs observations and accepted leads
+for only the first two. Passing all three predictions to `LeadResponsiveMotion`
+failed its exact-two-input invariant and returned `unsupported` every frame.
+The separate bounded future-position stage and E2E assistance still operated.
+Earlier estimator simulations supplied two predictions and missed this wiring
+failure; their gains are offline results, not effects demonstrated on that drive.
+
+Radard now selects the same first two model predictions before constructing any
+lead-stage inputs. The estimator's invariant and all operating guards remain.
+The caller regression uses serialized three-output model messages, compares
+against the two-output path, requires a nonzero published speed correction, and
+checks that presence/range/acceleration fields are preserved. It also verifies
+revocation on low-speed, invalid, distinct-lead and missing-model input.
+
+The corrected caller replay covers all 34 segments of the November 17 drive:
+39,709 matched model/radar frames, with 13 unpaired model frames omitted. A
+nonzero speed correction is published on 3,370 frames (about 168 s at 20 Hz),
+with a maximum reduction of 6.81 km/h relative to the existing accepted speed.
+All 16,361 frames at or below 54 km/h retain the baseline. Presence, range,
+lateral position and acceleration fields are identical on every paired frame.
+Recorded ego motion is held fixed; this verifies integration and estimator
+output, not counterfactual braking timing or improved stopping reliability.
+
+This correction does not extend future estimation into final stopping: both
+future stages still require ego speed above 15 m/s (54 km/h), and the responsive
+stage excludes close/stopped and already-braking leads. E2E stopping remains a
+separate mechanism.
+
 ## Runtime behavior
 
 `LeadResponsiveMotion` runs after the existing lead tracker, confidence filter,
@@ -129,7 +160,7 @@ isolated helper replay, not a counterfactual full planner/vehicle validation.
 
 ## Validation and limits
 
-215 tests pass across lead, E2E-stop and lane-change suites, with one optional
+218 tests pass across lead, E2E-stop, lane-change and radard caller suites, with one optional
 private recorded-fixture test skipped in the public checkout. Tests cover a
 large closing difference, immediate priority for an existing slower estimate,
 rate limits, correlated-bias tradeoffs, and range/lateral/distinct-lead changes.
@@ -137,8 +168,11 @@ Serialized Cap'n Proto inputs remain covered. Changed Python files pass Ruff
 and whitespace checks. Replays include the morning, older difficult approach
 and semi cut-in recordings.
 
-Full radard process replay is unavailable on this host because native msgq is
-not installed. The broader conditional-mode/UI suite also requires pyray.
+The real `RadarD.update` caller is exercised with serialized model messages;
+host-only adapters replace unused messaging and Params imports. The lead code,
+schemas and caller are unmodified by those adapters. Full radard IPC process
+replay remains unavailable because native msgq is not installed. The broader
+conditional-mode/UI suite also requires pyray.
 These results do not replace on-device validation or establish performance
 across all roads, weather, target changes or perception errors.
 
