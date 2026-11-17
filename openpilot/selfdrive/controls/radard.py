@@ -16,6 +16,7 @@ from openpilot.selfdrive.controls.lib.vision_lead_confidence import LeadUncertai
 from openpilot.selfdrive.controls.lib.vision_lead_tracker import VisionLeadObservation, VisionLeadTracker
 from openpilot.selfdrive.controls.lib.lead_transition import LeadTransitionRecovery
 from openpilot.selfdrive.controls.lib.lead_reacquisition import LeadReacquisitionShadow
+from openpilot.selfdrive.controls.lib.lead_future_motion import LeadFutureMotion
 
 
 # Default lead acceleration decay set to 50% at 1s
@@ -188,6 +189,7 @@ class RadarD:
     self.vision_lead_tracker = VisionLeadTracker()
     self.vision_confidence_filter = VisionLeadConfidenceFilter()
     self.lead_transition_recovery = LeadTransitionRecovery()
+    self.lead_future_motion = LeadFutureMotion()
     self.lead_reacquisition_shadow = LeadReacquisitionShadow()
     self.last_reacquisition_log = -math.inf
     self.reacquisition_was_active = False
@@ -273,6 +275,8 @@ class RadarD:
       leads = self.lead_transition_recovery.update(
         observations, raw_leads, leads, [uncertainty.speed_std for uncertainty in uncertainties],
         timestamp, self.v_ego, yaw_rate, valid)
+      leads = self.lead_future_motion.update(leads_v3, raw_leads, leads, self.vision_lead_tracker.slots,
+                                            timestamp, self.v_ego, valid)
       # Read-only experiment: its candidates never replace `leads`. A failure
       # disables only the observer for this process lifetime, not lead control.
       if self.lead_reacquisition_shadow is not None:
@@ -298,6 +302,7 @@ class RadarD:
         if timestamp - self.last_vision_log >= 1.0:
           track = self.vision_lead_tracker.slots[i]
           confidence = self.vision_confidence_filter.status[i]
+          future = self.lead_future_motion.status[i]
           shadow = self.lead_reacquisition_shadow
           cloudlog.info(" ".join((
             f"lead-pre: slot={i} mode={track.mode if track else 'fallback'}",
@@ -308,6 +313,8 @@ class RadarD:
             f"conf_dr={leads[i].get('dRel', 0.0) - baseline[i].get('dRel', 0.0):.3f}",
             f"conf_da={leads[i].get('aLeadK', 0.0) - baseline[i].get('aLeadK', 0.0):.3f}",
             f"lead_transition={self.lead_transition_recovery.reason} dv={self.lead_transition_recovery.correction:.2f}",
+            f"future_motion={future.reason} future_v={future.speed:.2f} future_std={future.speed_std:.2f}",
+            f"future_w={future.weight:.3f} future_dv={future.delta_speed:.3f} future_dr={future.delta_distance:.3f}",
             f"reacquire_shadow={shadow.status[i].reason if shadow is not None else 'disabled'}",
             f"shadow_frames={shadow.bridge_frames[i] if shadow is not None else 0}",
           )))
@@ -317,6 +324,7 @@ class RadarD:
       self.vision_lead_tracker.reset()
       self.vision_confidence_filter.reset()
       self.lead_transition_recovery.reset()
+      self.lead_future_motion.reset()
       if self.lead_reacquisition_shadow is not None:
         self.lead_reacquisition_shadow.reset('missing_model')
 
