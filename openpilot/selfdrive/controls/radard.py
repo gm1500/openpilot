@@ -12,12 +12,14 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL, Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.simple_kalman import KF1D
+from openpilot.common.transformations.orientation import rot_from_euler
 from openpilot.selfdrive.controls.lib.vision_lead_confidence import LeadUncertainty, VisionLeadConfidenceFilter
 from openpilot.selfdrive.controls.lib.vision_lead_tracker import VisionLeadObservation, VisionLeadTracker
 from openpilot.selfdrive.controls.lib.lead_transition import LeadTransitionRecovery
 from openpilot.selfdrive.controls.lib.lead_reacquisition import LeadReacquisitionShadow
 from openpilot.selfdrive.controls.lib.lead_future_motion import LeadFutureMotion
 from openpilot.selfdrive.controls.lib.lead_responsive_motion import LeadResponsiveMotion
+from openpilot.selfdrive.controls.lib.lead_departure_shadow import DepartureHead, LeadDepartureShadow
 
 
 # Default lead acceleration decay set to 50% at 1s
@@ -193,6 +195,13 @@ class RadarD:
     self.lead_future_motion = LeadFutureMotion()
     self.lead_responsive_motion = LeadResponsiveMotion()
     self.lead_reacquisition_shadow = LeadReacquisitionShadow()
+    self.lead_departure_shadow = LeadDepartureShadow()
+    self.departure_ego_samples = deque(maxlen=4)
+    self.departure_motion_samples = deque(maxlen=4)
+    self.departure_calibration_samples = deque(maxlen=4)
+    self.last_departure_log = -math.inf
+    self.last_departure_reason = None
+    self.departure_was_active = False
     self.last_reacquisition_log = -math.inf
     self.reacquisition_was_active = False
     self.last_vision_log = 0.0
@@ -205,6 +214,79 @@ class RadarD:
     self.radar_state_valid = False
 
     self.ready = False
+
+  def _observe_departure(self, sm, model, heads, timestamp, model_v_ego, valid):
+    if self.lead_departure_shadow is None:
+      return
+    try:
+      # Optional measured sources are excluded from radarState health checks.
+      # carControl can republish a cached pose, so read the original motion and
+      # its filter timestamp. Keep a few copied samples when the newest source
+      # measurement postdates this model. No predicted orientation rate is used.
+      selected = []
+      for name, samples in (('carState', self.departure_ego_samples), ('deviceMotion', self.departure_motion_samples),
+                            ('extrinsicsCalibration', self.departure_calibration_samples)):
+        if sm.seen.get(name, False):
+          message = sm[name]
+          published = sm.logMonoTime.get(name, 0) * 1e-9
+          source_time, source_valid = published, bool(sm.valid[name])
+          if name == 'carState':
+            value = float(message.vEgo)
+          elif name == 'deviceMotion':
+            angular = message.angularVelocityDevice
+            value = tuple(float(v) for v in (angular.x, angular.y, angular.z))
+            stds = (angular.xStd, angular.yStd, angular.zStd)
+            source_time = message.timestamp * 1e-9  # locationd's filter measurement time
+            source_valid &= (message.inputsOK and message.sensorsOK and message.posenetOK and angular.valid
+                             and all(math.isfinite(v) for v in value) and all(math.isfinite(v) and v >= 0. for v in stds))
+          else:
+            value = tuple(float(v) for v in message.rpyCalib)
+            source_valid &= str(message.calStatus) == 'calibrated' and len(value) == 3 and all(math.isfinite(v) for v in value)
+          sample = (published, source_time, source_valid, value)
+          if samples and sample[0] < samples[-1][0]:
+            samples.clear()
+          if samples and sample[0] == samples[-1][0]:
+            samples[-1] = sample
+          else:
+            samples.append(sample)
+        else:
+          samples.clear()
+        # Calibration must already be available at the motion measurement time.
+        limit = selected[1][1] if name == 'extrinsicsCalibration' and selected[1] is not None else timestamp
+        time_index = 1 if name == 'deviceMotion' else 0
+        causal = next((s for s in reversed(samples) if s[time_index] <= limit), None)
+        max_age = 2. if name == 'extrinsicsCalibration' else .1
+        # A motion measurement before model time may be published afterward.
+        # It is causal at this call because it has already been received; retain
+        # a bounded publication delay and never use a future filter timestamp.
+        latest_publication = timestamp + .1 if name == 'deviceMotion' else timestamp
+        selected.append(causal if (causal is not None and causal[2] and 0. <= causal[1] <= causal[0] <= latest_publication
+                                   and timestamp - causal[1] <= max_age + 1e-6) else None)
+      ego_sample, motion, calibration = selected
+      ego = ego_sample[3] if ego_sample is not None else None
+      # Match PoseCalibrator's device -> calibrated FRD transform exactly.
+      yaw = float((rot_from_euler(calibration[3]).T @ motion[3])[2]) if motion is not None and calibration is not None else None
+      context_valid = valid and ego is not None and yaw is not None
+      copied = tuple(DepartureHead(float(h.x[0]), float(h.y[0]), (ego if ego is not None else self.v_ego) + float(h.v[0]) - model_v_ego,
+                                   float(h.prob), float(h.xStd[0]) if len(h.xStd) else math.nan,
+                                   float(h.yStd[0]) if len(h.yStd) else math.nan) for h in heads)
+      self.lead_departure_shadow.update(copied, timestamp, ego, yaw, str(model.meta.laneChangeState),
+                                       str(model.meta.laneChangeDirection), context_valid)
+      status = self.lead_departure_shadow.status
+      changed = status.reason != self.last_departure_reason or status.active != self.departure_was_active
+      if (changed or status.active) and timestamp - self.last_departure_log >= .2:
+        cloudlog.info(" ".join((
+          f"lead-departure-shadow: reason={status.reason} active={int(status.active)} near={status.near_head}",
+          f"age={status.age:.3f} residual={status.range_residual:.3f} dx={status.range_separation:.3f}",
+          f"dv={status.speed_separation:.3f} dy={status.lateral_separation:.3f} can_ignore_lead=0",
+        )))
+        self.last_departure_log = timestamp
+        self.last_departure_reason = status.reason
+        self.departure_was_active = status.active
+    except Exception:
+      # No observer failure is allowed to replace or prevent publishing leads.
+      cloudlog.exception("lead-departure-shadow disabled after observer failure")
+      self.lead_departure_shadow = None
 
   def update(self, sm: messaging.SubMaster, rr: car.RadarData):
     self.ready = sm.seen['modelV2']
@@ -310,6 +392,7 @@ class RadarD:
         except Exception:
           cloudlog.exception("lead-reacquire-shadow disabled after observer failure")
           self.lead_reacquisition_shadow = None
+      self._observe_departure(sm, model, leads_v3, timestamp, model_v_ego, valid)
       for i, field in enumerate(('leadOne', 'leadTwo')):
         setattr(self.radar_state, field, leads[i])
         if timestamp - self.last_vision_log >= 1.0:
@@ -346,6 +429,8 @@ class RadarD:
         self.lead_responsive_motion.reset()
       if self.lead_reacquisition_shadow is not None:
         self.lead_reacquisition_shadow.reset('missing_model')
+      if self.lead_departure_shadow is not None:
+        self.lead_departure_shadow.reset('missing_model')
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None
@@ -366,7 +451,9 @@ def main() -> None:
   cloudlog.info("radard got CarParams")
 
   # *** setup messaging
-  sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks'], poll='modelV2')
+  optional_motion = ['deviceMotion', 'extrinsicsCalibration']
+  sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks', *optional_motion], poll='modelV2',
+                           ignore_alive=optional_motion, ignore_avg_freq=optional_motion, ignore_valid=optional_motion)
   pm = messaging.PubMaster(['radarState'])
 
   RD = RadarD(CP.radarDelay)
