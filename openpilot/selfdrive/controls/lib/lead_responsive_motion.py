@@ -8,6 +8,7 @@ import math
 import numpy as np
 
 from openpilot.selfdrive.controls.lib.lead_combined_motion import LeadCombinedMotion, RetainedRangeFutureFusion
+from openpilot.selfdrive.controls.lib.lead_transition import lead_history_owner
 from openpilot.selfdrive.controls.lib.vision_lead_tracker import _DistanceTrack
 
 
@@ -95,8 +96,19 @@ class LeadResponsiveMotion(LeadCombinedMotion):
     super().reset()
     self.extra_slowing = 0.
     self.last_time = None
+    self.owner: tuple[int, int] | None = None
 
-  def update(self, models, observations, raw_leads, baseline, timestamp, ego, yaw_rate, valid=True, advance=True):
+  def update(self, models, observations, raw_leads, baseline, timestamp, ego, yaw_rate, valid=True, advance=True, *, tracks=None):
+    if tracks is not None:
+      owner = lead_history_owner(observations, raw_leads, baseline, tracks)
+      if owner != self.owner or owner is None:
+        # The retained range and forecast Kalman streams have one vehicle
+        # owner. Revoke both, plus their entry ramp, before observing a new ID.
+        self.reset()
+        self.owner = owner
+      if owner is None and valid:
+        self.reason = 'identity_ambiguous'
+        return baseline
     previous_time = self.last_time
     output = super().update(models, observations, raw_leads, baseline, timestamp, ego, yaw_rate, valid, advance)
     self.last_time = timestamp

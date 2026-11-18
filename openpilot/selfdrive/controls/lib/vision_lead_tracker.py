@@ -1,4 +1,4 @@
-"""Private vision history with bounded handoffs and mild planner-range correction.
+"""Vehicle-associated vision history and mild planner-range correction.
 
 Control acceptance and acceleration remain owned by radard. Model velocity
 never updates the Kalman state; it remains the fallback and immediate brake guard.
@@ -6,7 +6,7 @@ never updates the Kalman state; it remains the fallback and immediate brake guar
 
 from collections import deque
 from dataclasses import dataclass
-from itertools import product
+from itertools import count, product
 import math
 
 import numpy as np
@@ -43,12 +43,13 @@ class VisionLeadObservation:
     return max(self.std, 1.0) ** 2 / self.probability**2
 
 
+_TRACK_IDS = count(1)  # Local process IDs, never reused after tracker resets.
+_DEFAULT_ASSOCIATION_YAW = object()
+
+
 class _DistanceTrack:
   MIN_HISTORY = 1.5
   MAX_SPEED_VARIANCE = 2.25
-  UNCERTAIN_MAX_DISTANCE = 15.0
-  UNCERTAIN_MAX_LATERAL = 0.15
-  UNCERTAIN_MIN_HISTORY = 5.0
   DISTANCE_CORRECTION_GAIN = 0.60  # mild kinematic range correction at 20 Hz
   PRE_CLOSING_HISTORY = 0.7
   PRE_CLOSING_WINDOW = 0.8
@@ -75,6 +76,13 @@ class _DistanceTrack:
   SINGLE_CLOSING_RATE = 2.5  # m/s per second; does not change Kalman covariance
 
   def __init__(self, observation: VisionLeadObservation, timestamp: float, ego: float):
+    # A private estimator can reinitialize in place. Preserve the vehicle label
+    # but advance the generation so no consumer can retain the discarded state.
+    if hasattr(self, 'track_id'):
+      self.generation += 1
+    else:
+      self.track_id, self.generation = next(_TRACK_IDS), 0
+    self.model_speed: float | None = None
     self.x = np.array([observation.distance, ego], dtype=float)
     self.P = np.diag([observation.variance, 1000.0])
     self.time, self.ego = timestamp, ego
@@ -88,7 +96,6 @@ class _DistanceTrack:
     self.transition_from = 0.0
     self.transition = 1.0
     self.last_braking = -math.inf
-    self.uncertain_handoff_until = -math.inf
     self.filtered_distance = observation.distance
     self.range_active = False
     self.range_history = deque([(timestamp, observation.distance, observation.probability, ego)])
@@ -98,6 +105,10 @@ class _DistanceTrack:
     self.handoff_time = 0.0
     self.continuity = LeadContinuity()
     self.single_closing_offset = 0.0
+
+  @property
+  def identity(self) -> tuple[int, int]:
+    return self.track_id, self.generation
 
   def reset_output(self) -> None:
     # Unsupported or missing output must not leave a stale range/transition
@@ -154,38 +165,32 @@ class _DistanceTrack:
   def ready(self) -> bool:
     return self.age >= self.MIN_HISTORY and self.P[1, 1] <= self.MAX_SPEED_VARIANCE and 0.0 <= self.x[1] <= 70.0
 
-  def association_cost(self, observation: VisionLeadObservation, timestamp: float, ego: float) -> float:
+  def association_cost(self, observation: VisionLeadObservation, timestamp: float, ego: float,
+                       model_speed: float | None = None, yaw_rate: float | None = None) -> float:
     dt = timestamp - self.time
     # Compare successive observations; filtered distance can lag during braking.
     prediction = self.distance + (self.x[1] - 0.5 * (ego + self.ego)) * dt
+    lateral_prediction = self.lateral
+    if yaw_rate is not None and math.isfinite(yaw_rate) and abs(yaw_rate) <= 0.5:
+      # Model x is camera-relative; yRel is positive left, yaw positive right.
+      # Rotate a transported point, including the radar/camera origin offset.
+      angle = yaw_rate * dt
+      x = prediction + 1.52
+      prediction = math.cos(angle) * x - math.sin(angle) * self.lateral - 1.52
+      lateral_prediction = math.sin(angle) * x + math.cos(angle) * self.lateral
     distance_error = abs(observation.distance - prediction)
-    lateral_error = abs(observation.lateral - self.lateral)
+    lateral_error = abs(observation.lateral - lateral_prediction)
     if not 0.01 <= dt <= 0.2 or distance_error > 5.0 or lateral_error > 0.75:
       return math.inf
-    return distance_error / 5.0 + lateral_error / 0.75
-
-  def uncertain_handoff_cost(self, observation: VisionLeadObservation, timestamp: float, ego: float) -> float:
-    # Range uncertainty cannot establish target identity. A plausible match may
-    # hand off its published speed, but must never transfer the Kalman state.
-    dt = timestamp - self.time
-    if (
-      not self.ready or self.mode != 'distance' or self.age < self.UNCERTAIN_MIN_HISTORY
-      or not 0.01 <= dt <= 0.1 or self.output is None or not math.isfinite(self.output)
-      or not np.isfinite(self.x).all() or not np.isfinite(self.P).all()
-      or observation.probability < 0.9 or observation.std < max(10.0, 2.0 * self.distance_std)
-    ):
-      return math.inf
-    travel = (float(self.x[1]) - 0.5 * (ego + self.ego)) * dt
-    distance_error = abs(observation.distance - (self.distance + travel))
-    lateral_error = abs(observation.lateral - self.lateral)
-    innovation = observation.distance - (float(self.x[0]) + travel)
-    predicted_variance = self.P[0, 0] + 2.0 * dt * self.P[0, 1] + dt**2 * self.P[1, 1]
-    if (
-      distance_error > self.UNCERTAIN_MAX_DISTANCE or lateral_error > self.UNCERTAIN_MAX_LATERAL
-      or innovation**2 > predicted_variance + observation.variance
-    ):
-      return math.inf
-    return distance_error / self.UNCERTAIN_MAX_DISTANCE + lateral_error / self.UNCERTAIN_MAX_LATERAL
+    speed_error = 0.0
+    if self.model_speed is not None and model_speed is not None:
+      speed_error = abs(model_speed - self.model_speed)
+      # A new closer/slower car can fit the ordinary five-metre range gate.
+      # Joint position AND velocity discontinuity revokes its old history.
+      # Velocity alone must not relabel a continuously observed braking car.
+      if distance_error > 1.5 and speed_error > 4.0:
+        return math.inf
+    return distance_error / 5.0 + lateral_error / 0.75 + min(speed_error / 20.0, 0.25)
 
   def acceleration_noise(self, distance: float, ego: float) -> float:
     # Distance quality improves sharply as the lead gets closer. Interpolate the
@@ -240,7 +245,7 @@ class _DistanceTrack:
       and history[-1][0] - history[0][0] >= 0.6
       and min(point[2] for point in history) > 0.9
       and 0.0 <= self.x[1] < baseline and self.P[1, 1] <= 36.0
-      and self.time >= self.uncertain_handoff_until and self.transition >= 1.0
+      and self.transition >= 1.0
     ):
       rate, rate_std, _ = self.range_motion()
       closing = min(-rate - 2.0 * rate_std, ego - float(self.x[1]) - math.sqrt(self.P[1, 1]))
@@ -262,7 +267,7 @@ class _DistanceTrack:
       self.ready and len(history) >= 7
       and history[-1][0] - history[0][0] >= self.CLOSING_RESPONSE_HISTORY
       and min(point[2] for point in history) >= self.CLOSING_RESPONSE_MIN_PROB
-      and self.time >= self.uncertain_handoff_until and self.transition >= 1.0
+      and self.transition >= 1.0
       and baseline < target - self.CLOSING_RESPONSE_MARGIN
     ):
       rate, rate_std, mean_ego = self.range_motion()
@@ -311,8 +316,7 @@ class _DistanceTrack:
     # speed. Never count the two model slots as independent measurements.
     upper = self.continuity.speed_upper
     available = 0.0
-    if (upper is not None and self.continuity.continuous and ego - max(upper, float(self.x[1])) > 2.0
-        and self.time >= self.uncertain_handoff_until):
+    if upper is not None and self.continuity.continuous and ego - max(upper, float(self.x[1])) > 2.0:
       available = min(self.SINGLE_CLOSING_MAX_OFFSET, max(0.0, baseline - upper))
     step = self.SINGLE_CLOSING_RATE * self.dt
     self.single_closing_offset += float(np.clip(available - self.single_closing_offset, -step, step))
@@ -328,8 +332,7 @@ class _DistanceTrack:
         mode = 'pre-closing'
 
     closing = ego - baseline
-    closing_time = 8.0 if self.time < self.uncertain_handoff_until else 5.0
-    urgent = min(lead['aLeadK'] for lead in leads) < -0.5 or (closing > 0.0 and min(lead['dRel'] for lead in leads) < closing_time * closing)
+    urgent = min(lead['aLeadK'] for lead in leads) < -0.5 or (closing > 0.0 and min(lead['dRel'] for lead in leads) < 5.0 * closing)
     stop_hold = (
       use_distance and ego < self.STOP_HOLD_EGO_MAX
       and ((observation.distance < self.STOP_HOLD_DISTANCE and baseline < self.STOP_HOLD_MODEL_SPEED)
@@ -391,6 +394,8 @@ class _DistanceTrack:
 
 
 class VisionLeadTracker:
+  ASSOCIATION_MARGIN = 0.15
+
   def __init__(self):
     self.reset()
 
@@ -399,13 +404,16 @@ class VisionLeadTracker:
     self.time: float | None = None
     self.slots: list[_DistanceTrack | None] = [None, None]
     self.history_slots: list[_DistanceTrack | None] = [None, None]
+    self.association_reasons = ['missing', 'missing']
 
   @staticmethod
-  def _groups(observations: list[VisionLeadObservation]) -> list[tuple[list[int], VisionLeadObservation]]:
+  def _groups(observations: list[VisionLeadObservation], leads: list[dict] | None = None) -> list[tuple[list[int], VisionLeadObservation]]:
     valid = [i for i, obs in enumerate(observations) if obs.valid()]
     if len(valid) == 2:
       a, b = observations
-      if abs(a.distance - b.distance) <= 1.5 and abs(a.lateral - b.lateral) <= 0.35:
+      speeds = [lead.get('vLead', math.nan) for lead in leads] if leads is not None else []
+      speed_agreement = len(speeds) != 2 or not all(math.isfinite(v) for v in speeds) or abs(speeds[0] - speeds[1]) <= 4.0
+      if abs(a.distance - b.distance) <= 1.5 and abs(a.lateral - b.lateral) <= 0.35 and speed_agreement:
         weights = [obs.probability / max(obs.std, 1.0) ** 2 for obs in observations]
         total = sum(weights)
         # Two outputs of the same camera are correlated, not two measurements.
@@ -419,7 +427,7 @@ class VisionLeadTracker:
     return [([i], observations[i]) for i in valid]
 
   def update(self, observations: list[VisionLeadObservation], leads: list[dict], timestamp: float, ego: float, valid: bool = True,
-             yaw_rate: float | None = None) -> list[dict]:
+             yaw_rate: float | None = None, association_yaw_rate: float | None = _DEFAULT_ASSOCIATION_YAW) -> list[dict]:
     if not valid or len(observations) != 2 or len(leads) != 2 or not all(math.isfinite(v) for v in (timestamp, ego)):
       self.reset()
       return leads
@@ -427,21 +435,16 @@ class VisionLeadTracker:
       self.reset()
       return leads
     self.time = timestamp
+    association_yaw = yaw_rate if association_yaw_rate is _DEFAULT_ASSOCIATION_YAW else association_yaw_rate
     previous_slots = self.history_slots
     tracks = [track for track in self.tracks if timestamp - track.time <= 0.2]
-    # A brief split may bridge the published speed, but must not widen the
-    # grouping gates or copy a stale Kalman state into a new track.
-    shared = previous_slots[0]
-    bridge = None
-    if (
-      shared is not None and shared is previous_slots[1] and shared.ready and shared.mode == 'distance'
-      and all(obs.valid() and math.isfinite(shared.association_cost(obs, timestamp, ego)) for obs in observations)
-      and abs(observations[0].distance - observations[1].distance) <= 3.0
-      and abs(observations[0].lateral - observations[1].lateral) <= 0.5
-    ):
-      bridge = shared.output
-    groups = self._groups(observations)
-    costs = [[track.association_cost(obs, timestamp, ego) for track in tracks] for _, obs in groups]
+    groups = self._groups(observations, leads)
+    model_speeds = []
+    for indices, _ in groups:
+      speeds = [leads[i].get('vLead', math.nan) for i in indices]
+      model_speeds.append(sum(speeds) / len(speeds) if all(math.isfinite(v) for v in speeds) else None)
+    costs = [[track.association_cost(obs, timestamp, ego, speed, association_yaw) for track in tracks]
+             for (_, obs), speed in zip(groups, model_speeds, strict=True)]
     # Exhaustive assignment is tiny (at most two tracks); retain history on slot swaps.
     options = []
     for assignment in product(range(-1, len(tracks)), repeat=len(groups)):
@@ -449,28 +452,16 @@ class VisionLeadTracker:
       if len(set(assigned)) != len(assigned) or any(i >= 0 and not math.isfinite(costs[g][i]) for g, i in enumerate(assignment)):
         continue
       options.append(((-len(assigned), sum(costs[g][i] for g, i in enumerate(assignment) if i >= 0)), assignment))
-    assignment = min(options)[1]
-    handoffs = [None] * len(groups)
-    for j, track in enumerate(tracks):
-      if j in assignment:
-        continue
-      matches = []
-      for g, (indices, observation) in enumerate(groups):
-        # Only an unassigned old track can hand off to one unambiguous group
-        # in its previous slots. Never borrow speed from another matched car.
-        supported = assignment[g] < 0 and 15.0 < ego < 60.0 and all(
-          previous_slots[i] is track and leads[i].get('present', False) and not leads[i].get('radar', False)
-          and all(math.isfinite(leads[i][key]) for key in ('dRel', 'vLead', 'aLeadK'))
-          and 10.0 < leads[i]['dRel'] < 150.0 and leads[i]['aLeadK'] >= -0.5
-          and leads[i]['dRel'] >= 8.0 * max(ego - leads[i]['vLead'], 0.0)
-          for i in indices
-        )
-        if supported and math.isfinite(track.uncertain_handoff_cost(observation, timestamp, ego)):
-          matches.append(g)
-      if len(matches) == 1:
-        handoffs[matches[0]] = track.output
+    score, best = min(options)
+    # A close runner-up is an unresolved identity, not permission to duplicate
+    # one car's velocity history. New observations still reach planning now.
+    contenders = [assignment for candidate_score, assignment in options
+                  if candidate_score[0] == score[0] and candidate_score[1] <= score[1] + self.ASSOCIATION_MARGIN]
+    ambiguous = [any(other[g] != best[g] for other in contenders) for g in range(len(groups))]
+    assignment = [i if not ambiguous[g] else -1 for g, i in enumerate(best)]
     self.slots = [None, None]
     self.history_slots = [None, None]
+    self.association_reasons = ['missing', 'missing']
     used = []
     output = list(leads)
     for g, (_indices, observation) in enumerate(groups):
@@ -478,23 +469,15 @@ class VisionLeadTracker:
       if track is not None and not track.update(observation, timestamp, ego):
         # A rejected state must not survive through the other, missing slot.
         track = None
-        bridge = None
         previous_slots = [None if old is tracks[assignment[g]] else old for old in previous_slots]
       if track is None:
         track = _DistanceTrack(observation, timestamp, ego)
       used.append(track)
 
-    for (indices, observation), track, handoff in zip(groups, used, handoffs, strict=True):
-      initial_output = handoff if handoff is not None else bridge
-      if track.age == 0.0 and initial_output is not None:
-        # The existing one-second fallback transition expires this bridge.
-        # Current braking/closing guards still override it immediately.
-        track.output, track.mode = initial_output, 'distance'
-        track.output_active = True
-        if handoff is not None:
-          track.uncertain_handoff_until = timestamp + 1.0
+    for g, ((indices, observation), track) in enumerate(zip(groups, used, strict=True)):
       for i in indices:
         self.slots[i] = self.history_slots[i] = track
+        self.association_reasons[i] = 'ambiguous' if ambiguous[g] else ('new' if track.age == 0.0 else 'matched')
       accepted = [i for i in indices if leads[i].get('present', False) and not leads[i].get('radar', False)]
       supported = (
         accepted
@@ -505,8 +488,13 @@ class VisionLeadTracker:
         track.reset_output()
         continue
       track.continuity.observe(observation, timestamp, ego, yaw_rate, len(groups) == 1)
+      generation = track.generation
       speed = track.speed([leads[i] for i in accepted], observation, ego)
-      urgent_range = track.mode in ('braking', 'stop-hold', 'stopped-lead') or timestamp < track.uncertain_handoff_until
+      track.model_speed = model_speeds[g]
+      if track.generation != generation:
+        for i in indices:
+          self.association_reasons[i] = 'history_reset'
+      urgent_range = track.mode in ('braking', 'stop-hold', 'stopped-lead')
       filtered_group_distance = track.filtered_range(observation.distance, speed, ego, track.mode == 'distance' and not urgent_range)
       if (track.mode == 'fallback' and track.transition >= 1.0) or (track.mode == 'braking' and not track.ready):
         track.output_active = False

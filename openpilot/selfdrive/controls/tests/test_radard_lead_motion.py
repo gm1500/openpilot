@@ -1,4 +1,7 @@
 import unittest
+import copy
+import math
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from openpilot.cereal import log
@@ -107,7 +110,51 @@ class TestRadarDLeadMotion(unittest.TestCase):
         self.assertEqual(rd.lead_responsive_motion.delta, 0.)
         self.assertIsNone(rd.lead_responsive_motion.motion.kalman)
         if change == 'distinct':
-          self.assertEqual(rd.lead_responsive_motion.reason, 'distinct_or_missing')
+          self.assertEqual(rd.lead_responsive_motion.reason, 'identity_ambiguous')
+
+
+class TestAssociationMeasuredYaw(unittest.TestCase):
+  @staticmethod
+  def sources():
+    angular = SimpleNamespace(x=0., y=0., z=.08, xStd=.01, yStd=.01, zStd=.01, valid=True)
+    motion = SimpleNamespace(timestamp=int(9.98e9), angularVelocityDevice=angular,
+                             inputsOK=True, sensorsOK=True, posenetOK=True)
+    calibration = SimpleNamespace(rpyCalib=[0., 0., 0.], calStatus='calibrated')
+    class Sources(dict):
+      pass
+    sm = Sources(deviceMotion=motion, extrinsicsCalibration=calibration)
+    sm.seen = sm.valid = {'deviceMotion': True, 'extrinsicsCalibration': True}
+    sm.logMonoTime = {'deviceMotion': int(10.01e9), 'extrinsicsCalibration': int(9.5e9)}
+    return sm
+
+  def test_measured_yaw_uses_calibrated_device_frame(self):
+    sm = self.sources()
+    self.assertAlmostEqual(RadarD._association_yaw_rate(sm, 10.), .08)
+    sm['deviceMotion'].angularVelocityDevice.y = .08
+    sm['deviceMotion'].angularVelocityDevice.z = 0.
+    sm['extrinsicsCalibration'].rpyCalib = [math.pi / 2, 0., 0.]
+    self.assertAlmostEqual(RadarD._association_yaw_rate(sm, 10.), -.08)
+
+  def test_missing_stale_future_and_invalid_sources_do_not_supply_yaw(self):
+    base = self.sources()
+    changes = (
+      lambda sm: sm.seen.update(deviceMotion=False),
+      lambda sm: setattr(sm['deviceMotion'], 'timestamp', int(10.001e9)),
+      lambda sm: setattr(sm['deviceMotion'], 'timestamp', int(9.89e9)),
+      lambda sm: sm.logMonoTime.update(deviceMotion=int(9.97e9)),
+      lambda sm: sm.logMonoTime.update(deviceMotion=int(10.2e9)),
+      lambda sm: sm.logMonoTime.update(extrinsicsCalibration=int(9.99e9)),
+      lambda sm: sm.logMonoTime.update(extrinsicsCalibration=int(7.9e9)),
+      lambda sm: setattr(sm['extrinsicsCalibration'], 'calStatus', 'uncalibrated'),
+      lambda sm: setattr(sm['deviceMotion'].angularVelocityDevice, 'z', math.nan),
+      lambda sm: setattr(sm['deviceMotion'].angularVelocityDevice, 'valid', False),
+      lambda sm: setattr(sm['deviceMotion'], 'sensorsOK', False),
+    )
+    for index, change in enumerate(changes):
+      with self.subTest(index=index):
+        sm = copy.deepcopy(base)
+        change(sm)
+        self.assertIsNone(RadarD._association_yaw_rate(sm, 10.))
 
 
 if __name__ == '__main__':

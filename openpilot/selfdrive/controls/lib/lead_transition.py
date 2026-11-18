@@ -15,6 +15,25 @@ import numpy as np
 from openpilot.selfdrive.controls.lib.vision_lead_tracker import VisionLeadObservation
 
 
+def lead_history_owner(observations, raw_leads, leads, tracks):
+  """Return one immutable owner for accepted vision observations, or None.
+
+  A model slot is not an identity. Missing unrelated slots must not revoke the
+  remaining vehicle, while a missing owner for an accepted observation cannot
+  borrow another vehicle's private motion history.
+  """
+  if not len(observations) == len(raw_leads) == len(leads) == len(tracks) == 2:
+    return None
+  owners = set()
+  for observation, raw, lead, track in zip(observations, raw_leads, leads, tracks, strict=True):
+    if not raw.get('present', False) or not lead.get('present', False):
+      continue
+    if raw.get('radar', False) or lead.get('radar', False) or not observation.valid() or track is None:
+      return None
+    owners.add(track.identity)
+  return next(iter(owners)) if len(owners) == 1 else None
+
+
 @dataclass(frozen=True)
 class _Sample:
   time: float
@@ -46,6 +65,7 @@ class LeadTransitionRecovery:
 
   def reset(self):
     self.time: float | None = None
+    self.owner: tuple[int, int] | None = None
     self._clear('inactive')
 
   def _clear(self, reason):
@@ -133,7 +153,7 @@ class LeadTransitionRecovery:
     return lower, float(np.mean([s.ego for s in self.history]))
 
   def update(self, observations: list[VisionLeadObservation], raw_leads: list[dict], leads: list[dict], speed_stds: list[float],
-             timestamp: float, ego: float, yaw_rate: float | None, valid: bool = True) -> list[dict]:
+             timestamp: float, ego: float, yaw_rate: float | None, valid: bool = True, *, tracks=None) -> list[dict]:
     if not valid or not math.isfinite(timestamp) or not math.isfinite(ego):
       self.reset()
       return leads
@@ -142,6 +162,14 @@ class LeadTransitionRecovery:
       self.reset()
       dt = 0.0
     self.time = timestamp
+    if tracks is not None:
+      owner = lead_history_owner(observations, raw_leads, leads, tracks)
+      if owner != self.owner:
+        self._clear('identity_change')
+        self.owner = owner
+      if owner is None:
+        self._clear('identity_ambiguous')
+        return leads
     if not (len(observations) == len(raw_leads) == len(leads) == len(speed_stds) == 2 and
             yaw_rate is not None and math.isfinite(yaw_rate) and abs(yaw_rate) < 0.5 and 15.0 < ego < 50.0):
       self._clear('unsupported')

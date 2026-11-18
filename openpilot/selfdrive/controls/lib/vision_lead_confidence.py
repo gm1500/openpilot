@@ -21,6 +21,7 @@ class LeadUncertainty:
 @dataclass
 class _FilterState:
   track: _DistanceTrack
+  identity: tuple[int, int]
   timestamp: float
   distance: float
   acceleration: float
@@ -75,7 +76,7 @@ class VisionLeadConfidenceFilter:
       return 'unsupported'
     if track is None or track.age < self.MIN_AGE or not track.ready:
       return 'new_track'
-    if track.mode != 'distance' or track.transition < 1.0 or timestamp < track.uncertain_handoff_until:
+    if track.mode != 'distance' or track.transition < 1.0:
       return 'transition_or_braking'
     # Either accepted hypothesis can bypass smoothing for the shared track.
     shared_accels = [lead.get('aLeadK', math.nan) for lead, other in zip(raw_leads, tracks, strict=True)
@@ -94,7 +95,7 @@ class VisionLeadConfidenceFilter:
       return 'closing'
     if not 0.5 <= uncertainty.probability <= 1.0 or uncertainty.distance_std <= 0.0 or uncertainty.acceleration_std <= 0.0:
       return 'bad_uncertainty'
-    if old is None or old.track is not track or not 0.01 <= timestamp - old.timestamp <= 0.1:
+    if old is None or old.track is not track or old.identity != track.identity or not 0.01 <= timestamp - old.timestamp <= 0.1:
       return 'reanchor'
     if abs(raw['dRel'] - (old.raw_distance + (lead['vLead'] - ego) * (timestamp - old.timestamp))) > self.RANGE_JUMP:
       return 'range_jump'
@@ -135,5 +136,5 @@ class VisionLeadConfidenceFilter:
                              acceleration - self.ACCEL_BOUND, acceleration + self.ACCEL_BOUND)
         output[i] = dict(lead, dRel=distance, aLeadK=acceleration)
         self.status[i] = ConfidenceStatus(reason, range_gain, accel_gain)
-      self.states[i] = _FilterState(track, timestamp, distance, acceleration, raw['dRel'], raw['aLeadK'])
+      self.states[i] = _FilterState(track, track.identity, timestamp, distance, acceleration, raw['dRel'], raw['aLeadK'])
     return output

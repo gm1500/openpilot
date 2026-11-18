@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -103,6 +104,45 @@ class TestResponsiveLeadMotion(unittest.TestCase):
     args = self.inputs(4.5, 109., speed=32., baseline_speed=20.)
     self.assertEqual(experiment.update(*args), args[3])
     self.assertEqual(experiment.extra_slowing, 0.)
+
+  def test_identity_or_generation_change_discards_retained_motion(self):
+    for identity in ((42, 0), (41, 1)):
+      with self.subTest(identity=identity):
+        experiment = LeadResponsiveMotion()
+        owner = SimpleNamespace(identity=(41, 0))
+        for i in range(90):
+          args = self.inputs(i * .05, 145. - 8. * i * .05, speed=32.)
+          experiment.update(*args, tracks=[owner, owner])
+        self.assertGreater(experiment.extra_slowing, 0.)
+        self.assertIsNotNone(experiment.motion.forecast.x)
+        owner.identity = identity
+        # No geometry jump: ownership alone must prevent transfer. A new
+        # slower observation uses its own current speed without waiting.
+        args = self.inputs(4.5, 109., speed=26.)
+        self.assertEqual(experiment.update(*args, tracks=[owner, owner]), args[3])
+        self.assertEqual(experiment.extra_slowing, 0.)
+        self.assertEqual(len(experiment.motion.history), 1)
+        self.assertEqual(experiment.motion.kalman.age, 0.)
+        self.assertEqual(experiment.owner, identity)
+
+  def test_ambiguous_owners_revoke_and_absent_slot_does_not_change_owner(self):
+    experiment = LeadResponsiveMotion()
+    owner, other = (SimpleNamespace(identity=(number, 0)) for number in (41, 42))
+    for i in range(90):
+      args = self.inputs(i * .05, 145. - 8. * i * .05, speed=32.)
+      experiment.update(*args, tracks=[owner, owner])
+    self.assertGreater(experiment.extra_slowing, 0.)
+    args = self.inputs(4.5, 109., speed=32.)
+    args[2][1] = args[3][1] = {'present': False}
+    experiment.update(*args, tracks=[owner, other])
+    self.assertEqual(experiment.owner, owner.identity)
+    self.assertGreater(len(experiment.motion.history), 1)
+    args = self.inputs(4.55, 108.6, speed=32.)
+    self.assertEqual(experiment.update(*args, tracks=[owner, other]), args[3])
+    self.assertEqual(experiment.reason, 'identity_ambiguous')
+    self.assertEqual(experiment.extra_slowing, 0.)
+    self.assertIsNone(experiment.motion.kalman)
+    self.assertIsNone(experiment.motion.forecast.x)
 
   def test_target_discontinuity_does_not_carry_extra_slowing_to_another_lead(self):
     for change in ('range', 'lateral', 'distinct'):

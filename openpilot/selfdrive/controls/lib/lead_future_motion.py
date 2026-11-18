@@ -56,6 +56,7 @@ class FutureMotionStatus:
 
 @dataclass
 class _State:
+  identity: tuple[int, int]
   timestamp: float
   track_age: float
   ego: float
@@ -82,7 +83,7 @@ class LeadFutureMotion:
     self.status = [FutureMotionStatus(), FutureMotionStatus()]
 
   @staticmethod
-  def _reason(indices, raw_leads, leads, track, timestamp, ego):
+  def _reason(indices, raw_leads, leads, track, ego):
     if any(not lead.get('present', False) or lead.get('radar', False)
            for i in indices for lead in (raw_leads[i], leads[i])):
       return 'not_vision'
@@ -91,8 +92,7 @@ class LeadFutureMotion:
       return 'invalid'
     if not 15.0 < ego < 50.0 or any(not 10.0 < raw_leads[i]['dRel'] < 150.0 for i in indices):
       return 'unsupported'
-    if (not track.continuity.continuous or track.transition < 1.0 or timestamp < track.uncertain_handoff_until
-        or not math.isfinite(track.continuity.speed)):
+    if not track.continuity.continuous or track.transition < 1.0 or not math.isfinite(track.continuity.speed):
       return 'continuity'
     if track.mode in ('braking', 'stop-hold', 'stopped-lead'):
       return 'braking'
@@ -119,7 +119,7 @@ class LeadFutureMotion:
       if track is not None:
         groups.setdefault(track, []).append(i)
     for track, indices in groups.items():
-      reason = self._reason(indices, raw_leads, leads, track, timestamp, ego)
+      reason = self._reason(indices, raw_leads, leads, track, ego)
       motions = [FutureMotion.from_model(model_leads[i]) for i in indices] if reason == 'eligible' else []
       if reason == 'eligible' and any(motion is None for motion in motions):
         reason = 'prediction_invalid'
@@ -139,13 +139,13 @@ class LeadFutureMotion:
       old = self.states.get(track)
       dt = timestamp - old.timestamp if old is not None else 0.0
       # An in-place tracker reset can retain object identity but resets age.
-      reanchor = old is None or not 0.01 <= dt <= 0.1 or track.age <= old.track_age
+      reanchor = old is None or old.identity != track.identity or not 0.01 <= dt <= 0.1 or track.age <= old.track_age
       if not reanchor:
         predicted = old.distance + old.motion.speed * dt + 0.5 * old.motion.acceleration * dt**2 - 0.5 * (old.ego + ego) * dt
         reanchor = abs(distance - predicted) > 0.75 or abs(motion.speed - old.motion.speed) > 3.0
       else:
         predicted = distance
-      state = _State(timestamp, track.age, ego, distance, motion)
+      state = _State(track.identity, timestamp, track.age, ego, distance, motion)
       states[track] = state
       weight = self.MAX_WEIGHT / (1.0 + (motion.speed_std / 4.0)**2)
       reason = 'reanchor'

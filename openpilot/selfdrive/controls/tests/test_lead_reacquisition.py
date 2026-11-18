@@ -13,7 +13,6 @@ class Track:
   age: float = 10.0
   mode: str = 'distance'
   transition: float = 1.0
-  uncertain_handoff_until: float = -math.inf
 
 
 class TestLeadReacquisitionShadow(unittest.TestCase):

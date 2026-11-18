@@ -163,6 +163,16 @@ class TestLeadFutureMotion(unittest.TestCase):
     self.assertEqual(output, raw)
     self.assertEqual(self.filter.status[0].reason, 'reanchor')
 
+  def test_generation_change_discards_correction_even_with_mature_age(self):
+    output, raw = self.warm()
+    self.assertLess(output[0]['vLead'], raw[0]['vLead'])
+    old_identity = self.filter.states[self.track].identity
+    self.track.generation += 1
+    output, raw = self.step()
+    self.assertEqual(output, raw)
+    self.assertEqual(self.filter.status[0].reason, 'reanchor')
+    self.assertNotEqual(self.filter.states[self.track].identity, old_identity)
+
   def test_replaced_track_and_in_place_reset_discard_old_correction(self):
     self.warm()
     self.track = track()
@@ -245,6 +255,24 @@ class TestLeadFutureMotion(unittest.TestCase):
     self.timestamp += 0.5
     output, raw = self.step()
     self.assertEqual(output, raw)
+
+
+class TestConfidenceIdentity(unittest.TestCase):
+  def test_generation_change_reanchors_range_without_smoothing_new_target(self):
+    confidence = VisionLeadConfidenceFilter()
+    owner = track(speed=25.)
+    uncertainty = LeadUncertainty(.99, 8., 1., 1.)
+    for frame, distance in enumerate((80., 81.)):
+      raw = [lead(distance=distance), {'present': False}]
+      output = confidence.update(raw, raw, [uncertainty] * 2, [owner, None], frame * .05, 25.)
+    self.assertEqual(confidence.status[0].reason, 'active')
+    self.assertLess(output[0]['dRel'], raw[0]['dRel'])
+    owner.generation += 1
+    raw = [lead(distance=82.), {'present': False}]
+    output = confidence.update(raw, raw, [uncertainty] * 2, [owner, None], .1, 25.)
+    self.assertEqual(output, raw)
+    self.assertEqual(confidence.status[0].reason, 'reanchor')
+    self.assertEqual(confidence.states[0].identity, owner.identity)
 
 
 class TestTrackerFutureIntegration(unittest.TestCase):

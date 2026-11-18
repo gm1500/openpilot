@@ -215,6 +215,36 @@ class RadarD:
 
     self.ready = False
 
+  @staticmethod
+  def _association_yaw_rate(sm, timestamp):
+    """Optional measured yaw for association; never a radar health dependency."""
+    try:
+      names = ('deviceMotion', 'extrinsicsCalibration')
+      if not all(sm.seen.get(name, False) and sm.valid[name] for name in names):
+        return None
+      motion, calibration = (sm[name] for name in names)
+      angular = motion.angularVelocityDevice
+      values = tuple(float(v) for v in (angular.x, angular.y, angular.z))
+      stds = (angular.xStd, angular.yStd, angular.zStd)
+      rpy = tuple(float(v) for v in calibration.rpyCalib)
+      measured = motion.timestamp * 1e-9
+      published = sm.logMonoTime.get('deviceMotion', 0) * 1e-9
+      calibrated = sm.logMonoTime.get('extrinsicsCalibration', 0) * 1e-9
+      if not (all(math.isfinite(v) for v in (timestamp, measured, published, calibrated, *values, *rpy))
+              and len(rpy) == 3 and all(math.isfinite(v) and v >= 0. for v in stds)
+              and motion.inputsOK and motion.sensorsOK and motion.posenetOK and angular.valid
+              and str(calibration.calStatus) == 'calibrated'
+              and 0. <= measured <= timestamp and measured <= published <= timestamp + .1
+              and timestamp - measured <= .1 + 1e-6
+              and 0. <= calibrated <= measured and timestamp - calibrated <= 2. + 1e-6):
+        return None
+      # Device -> calibrated FRD, matching PoseCalibrator. Future model yaw
+      # remains a prediction and is deliberately not substituted here.
+      yaw = float((rot_from_euler(rpy).T @ values)[2])
+      return yaw if math.isfinite(yaw) else None
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+      return None
+
   def _observe_departure(self, sm, model, heads, timestamp, model_v_ego, valid):
     if self.lead_departure_shadow is None:
       return
@@ -356,18 +386,19 @@ class RadarD:
       raw_leads = leads
       model = sm['modelV2']
       yaw_rate = float(model.orientationRate.z[0]) if len(model.orientationRate.z) else None
-      baseline = self.vision_lead_tracker.update(observations, raw_leads, timestamp, self.v_ego, valid, yaw_rate=yaw_rate)
+      baseline = self.vision_lead_tracker.update(observations, raw_leads, timestamp, self.v_ego, valid, yaw_rate=yaw_rate,
+                                                association_yaw_rate=self._association_yaw_rate(sm, timestamp))
       leads = self.vision_confidence_filter.update(raw_leads, baseline, uncertainties, self.vision_lead_tracker.slots,
                                                   timestamp, self.v_ego, valid)
       leads = self.lead_transition_recovery.update(
         observations, raw_leads, leads, [uncertainty.speed_std for uncertainty in uncertainties],
-        timestamp, self.v_ego, yaw_rate, valid)
+        timestamp, self.v_ego, yaw_rate, valid, tracks=self.vision_lead_tracker.slots)
       leads = self.lead_future_motion.update(leads_v3, raw_leads, leads, self.vision_lead_tracker.slots,
                                             timestamp, self.v_ego, valid)
       if self.lead_responsive_motion is not None:
         try:
           leads = self.lead_responsive_motion.update(leads_v3, observations, raw_leads, leads,
-                                                    timestamp, self.v_ego, yaw_rate, valid)
+                                                    timestamp, self.v_ego, yaw_rate, valid, tracks=self.vision_lead_tracker.slots)
         except Exception:
           # A failed POC must leave the already accepted lead output intact.
           cloudlog.exception("responsive lead motion disabled after estimator failure")
@@ -403,6 +434,8 @@ class RadarD:
           shadow = self.lead_reacquisition_shadow
           cloudlog.info(" ".join((
             f"lead-pre: slot={i} mode={track.mode if track else 'fallback'}",
+            f"track_id={track.track_id if track else -1} generation={track.generation if track else -1}",
+            f"association={self.vision_lead_tracker.association_reasons[i]}",
             f"age={track.age if track else 0.0:.2f} ready={int(track.ready) if track else 0}",
             f"continuity={track.continuity.reason if track else 'missing'} single_dv={track.single_closing_offset if track else 0.0:.2f}",
             f"v={leads[i].get('vLead', 0.0):.2f}",

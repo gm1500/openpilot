@@ -2,6 +2,7 @@ import copy
 import math
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 from openpilot.selfdrive.controls.lib.lead_transition import LeadTransitionRecovery
@@ -14,7 +15,7 @@ class TestLeadTransitionRecovery(unittest.TestCase):
     self.time = 0.0
 
   def sample(self, distance, ego=30.0, speed=29.0, acceleration=0.0, lateral=0.0, std=8.0, probability=0.99,
-             yaw=0.0, valid=True, dt=0.05, speed_std=2.0, modify=None):
+             yaw=0.0, valid=True, dt=0.05, speed_std=2.0, modify=None, tracks=None):
     self.time += dt
     obs = [VisionLeadObservation(distance, lateral, std, probability) for _ in range(2)]
     raw = [{'present': True, 'radar': False, 'dRel': distance, 'yRel': lateral, 'vLead': speed, 'vLeadK': speed, 'vRel': speed - ego,
@@ -24,7 +25,7 @@ class TestLeadTransitionRecovery(unittest.TestCase):
     if modify is not None:
       modify(obs, raw, leads, speed_stds)
     originals = copy.deepcopy((obs, raw, leads, speed_stds))
-    out = self.recovery.update(obs, raw, leads, speed_stds, self.time, ego, yaw, valid)
+    out = self.recovery.update(obs, raw, leads, speed_stds, self.time, ego, yaw, valid, tracks=tracks)
     self.assertEqual((obs, raw, leads, speed_stds), originals)
     for a, b in zip(leads, out, strict=True):
       self.assertEqual({k: v for k, v in a.items() if k not in ('vLead', 'vLeadK', 'vRel')},
@@ -50,6 +51,33 @@ class TestLeadTransitionRecovery(unittest.TestCase):
     for previous, current in zip(changes[:-1], changes[1:], strict=True):
       self.assertLessEqual(current - previous, 0.100001)
     self.assertTrue(all(change == 0.0 for change in changes[:14]))
+
+  def test_identity_or_generation_change_revokes_opening_history(self):
+    for identity in ((42, 0), (41, 1)):
+      with self.subTest(identity=identity):
+        self.setUp()
+        owner = SimpleNamespace(identity=(41, 0))
+        for i in range(36):
+          self.sample(60. + 4. * (i + 1) * .05, speed=30., tracks=[owner, owner])
+        self.assertGreater(self.recovery.correction, .5)
+        # Kinematically plausible continuation; only the owner identifies the
+        # replacement. Its lower current speed must reach planning immediately.
+        owner.identity = identity
+        before, output = self.sample(67.4, speed=29., tracks=[owner, owner])
+        self.assertEqual(output, before)
+        self.assertEqual(self.recovery.correction, 0.)
+        self.assertEqual(len(self.recovery.history), 1)
+        self.assertEqual(self.recovery.owner, identity)
+
+  def test_distinct_owners_cannot_share_an_opening_history(self):
+    owner = SimpleNamespace(identity=(41, 0))
+    for i in range(36):
+      self.sample(60. + 4. * (i + 1) * .05, speed=30., tracks=[owner, owner])
+    self.assertGreater(self.recovery.correction, .5)
+    before, output = self.sample(67.4, tracks=[owner, SimpleNamespace(identity=(42, 0))])
+    self.assertEqual(output, before)
+    self.assertFalse(self.recovery.history)
+    self.assertEqual(self.recovery.reason, 'identity_ambiguous')
 
   def test_distance_jitter_keeps_private_history(self):
     changes = self.acquire(frames=30, noise=True)

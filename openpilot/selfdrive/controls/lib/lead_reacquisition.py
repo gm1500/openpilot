@@ -116,7 +116,6 @@ class LeadReacquisitionShadow:
         and track.age >= self.MIN_TRACK_AGE
         and track.mode == 'distance'
         and track.transition >= 1.0
-        and timestamp >= track.uncertain_handoff_until
         and all(self._vision(leads[i]) and observations[i].valid() and observations[i].probability >= 0.9 for i in indices)
       ):
         continue
