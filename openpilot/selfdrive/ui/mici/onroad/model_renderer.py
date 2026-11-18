@@ -320,6 +320,8 @@ class ModelRenderer(Widget):
         continue
 
       color = self._get_ll_color(float(self._lane_line_probs[i]), i in (1, 2), i in (0, 1))
+      if i in (1, 2) and ui_state.lane_policy_line_color is not None:
+        color = rl.Color(*ui_state.lane_policy_line_color, color.a)
       draw_polygon(self._rect, lane_line.projected_points + offset, color)
 
     for i, road_edge in enumerate(self._road_edges):
