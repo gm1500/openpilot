@@ -12,6 +12,12 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL, Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.simple_kalman import KF1D
+from openpilot.selfdrive.controls.lib.vision_lead_confidence import LeadUncertainty, VisionLeadConfidenceFilter
+from openpilot.selfdrive.controls.lib.vision_lead_tracker import VisionLeadObservation, VisionLeadTracker
+from openpilot.selfdrive.controls.lib.lead_transition import LeadTransitionRecovery
+from openpilot.selfdrive.controls.lib.lead_reacquisition import LeadReacquisitionShadow
+from openpilot.selfdrive.controls.lib.lead_future_motion import LeadFutureMotion
+from openpilot.selfdrive.controls.lib.lead_responsive_motion import LeadResponsiveMotion
 
 
 # Default lead acceleration decay set to 50% at 1s
@@ -181,6 +187,15 @@ class RadarD:
     self.tracks: dict[int, Track] = {}
     self.kalman_params = KalmanParams(DT_MDL)
     self.lead_prob_filters = [FirstOrderFilter(0.0, 0.2, DT_MDL) for _ in range(2)]
+    self.vision_lead_tracker = VisionLeadTracker()
+    self.vision_confidence_filter = VisionLeadConfidenceFilter()
+    self.lead_transition_recovery = LeadTransitionRecovery()
+    self.lead_future_motion = LeadFutureMotion()
+    self.lead_responsive_motion = LeadResponsiveMotion()
+    self.lead_reacquisition_shadow = LeadReacquisitionShadow()
+    self.last_reacquisition_log = -math.inf
+    self.reacquisition_was_active = False
+    self.last_vision_log = 0.0
 
     self.v_ego = 0.0
     self.v_ego_hist = deque([0.0], maxlen=int(round(delay / DT_MDL))+1)
@@ -230,6 +245,9 @@ class RadarD:
       model_v_ego = self.v_ego
     leads_v3 = sm['modelV2'].leadsV3
     if len(leads_v3) > 1:
+      # Every motion stage must receive the same two slots as the observations
+      # and accepted leads, even when the model publishes additional predictions.
+      leads_v3 = [leads_v3[i] for i in range(2)]
       for i in range(2):
         # Asymmetric filter on lead prob to keep lead when uncertain
         lead_prob = leads_v3[i].prob
@@ -238,8 +256,96 @@ class RadarD:
         else:
           self.lead_prob_filters[i].update(lead_prob)
 
-      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.lead_prob_filters[0].x, low_speed_override=True)
-      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.lead_prob_filters[1].x, low_speed_override=False)
+      timestamp = self.radar_state.mdMonoTime * 1e-9
+      observations, leads, uncertainties = [], [], []
+      for i in range(2):
+        lead_msg = leads_v3[i]
+        leads.append(get_lead(self.v_ego, self.ready, self.tracks, lead_msg, model_v_ego, self.lead_prob_filters[i].x,
+                              low_speed_override=(i == 0)))
+        # Observe below control acceptance; raw confidence weights private history.
+        observations.append(VisionLeadObservation(float(lead_msg.x[0] - RADAR_TO_CAMERA), float(-lead_msg.y[0]),
+                                                  float(lead_msg.xStd[0]) if len(lead_msg.xStd) else float('nan'), float(lead_msg.prob)))
+        uncertainties.append(LeadUncertainty(
+          float(lead_msg.prob), observations[-1].std,
+          float(lead_msg.vStd[0]) if len(lead_msg.vStd) else float('nan'),
+          float(lead_msg.aStd[0]) if len(lead_msg.aStd) else float('nan'),
+        ))
+      valid = self.radar_state_valid and self.ready
+      raw_leads = leads
+      model = sm['modelV2']
+      yaw_rate = float(model.orientationRate.z[0]) if len(model.orientationRate.z) else None
+      baseline = self.vision_lead_tracker.update(observations, raw_leads, timestamp, self.v_ego, valid, yaw_rate=yaw_rate)
+      leads = self.vision_confidence_filter.update(raw_leads, baseline, uncertainties, self.vision_lead_tracker.slots,
+                                                  timestamp, self.v_ego, valid)
+      leads = self.lead_transition_recovery.update(
+        observations, raw_leads, leads, [uncertainty.speed_std for uncertainty in uncertainties],
+        timestamp, self.v_ego, yaw_rate, valid)
+      leads = self.lead_future_motion.update(leads_v3, raw_leads, leads, self.vision_lead_tracker.slots,
+                                            timestamp, self.v_ego, valid)
+      if self.lead_responsive_motion is not None:
+        try:
+          leads = self.lead_responsive_motion.update(leads_v3, observations, raw_leads, leads,
+                                                    timestamp, self.v_ego, yaw_rate, valid)
+        except Exception:
+          # A failed POC must leave the already accepted lead output intact.
+          cloudlog.exception("responsive lead motion disabled after estimator failure")
+          self.lead_responsive_motion = None
+      # Read-only experiment: its candidates never replace `leads`. A failure
+      # disables only the observer for this process lifetime, not lead control.
+      if self.lead_reacquisition_shadow is not None:
+        try:
+          shadow = self.lead_reacquisition_shadow
+          shadow.update(observations, raw_leads, leads, self.vision_lead_tracker.slots,
+                        timestamp, self.v_ego, yaw_rate, valid)
+          active = any(status.active for status in shadow.status)
+          if active != self.reacquisition_was_active or (active and timestamp - self.last_reacquisition_log >= .1):
+            for i, status in enumerate(shadow.status):
+              cloudlog.info(" ".join((
+                f"lead-reacquire-shadow: slot={i} reason={status.reason} active={int(status.active)}",
+                f"age={status.age:.3f} dr={status.delta_distance:.3f} dv={status.delta_speed:.3f}",
+                f"std_ratio={status.std_ratio:.2f} frames={shadow.bridge_frames[i]}",
+              )))
+            self.last_reacquisition_log = timestamp
+            self.reacquisition_was_active = active
+        except Exception:
+          cloudlog.exception("lead-reacquire-shadow disabled after observer failure")
+          self.lead_reacquisition_shadow = None
+      for i, field in enumerate(('leadOne', 'leadTwo')):
+        setattr(self.radar_state, field, leads[i])
+        if timestamp - self.last_vision_log >= 1.0:
+          track = self.vision_lead_tracker.slots[i]
+          confidence = self.vision_confidence_filter.status[i]
+          future = self.lead_future_motion.status[i]
+          responsive = self.lead_responsive_motion
+          shadow = self.lead_reacquisition_shadow
+          cloudlog.info(" ".join((
+            f"lead-pre: slot={i} mode={track.mode if track else 'fallback'}",
+            f"age={track.age if track else 0.0:.2f} ready={int(track.ready) if track else 0}",
+            f"continuity={track.continuity.reason if track else 'missing'} single_dv={track.single_closing_offset if track else 0.0:.2f}",
+            f"v={leads[i].get('vLead', 0.0):.2f}",
+            f"confidence={confidence.reason} gains={confidence.range_gain:.3f},{confidence.accel_gain:.3f}",
+            f"conf_dr={leads[i].get('dRel', 0.0) - baseline[i].get('dRel', 0.0):.3f}",
+            f"conf_da={leads[i].get('aLeadK', 0.0) - baseline[i].get('aLeadK', 0.0):.3f}",
+            f"lead_transition={self.lead_transition_recovery.reason} dv={self.lead_transition_recovery.correction:.2f}",
+            f"future_motion={future.reason} future_v={future.speed:.2f} future_std={future.speed_std:.2f}",
+            f"future_w={future.weight:.3f} future_dv={future.delta_speed:.3f} future_dr={future.delta_distance:.3f}",
+            f"responsive={responsive.reason if responsive is not None else 'disabled'}",
+            f"responsive_dv={responsive.delta if responsive is not None else 0.0:.3f}",
+            f"responsive_fast={int(responsive.motion.fast_response) if responsive is not None else 0}",
+            f"reacquire_shadow={shadow.status[i].reason if shadow is not None else 'disabled'}",
+            f"shadow_frames={shadow.bridge_frames[i] if shadow is not None else 0}",
+          )))
+      if timestamp - self.last_vision_log >= 1.0:
+        self.last_vision_log = timestamp
+    else:
+      self.vision_lead_tracker.reset()
+      self.vision_confidence_filter.reset()
+      self.lead_transition_recovery.reset()
+      self.lead_future_motion.reset()
+      if self.lead_responsive_motion is not None:
+        self.lead_responsive_motion.reset()
+      if self.lead_reacquisition_shadow is not None:
+        self.lead_reacquisition_shadow.reset('missing_model')
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None

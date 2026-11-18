@@ -29,6 +29,14 @@ enum SpiError {
 
 const unsigned int SPI_ACK_TIMEOUT = 500; // milliseconds
 const std::string SPI_DEVICE = "/dev/spidev0.0";
+// Experimental turnaround margin for the legacy SPI protocol. This reduces
+// timing races but does not prevent duplicate execution after a lost response.
+static constexpr uint64_t SPI_TURNAROUND_NS = 50000;  // 50 us
+static uint64_t spi_last_bus_activity_ns = 0;  // protected by hw_lock
+
+static void wait_for_spi_turnaround(uint64_t start_ns) {
+  while ((nanos_since_boot() - start_ns) < SPI_TURNAROUND_NS) {}
+}
 
 class LockEx {
 public:
@@ -319,6 +327,8 @@ int PandaSpiHandle::spi_transfer(uint8_t endpoint, uint8_t *tx_data, uint16_t tx
   assert(tx_len < SPI_BUF_SIZE);
   assert(max_rx_len < SPI_BUF_SIZE);
 
+  wait_for_spi_turnaround(spi_last_bus_activity_ns);
+
   xfer_count++;
   header = {
     .sync = SPI_SYNC,
@@ -347,6 +357,7 @@ int PandaSpiHandle::spi_transfer(uint8_t endpoint, uint8_t *tx_data, uint16_t tx
   if (ret < 0) {
     goto fail;
   }
+  wait_for_spi_turnaround(nanos_since_boot());
 
   // Send data
   if (tx_data != NULL) {
@@ -389,6 +400,7 @@ int PandaSpiHandle::spi_transfer(uint8_t endpoint, uint8_t *tx_data, uint16_t tx
     memcpy(rx_data, rx_buf + 3, rx_data_len);
   }
 
+  spi_last_bus_activity_ns = nanos_since_boot();
   return rx_data_len;
 
 fail:
@@ -403,6 +415,7 @@ fail:
     }
   }
 
+  spi_last_bus_activity_ns = nanos_since_boot();
   if (ret >= 0) ret = -1;
   return ret;
 }
