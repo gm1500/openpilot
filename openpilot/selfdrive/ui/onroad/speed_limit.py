@@ -10,7 +10,7 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 
 def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: float | None, is_metric: bool, set_color: rl.Color,
                      state: str = 'unsupported', pulse_elapsed: float | None = None, advisory: bool = False,
-                     e2e_override: bool = False) -> None:
+                     e2e_override: bool = False, zone_type: str = 'none') -> None:
   """North American-style map sign, with the cruise target outside underneath."""
   font = gui_app.font(FontWeight.BOLD)
   medium = gui_app.font(FontWeight.MEDIUM)
@@ -25,6 +25,16 @@ def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: f
   background = rl.Color(255, 205, 40, 255) if advisory else rl.Color(
     round(250 - 230 * pulse), round(250 - 15 * pulse), round(247 - 182 * pulse), 255)
   rl.draw_rectangle_rounded(rect, 0.12, 8, background)
+  zone_header = not advisory and speed_limit is not None and not e2e_override and zone_type in ('construction', 'school')
+  if zone_header:
+    color = orange if zone_type == 'construction' else rl.Color(180, 255, 0, 255)
+    # Match the sign's top corners, fill to both edges, and leave 6 px below
+    # the existing label row. Square the band's lower corners without clipping
+    # so the surrounding on-road scissor remains intact.
+    radius = min(rect.width, rect.height) * 0.06
+    header = rl.Rectangle(rect.x, rect.y, rect.width, 54 * scale)
+    rl.draw_rectangle_rounded(header, 2 * radius / min(header.width, header.height), 8, color)
+    rl.draw_rectangle_rec(rl.Rectangle(header.x, header.y + header.height - radius, header.width, radius), color)
   inset = 3 * scale
   border = rl.Rectangle(rect.x + inset, rect.y + inset, rect.width - 2 * inset, rect.height - 2 * inset)
   rl.draw_rectangle_rounded_lines_ex(border, 0.08, 8, 3 * scale, black)
@@ -39,7 +49,10 @@ def draw_speed_limit(rect: rl.Rectangle, speed_limit: float | None, set_speed: f
     rl.draw_text_ex(face, value, pos, size, 0, color)
 
   if not advisory:
-    text("MAXIMUM" if is_metric else "SPEED LIMIT", 14, 34, 27, black)
+    label = "MAXIMUM" if is_metric else "SPEED LIMIT"
+    if zone_header:
+      label = 'CONSTRUCTION' if zone_type == 'construction' else 'SCHOOL'
+    text(label, 14, 34, 27, black)
   if e2e_override:
     # Reuse the mode button's icon, centered where the map number normally sits.
     icon = gui_app.texture('icons/experimental.png', round(100 * scale), round(100 * scale))
@@ -99,4 +112,5 @@ class SpeedLimitButton(Widget):
     elapsed = None if self._pulse_since is None else now - self._pulse_since
     draw_speed_limit(rect, ui_state.speed_limit, self.set_speed, ui_state.is_metric, self.set_color, state, elapsed,
                      advisory=ui_state.speed_limit_is_advisory,
+                     zone_type=str(getattr(ui_state.sm['mapSpeedLimit'], 'zoneType', 'none')),
                      e2e_override=ui_state.map_cruise_e2e and ui_state.map_cruise_enabled and ui_state.map_cruise_supported)

@@ -199,7 +199,7 @@ class TestModelStop(unittest.TestCase):
     stop.update(sm, 1, 100.02)
     self.assertIsNone(stop.marker)  # a raw prediction cannot resurrect a released target
 
-  def test_target_marker_requires_fresh_planner_and_handles_unknown_projection(self):
+  def test_target_marker_requires_fresh_planner_and_clips_only_its_projection(self):
     sm, stop = SM(model()), ModelStop()
     sm['selfdriveState'].enabled = True
     sm['longitudinalPlan'] = NS(stopTarget=NS(active=True, distance=40.), e2eStopActive=True)
@@ -208,7 +208,11 @@ class TestModelStop(unittest.TestCase):
     sm.stamp(100.)
     stop.update(sm, 1, 100.)
     self.assertEqual(stop.marker.distance, 40.)
-    self.assertIsNone(stop.marker.position)  # target beyond path: no clamping
+    self.assertAlmostEqual(stop.marker.position[0], 16. + 1.52)  # exact target distance stays 40 m
+    sm['modelV2'].position.z[5] = math.nan
+    stop.update(sm, 1, 100.)
+    self.assertEqual(stop.marker.distance, 40.)
+    self.assertIsNone(stop.marker.position)
     sm.valid['longitudinalPlan'] = False
     stop.update(sm, 1, 100.)
     self.assertIsNone(stop.marker)
