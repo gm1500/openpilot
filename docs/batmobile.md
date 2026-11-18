@@ -5,9 +5,16 @@
 `d3f09c9bbd542fbfbe68c8569a1173550c408969` and the Sierra opendbc revision
 `63c1fe02b20f9df99367671ae060652d16bbd00d`.
 
-The base was grouped into eight feature commits: Sierra tuning, Nudgeless, Lane policy,
-[VOACC fixes](voacc.md), SLC, [CEM](conditional-experimental.md),
-[C3x UI](c3x-ui.md), and [Sentry mode](sentry.md).
+The branch is grouped into seven feature commits:
+
+1. Lane policy and nudgeless lane changes, including one maneuver per fresh signal activation.
+2. Sierra support and [VOACC lead control](voacc.md), including continuity,
+   future-position estimation, guarded responsive fusion and derived-speed E2E assistance.
+3. Speed Limit Control.
+4. [Conditional Experimental Mode](conditional-experimental.md).
+5. [C3x UI](c3x-ui.md).
+6. [Sentry mode](sentry.md).
+7. Road-edge lane centering assist, including learned lane-width retention.
 See [boat-anchor](boat-anchor.md) for the driving features and defaults.
 
 Only the `batmobile` branch shows **Batmobile Activated** at startup, with the usual driving reminder.
