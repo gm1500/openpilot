@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string>
 #include <mutex>
@@ -7,6 +8,15 @@
 #include "openpilot/cereal/messaging/messaging.h"
 
 const bool SIMULATION = (getenv("SIMULATION") != nullptr) && (std::string(getenv("SIMULATION")) == "1");
+
+static service get_service(const char *name) {
+  auto it = services.find(name);
+  if (it == services.end()) {
+    fprintf(stderr, "Unknown messaging service '%s'. Check services.py and rebuild the native messaging library.\n", name);
+    abort();
+  }
+  return it->second;
+}
 
 static inline bool inList(const std::vector<const char *> &list, const char *value) {
   for (auto &v : list) {
@@ -47,9 +57,7 @@ SubMaster::SubMaster(const std::vector<const char *> &service_list, const std::v
                      const char *address, const std::vector<const char *> &ignore_alive) {
   poller_ = Poller::create();
   for (auto name : service_list) {
-    assert(services.count(std::string(name)) > 0);
-
-    service serv = services.at(std::string(name));
+    service serv = get_service(name);
     SubSocket *socket = SubSocket::create(message_context.context(), name, address ? address : "127.0.0.1", true, true, serv.queue_size);
     assert(socket != 0);
     bool is_polled = inList(poll, name) || poll.empty();
@@ -186,8 +194,7 @@ SubMaster::~SubMaster() {
 
 PubMaster::PubMaster(const std::vector<const char *> &service_list) {
   for (auto name : service_list) {
-    assert(services.count(name) > 0);
-    service serv = services.at(std::string(name));
+    service serv = get_service(name);
     PubSocket *socket = PubSocket::create(message_context.context(), name, true, serv.queue_size);
     assert(socket);
     sockets_[name] = socket;

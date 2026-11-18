@@ -8,6 +8,7 @@
 #include "system/loggerd/clip_encoder.h"
 #endif
 #include "system/loggerd/loggerd.h"
+#include "system/loggerd/sentry_overlay.h"
 #include "system/loggerd/encoder/jpeg_encoder.h"
 
 #ifdef __COMMA_HARDWARE__
@@ -22,6 +23,7 @@ ExitHandler do_exit;
 
 struct EncoderdState {
   int max_waiting = 0;
+  bool sentry = false;
 
   // Sync logic for startup
   std::atomic<int> encoders_ready = 0;
@@ -68,7 +70,12 @@ void encoder_request_keyframe(std::unique_ptr<Encoder> &e) {
 void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
   util::set_thread_name(cam_info.thread_name);
 
+  // Declare pools first so hardware is drained before their buffers are freed.
+  std::vector<std::unique_ptr<SentryOverlay>> overlays;
   std::vector<std::unique_ptr<Encoder>> encoders;
+  auto sentry_sm = s->sentry ? std::make_unique<SubMaster>(std::vector<const char *>{"sentryState"}) : nullptr;
+  int preview_camera = -1;
+  bool preview_keyframe = false;
 
   VisionIpcClient vipc_client = VisionIpcClient("camerad", cam_info.stream_type, false);
 
@@ -88,8 +95,20 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
       assert(buf_info.width > 0 && buf_info.height > 0);
 
       for (const auto &encoder_info : cam_info.encoder_infos) {
-        auto &e = encoders.emplace_back(new Encoder(encoder_info, buf_info.width, buf_info.height));
-        e->encoder_open();
+        if (s->sentry) {
+          auto &overlay = overlays.emplace_back(std::make_unique<SentryOverlay>(cam_info.stream_type));
+#ifdef __COMMA_HARDWARE__
+          V4LEncoder::Options options;
+          options.input_done_callback = [pool = overlay.get()](VisionBuf *buf) { pool->release(buf); };
+          encoders.emplace_back(new Encoder(encoder_info, 526, 330, options));
+#else
+          (void)overlay;
+          encoders.emplace_back(new Encoder(encoder_info, 526, 330));
+#endif
+        } else {
+          encoders.emplace_back(new Encoder(encoder_info, buf_info.width, buf_info.height));
+        }
+        encoders.back()->encoder_open();
       }
 
       // Only one thumbnail can be generated per camera stream
@@ -129,6 +148,18 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
         ++cur_seg;
       }
 
+      if (sentry_sm) {
+        sentry_sm->update(0);
+        const auto now = nanos_since_boot();
+        auto state = sentry_state((*sentry_sm)["sentryState"], sentry_sm->rcv_time("sentryState"), now);
+        const int selected = state && state->getCapture() && state->getRecordUntilMonoTime() > now
+                               ? state->getTriggerCamera() : -1;
+        if (selected != preview_camera) {
+          preview_keyframe = selected == cam_info.stream_type;
+          preview_camera = selected;
+        }
+      }
+
       // encode a frame
       for (int i = 0; i < encoders.size(); ++i) {
         if (cam_info.encoder_infos[i].is_live) {
@@ -136,7 +167,18 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
           encoder_request_keyframe(encoders[i]);
         }
 
-        int out_id = encoders[i]->encode_frame(buf, &extra);
+        VisionBuf *input = s->sentry ? overlays[i]->prepare(buf, extra) : buf;
+        if (!input) continue;
+        if (preview_keyframe && cam_info.encoder_infos[i].get_settings(input->width).encode_type == cereal::EncodeIndex::Type::QCAMERA_H264) {
+          // A new preview lens needs its own independently decodable frame.
+          // Request once per handoff; keep the normal GOP and all HEVC streams.
+          encoders[i]->request_keyframe();
+          preview_keyframe = false;
+        }
+        int out_id = encoders[i]->encode_frame(input, &extra);
+#ifndef __COMMA_HARDWARE__
+        if (s->sentry) overlays[i]->release(input);
+#endif
 
         if (out_id == -1) {
           LOGE("Failed to encode frame. frame_id: %d", extra.frame_id);
@@ -151,8 +193,9 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
 }
 
 template <size_t N>
-void encoderd_thread(const LogCameraInfo (&cameras)[N]) {
+void encoderd_thread(const LogCameraInfo (&cameras)[N], bool sentry = false) {
   EncoderdState s;
+  s.sentry = sentry;
 
   std::set<VisionStreamType> streams;
   while (!do_exit) {
@@ -220,6 +263,8 @@ int main(int argc, char* argv[]) {
     std::string arg1(argv[1]);
     if (arg1 == "--stream") {
       encoderd_thread(stream_cameras_logged);
+    } else if (arg1 == "--sentry") {
+      encoderd_thread(sentry_cameras, true);
     } else {
       LOGE("Argument '%s' is not supported", arg1.c_str());
     }
