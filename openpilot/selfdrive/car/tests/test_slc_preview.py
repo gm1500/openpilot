@@ -29,7 +29,7 @@ class Drive:
       self.helper.update_v_cruise(self.cs, self.enabled, True, map_enabled=True,
         map_speed=self.speed / 3.6 if self.speed is not None else None,
         map_gps_time=self.now if self.gps is None else self.gps, now=self.now,
-        slc_settings=self.settings,
+        automatic_e2e=self.automatic, e2e_ready=True, slc_settings=self.settings,
         map_preview=self.preview, map_way_id=self.way)
 
   def approach(self, speed=70.):
@@ -141,7 +141,7 @@ def test_uninitialized_set_cannot_treat_a_future_limit_as_an_early_reduction():
   assert d.helper.map_cruise.target_kph is None
 
 
-def test_preview_does_not_raise_lower_manual_target():
+def test_preview_does_not_raise_lower_manual_target_or_release_no_speed_e2e():
   d = Drive()
   d.helper.v_cruise_kph = 60.
   d.approach(70.)
@@ -151,6 +151,18 @@ def test_preview_does_not_raise_lower_manual_target():
   d.helper.v_cruise_kph = 60.
   d.tick()
   assert not d.helper.map_cruise.preview_active
+  d = Drive()
+  d.speed, d.automatic = None, True
+  d.tick(110)
+  assert d.helper.map_cruise.e2e_fallback
+  d.approach(70.)
+  d.preview = replace(d.preview, distance=20.)
+  d.tick()
+  assert d.target == 70
+  assert d.helper.map_cruise.e2e_fallback
+  d.speed, d.way, d.preview = 70., 2, None
+  d.tick()
+  assert not d.helper.map_cruise.e2e_fallback
 
 
 @pytest.mark.parametrize('speed', [8., 70., 145.])
