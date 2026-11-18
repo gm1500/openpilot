@@ -124,7 +124,9 @@ def test_raw_narrowing_wins_and_opening_hold_cannot_be_extended_by_weak_line():
   update(p, narrow)
   assert p.edges[1].y[0] == pytest.approx(narrow['road_edges'][0, 1, 0, 0])
   p.reset()
-  update(p, inward_line(), 80, speed=10.0)
+  # An immature edge keeps the ordinary opening budget; weak inner paint
+  # cannot earn the separate mature strong-anchor mode.
+  update(p, inward_line(), 60, speed=10.0)
   opening = inward_line()
   opening['road_edges'][0, 1, :, 0] += 2.0
   update(p, opening, 40, speed=10.0)

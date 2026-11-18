@@ -27,6 +27,8 @@ EDGE_HOLD_TIME, EDGE_HOLD_DISTANCE = 0.30, 5.0
 EDGE_OPENING_TIME, EDGE_OPENING_DISTANCE = 2.0, 30.0
 EDGE_MEMORY_TIME, EDGE_MEMORY_DISTANCE = 5.0, 100.0
 EDGE_MEMORY_FRAMES = round(0.30 / DT)
+EDGE_ANCHOR_SUPPORT = 2.5  # s of fully qualified edge observations, beyond initial arming
+EDGE_ANCHOR_TIME, EDGE_ANCHOR_DISTANCE = 15.0, 250.0
 EDGE_DISENGAGE_TIME = 5.0
 EDGE_CONFIDENCE_TIME, EDGE_CONFIDENCE_DISTANCE = 0.50, 8.0
 EDGE_HOLD_STD = 1.0
@@ -96,7 +98,7 @@ class InnerLineConstraint:
                   np.min(gaps[horizon]) >= INNER_LINE_MIN_GAP and np.max(gaps[horizon]) <= INNER_LINE_MAX_GAP)
     # Qualification must accompany fresh curb observations. A weak line cannot
     # renew either the edge's lease or this constraint across an opening.
-    observed = (not candidate.held and candidate.observed_frames > 0 and
+    observed = (not candidate.held and not candidate.anchor_guided and candidate.observed_frames > 0 and
                 np.isfinite(edge_std) and 0.0 <= edge_std <= EDGE_RETAIN_STD)
     while self.history and self.clock - self.history[0][0] > EDGE_ARM_WINDOW:
       self.history.popleft()
@@ -363,6 +365,19 @@ class EdgeBoundary:
     self.memory_y = None
     self.memory_time = self.memory_distance = 0.0
     self.memory_returns = 0
+    self.memory_support = 0.0
+    self.anchor_width = None
+    self.anchor_frames = 0
+    self.anchor_blocked = False
+
+  @property
+  def mature_memory(self):
+    return self.memory_width is not None and not self.memory_from_paint and self.memory_support >= EDGE_ANCHOR_SUPPORT - 1e-6
+
+  @property
+  def anchor_ready(self):
+    return (self.mature_memory and not self.anchor_blocked and self.anchor_width is not None and
+            self.anchor_frames >= EDGE_MEMORY_FRAMES)
 
   def reset(self, keep_memory=False):
     if not keep_memory:
@@ -370,6 +385,7 @@ class EdgeBoundary:
       self.inner_line.reset()
       self.previous_anchor = None
     self.memory_guided = False
+    self.anchor_guided = False
     self.memory_returns = 0
     self.available = self.held = False
     self.width_weighted = False
@@ -432,9 +448,11 @@ class EdgeBoundary:
     if self.memory_width is not None:
       self.memory_time += dt
       self.memory_distance += max(speed, 0.0) * dt
-      if self.memory_time > EDGE_MEMORY_TIME + 1e-6 or self.memory_distance > EDGE_MEMORY_DISTANCE + 1e-6:
+      memory_time, memory_distance = ((EDGE_ANCHOR_TIME, EDGE_ANCHOR_DISTANCE) if self.mature_memory else
+                                      (EDGE_MEMORY_TIME, EDGE_MEMORY_DISTANCE))
+      if self.memory_time > memory_time + 1e-6 or self.memory_distance > memory_distance + 1e-6:
         self.forget_memory()
-        if self.memory_guided:
+        if self.memory_guided or self.anchor_guided:
           self.reset()
           return
     # Both bounds must bracket the car; a nearby parallel road is not our lane.
@@ -444,7 +462,7 @@ class EdgeBoundary:
     direction = self.direction
     valid = (np.isfinite(opposite).all() and np.isfinite(edge).all() and
              np.isfinite(opposite_prob) and np.isfinite(edge_std) and edge_std >= 0 and
-             opposite_prob >= 0.70 and np.count_nonzero(fit) >= 4)
+             np.count_nonzero(fit) >= 4)
     if not valid:
       self.reset()
       return
@@ -462,10 +480,20 @@ class EdgeBoundary:
     anchor_continuous = self.previous_anchor is not None and np.max(np.abs(anchor - self.previous_anchor)) <= EDGE_MAX_ANCHOR_STEP + 1e-6
     anchor_jump = self.previous_anchor is not None and not anchor_continuous
     self.previous_anchor = anchor.copy()
+    self.anchor_frames = (min(self.anchor_frames + 1, EDGE_MEMORY_FRAMES)
+                          if opposite_prob >= EDGE_ARM_PROB and anchor_continuous and edge_std <= EDGE_HOLD_STD else 0)
+    if opposite_prob < 0.70:
+      # Losing the live anchor stops positioning immediately. A qualified scalar
+      # width can survive without publishing stale ego-frame boundary geometry.
+      self.reset(keep_memory=self.mature_memory)
+      self.memory_y = None
+      return
     if opposite_prob < EDGE_BRIDGE_RETAIN_PROB:
-      self.forget_memory()
-      if self.held or self.memory_guided:
-        self.reset()
+      if not self.mature_memory:
+        self.forget_memory()
+      if self.held or self.memory_guided or self.anchor_guided:
+        self.reset(keep_memory=self.mature_memory)
+        self.memory_y = None
         return
     geometric = high <= EDGE_MAX_WIDTH and high - low <= EDGE_MAX_SPREAD
     # Compare observations, not the conservative output cap.
@@ -477,10 +505,10 @@ class EdgeBoundary:
         # Matching average width cannot hide a peeling-away or bowed boundary.
         self.reset()
         return
-    if anchor_jump:
+    if anchor_jump and opposite_prob >= EDGE_BRIDGE_RETAIN_PROB:
       # A simultaneous motion of fresh paint and curb need not drop observed
       # centering, but old width memory must never bridge an anchor jump.
-      if not observed or self.held or self.memory_guided or not self.available:
+      if not observed or self.held or self.memory_guided or self.anchor_guided or not self.available:
         self.reset()
         return
       self.forget_memory()
@@ -488,12 +516,39 @@ class EdgeBoundary:
     if self.memory_width is not None and inward_width < self.memory_width - EDGE_MAX_HISTORY_SPREAD:
       # A currently observed, compatible edge can cap inward immediately. An
       # unsupported inward jump must discard the prior and qualify again.
-      if not observed or self.held or self.memory_guided:
+      if not observed or self.held or self.memory_guided or self.anchor_guided:
         self.reset()
         return
       self.forget_memory()
-    self.memory_y = (opposite + direction * min(self.memory_width, inward_width)
-                     if self.memory_width is not None else None)
+    preview_width = min(self.memory_width, self.anchor_width) if self.mature_memory and self.anchor_width is not None else self.memory_width
+    self.memory_y = (opposite + direction * min(preview_width, inward_width)
+                     if self.memory_width is not None and opposite_prob >= (EDGE_ARM_PROB if self.mature_memory else EDGE_BRIDGE_RETAIN_PROB) else None)
+    if self.memory_y is not None and np.min(direction * self.memory_y[near]) < 0.3:
+      self.memory_y = None
+    retain_anchor = (self.anchor_guided and self.mature_memory and not self.anchor_blocked and
+                     opposite_prob >= EDGE_BRIDGE_RETAIN_PROB and anchor_continuous and edge_std <= EDGE_HOLD_STD)
+    if self.anchor_guided and not (self.anchor_ready or retain_anchor):
+      self.reset(keep_memory=True)
+      self.memory_y = None
+      return
+    if not observed and (self.anchor_ready or retain_anchor):
+      # Explicit live-paint mode: the remembered conservative scalar supplies
+      # width, never the opening's shape. Only fresh full edge qualification can
+      # renew its lease. The virtual boundary itself must still bracket the car.
+      width = min(self.anchor_width, inward_width)
+      boundary = opposite + direction * width
+      if np.min(direction * boundary[near]) < 0.3:
+        self.reset()
+        return
+      self.available = self.anchor_guided = True
+      self.held = self.memory_guided = False
+      self.width = self.filtered_width = width
+      self.observed_width = None
+      self.observed_frames = 0
+      self.gap_time = self.gap_distance = 0.0
+      self._clear_qualification()
+      self.y = boundary
+      return
     # A single returning frame must not replenish a long gap's time/distance
     # budget. Keep the width frozen until three consecutive observations agree.
     recovering = observed and self.available and self.gap_time > 0.0 and self.observed_frames + 1 < EDGE_RECOVERY_FRAMES
@@ -517,8 +572,15 @@ class EdgeBoundary:
       # Six agreeing observations may reuse the prior; only a full qualification
       # window can renew its age or teach a different width.
       qualified_width = self._qualify(opposite, opposite_prob, edge_std, x, median, high - low, dt)
+      # Mature edge memory stores a conservative scalar, not the old edge's
+      # median shape. Compare that same scalar on return; an inward cap must
+      # not manufacture a mismatch against a different statistic.
+      # An outward fluctuation within the qualified corridor cannot widen the
+      # frozen output. Reject unsupported narrowing, not harmless extra space.
+      memory_error = (self.anchor_width - inward_width if self.mature_memory and self.anchor_width is not None else
+                      abs(median - self.memory_median) if self.memory_median is not None else float('inf'))
       memory_matches = (self.memory_width is not None and opposite_prob >= EDGE_ARM_PROB and
-                        high - low <= EDGE_STABLE_SPREAD and abs(median - self.memory_median) <= EDGE_STABLE_HISTORY_SPREAD)
+                        high - low <= EDGE_STABLE_SPREAD and memory_error <= EDGE_STABLE_HISTORY_SPREAD)
       self.memory_returns = self.memory_returns + 1 if memory_matches else 0
       if self.memory_guided and not memory_matches:
         self.reset()
@@ -527,17 +589,18 @@ class EdgeBoundary:
         if qualified_width is not None:
           self.filtered_width = qualified_width
         elif self.memory_returns >= EDGE_MEMORY_FRAMES:
-          self.filtered_width = self.memory_width
+          self.filtered_width = min(self.memory_width, self.anchor_width) if self.mature_memory and self.anchor_width is not None else self.memory_width
           self.memory_guided = True
         else:
           return
         self.available = True
       if qualified_width is not None:
-        self.memory_guided = False
-      self.observed_width = self.memory_median if self.memory_guided else float(median)
+        self.memory_guided = self.anchor_guided = False
+        self.anchor_blocked = False
+      self.observed_width = self.memory_median if self.memory_guided and not self.mature_memory else float(median)
       change = np.clip((median - self.filtered_width) * dt / (EDGE_WIDTH_TIME + dt),
                        -EDGE_MAX_WIDTH_RATE * dt, EDGE_MAX_WIDTH_RATE * dt)
-      if not self.memory_guided:
+      if not self.memory_guided and not self.anchor_guided:
         self.filtered_width += float(change)
       # Do not lag an observed narrowing. A virtual boundary must not extend
       # beyond a credible edge merely because its earlier width was greater.
@@ -550,6 +613,7 @@ class EdgeBoundary:
       if qualified_width is not None:
         self.memory_width, self.memory_median = self.width, float(median)
         self.memory_from_paint = False
+        self.memory_support = min(self.memory_support + dt, EDGE_ANCHOR_SUPPORT)
         self.memory_time = self.memory_distance = 0.0
         self.memory_y = opposite + direction * self.memory_width
     elif self.available:
@@ -580,6 +644,8 @@ class EdgeBoundary:
       self._clear_qualification()
       return
     self.y = opposite + direction * self.width
+    if (self.anchor_guided or self.memory_guided) and np.min(direction * self.y[near]) < 0.3:
+      self.reset()
 
 
 class RoadEdgePolicy:
@@ -630,14 +696,45 @@ class RoadEdgePolicy:
           candidate.reset()
         self.paint_memory.seed(candidate, side, lines[2 - side], probs[1 + side], probs[2 - side], edges[side], stds[side], x, speed, dt)
         if self.inactive_time >= EDGE_DISENGAGE_TIME - 1e-6:
-          if candidate.held or candidate.memory_guided:
+          if candidate.held or candidate.memory_guided or candidate.anchor_guided:
             candidate.reset()
           candidate.forget_memory()
         candidate.update(lines[2 - side], edges[side], probs[2 - side], stds[side], x, speed, dt)
+        if candidate.mature_memory and np.min(probs[1:3]) >= EDGE_ARM_PROB:
+          paint_widths = lines[2] - lines[1]
+          horizon = (x >= 0.0) & (x <= EDGE_FIT_END)
+          paint_width = float(np.median(paint_widths[horizon]))
+          valid_paint = (np.isfinite(paint_widths).all() and np.min(paint_widths[horizon]) >= EDGE_MIN_WIDTH and
+                         np.max(paint_widths[horizon]) <= EDGE_MAX_WIDTH and np.ptp(paint_widths[horizon]) <= EDGE_STABLE_SPREAD)
+          if valid_paint and candidate.anchor_width is not None and abs(paint_width - candidate.anchor_width) > EDGE_MAX_HISTORY_SPREAD:
+            # Temporary inner paint and a curb need not describe the same
+            # boundary. Keep the curb scalar private, but block paint-only
+            # reuse until fresh edge qualification. Qualified conflicting
+            # painted width is enough to discard the old association entirely.
+            qualified_paint = (self.paint_memory.width is not None and
+                               abs(self.paint_memory.width - paint_width) <= EDGE_STABLE_HISTORY_SPREAD)
+            if candidate.anchor_guided or (qualified_paint and (candidate.memory_guided or candidate.held)):
+              candidate.reset(keep_memory=not qualified_paint)
+            if qualified_paint:
+              candidate.forget_memory()
+            else:
+              candidate.anchor_blocked = True
         if self.inactive_time >= EDGE_DISENGAGE_TIME - 1e-6:
           candidate.forget_memory()
         candidate.inner_line.update(candidate, lines[2 - side], lines[1 + side], edges[side], probs[2 - side], probs[1 + side],
                                     stds[side], x, speed, dt, self.inactive_time < EDGE_DISENGAGE_TIME - 1e-6, self.paint_memory)
         self.width_reference.apply(candidate, lines[2 - side], probs[2 - side], probs[1 + side], stds[side], x, output, dt)
+        near = (x >= 0.0) & (x <= 10.0)
+        if candidate.y is not None and np.min(candidate.direction * candidate.y[near]) < 0.3:
+          # Check the final constrained boundary, not only the raw curb. A
+          # remembered inward cap can otherwise place the virtual side across
+          # the car after an anchor moves during a low-confidence interval.
+          candidate.reset()
+        if candidate.memory_y is not None and np.min(candidate.direction * candidate.memory_y[near]) < 0.3:
+          candidate.memory_y = None
+        if candidate.memory_width is not None and candidate.memory_time == 0.0 and candidate.y is not None:
+          # Freeze the actually applied inward bounds too. Carrying a wider raw
+          # curb after paint/reference constraints expire would undo their guard.
+          candidate.anchor_width = min(candidate.memory_width, float(np.min(candidate.direction * (candidate.y - lines[2 - side]))))
     except (KeyError, IndexError, TypeError, ValueError):
       self.reset()

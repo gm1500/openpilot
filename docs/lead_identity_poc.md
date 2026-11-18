@@ -86,6 +86,48 @@ No recorded response window changes the derived-below-55-km/h classification,
 but the replay does not implement the complete E2E/CEM policy. These results do
 not demonstrate friction-brake elimination or uniformly improved comfort.
 
+### Extended response validation
+
+A 31-case deterministic matrix compares the same pinned implementations using
+the production estimator, native MPC, and a 0.5 s delay / 0.2 s lag longitudinal
+plant. Model velocity and future positions share injected errors; current range
+uses true relative motion plus seeded correlated noise. This avoids giving the
+future predictor privileged ground truth. One noise seed and aggressive following
+personality are used; this is not perception or vehicle validation.
+
+Measured against known synthetic speed during the first second, 11 cases improve,
+18 are unchanged, and two worsen (changes below 0.01 m/s count as unchanged).
+Among the 17 genuine target switches, 11 improve and six are unchanged; none has
+later requested braking below -0.5 m/s² or a smaller simulated minimum gap.
+Fresh acquisition of a slower lead and continuous same-lead slowing are unchanged,
+including the tested velocity lag, noise, dropout and model-slot swap cases.
+Larger positive model-speed errors reduce the target-switch benefit: a +8 m/s
+initial bias gives a 1.00-to-0.75 s braking threshold change instead of the
+unbiased split case's 0.70-to-0.00 s change.
+
+The two speed-error regressions intentionally apply an incorrect joint range and
+velocity correction to the same physical car. For a steady lead, a -3 m range
+correction with a -6 m/s speed error creates a false new identity. First-second
+mean absolute speed error increases from 1.62 to 4.45 m/s, and peak simulated
+deceleration increases from 0.306 to 0.760 m/s². Accepting a genuine new lead
+promptly also accepts an erroneous model correction promptly; IDs do not resolve
+that perceptual ambiguity. No solver failures or collisions occur in this finite
+matrix, but some severe cases reach only 0.81 m clearance, so this is not evidence
+of adequate safety margins.
+
+Fresh recorded replays also show the limits. The route 37 semi entry has identical
+speeds and requested acceleration before driver intervention. The route 6c sedan
+entry has identical lead speeds and braking onset, with 0.77% more sampled entry
+deceleration. Its later split/exit clears inherited slower history and reduces
+the bookmark window's integrated requested deceleration by 13.03%, while peak
+command jerk increases 22.85%. These recordings have no independent target-speed
+ground truth, and fixed-ego replay does not establish actual friction braking.
+The older route 4b5 slower-lead approach has unchanged -0.5 m/s² onset and reaches
+-1 m/s² one 50 ms sample later; both versions reach -3.5 m/s². It shows no earlier
+braking benefit and remains only a current-code comparison on older observations.
+Route 6c's continuously slowing lead is exactly unchanged across 620 target frames,
+including published speed, range and acceleration.
+
 ## Identity limits
 
 An ID represents an association hypothesis, not proof of physical vehicle

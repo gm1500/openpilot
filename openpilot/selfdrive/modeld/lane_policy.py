@@ -248,7 +248,8 @@ class LanePolicy:
     if valid_left and valid_right:
       width, valid_width = lane_width(left, right, fit)
       strong = min(left_prob, right_prob) >= ARM_LINE_PROB
-      edge_retained = previous_edge is not None and self.road_edges.edges[previous_edge].available
+      edge_retained = (previous_edge is not None and self.road_edges.edges[previous_edge].available and
+                       not self.road_edges.edges[previous_edge].anchor_guided and not self.road_edges.edges[previous_edge].memory_guided)
       self.paint_return_frames = self.paint_return_frames + 1 if strong and valid_width else 0
       if valid_width and (not edge_retained or self.paint_return_frames >= round(ARM_TIME / DT)):
         self.line_loss_time, self.holding_line = 0.0, False
@@ -289,7 +290,7 @@ class LanePolicy:
       message.available = enabled and edge.available
       paint_constrained = (edge.inner_line.from_paint and edge.inner_line.applied_width is not None and
                            edge.width is not None and edge.inner_line.applied_width < edge.width - 1e-6)
-      message.held = enabled and edge.available and (edge.held or edge.memory_guided or paint_constrained or edge.width_weighted)
+      message.held = enabled and edge.available and (edge.held or edge.memory_guided or edge.anchor_guided or paint_constrained or edge.width_weighted)
       message.memoryOnly = enabled and not edge.available and edge.memory_y is not None
       y = edge.y if message.available else edge.memory_y if message.memoryOnly else None
       message.y = y.tolist() if y is not None else []
@@ -423,13 +424,15 @@ class LanePolicy:
                        inner_probs(model_output)[1 - self.edge_side] >= ARM_LINE_PROB)
           if not held_edge:
             self.arm_time = 0.0
-        edge_settled = self.edge_side is None or self.road_edges.edges[self.edge_side].observed_frames >= EDGE_RECOVERY_FRAMES
+        candidate = self.road_edges.edges[self.edge_side] if self.edge_side is not None else None
+        edge_settled = candidate is None or candidate.observed_frames >= EDGE_RECOVERY_FRAMES or (candidate.anchor_guided and candidate.anchor_ready)
         if self.arm_time < ARM_TIME or not edge_settled:
           self._mode("stock-e2e fallback: arming lane confidence")
           return float(e2e_curvature)
         self.active, self.line_loss_time = True, 0.0
 
-      path_blend = not self.holding_line
+      remembered_anchor = self.edge_side is not None and self.road_edges.edges[self.edge_side].anchor_guided
+      path_blend = not self.holding_line and not remembered_anchor
       correction, error, lookahead = anchor_correction(model_output, center, x, v_ego, path_blend)
       offset, heading = near_geometry(center, x)
       self._track_turn(e2e_curvature)
@@ -451,7 +454,8 @@ class LanePolicy:
       self.correction += float(np.clip(correction - self.correction, -step, step))
       self._record(lookahead, error, e2e_curvature, offset, rate, geometric_rate, ready, path_blend)
       self.error_logged = False
-      self._mode("road-edge lane center" if self.edge_side is not None else "anchor lane center hold" if self.holding_line else "E2E path fit")
+      self._mode("remembered-width lane center" if remembered_anchor else "road-edge lane center" if self.edge_side is not None else
+                 "anchor lane center hold" if self.holding_line else "E2E path fit")
       return float(e2e_curvature + self.correction)
     except (KeyError, IndexError, TypeError, ValueError, FloatingPointError, np.linalg.LinAlgError) as err:
       if not self.error_logged and self.logger is not None:
