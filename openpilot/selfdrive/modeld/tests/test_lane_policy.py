@@ -104,6 +104,70 @@ def test_implausible_lane_width_rejects_centering(width):
   assert not policy.active
 
 
+@pytest.mark.parametrize('probability', [.99, .92])
+def test_active_centering_retains_narrower_live_paint_without_rearming(probability):
+  policy = LanePolicy()
+  step(policy, perception(), frames=round(ARM_TIME / DT))
+  assert policy.active
+  for _ in range(30):
+    assert step(policy, perception(width=2.65, probability=probability)) > 0.
+    assert policy.active and not policy.blending
+
+
+@pytest.mark.parametrize('probability', [.70, .8, .919])
+def test_narrow_retention_does_not_combine_weaker_paint_with_less_width_margin(probability):
+  policy = LanePolicy()
+  step(policy, perception(), frames=40)
+  assert step(policy, perception(width=3.5, probability=probability)) > 0.
+  assert policy.active
+  assert step(policy, perception(width=2.65, probability=probability), e2e_curvature=.0002) == .0002
+  assert not policy.active and policy.correction == 0.
+
+
+@pytest.mark.parametrize('width', [2.59, 5.15])
+def test_retention_keeps_lower_floor_and_original_upper_width_bound(width):
+  policy = LanePolicy()
+  step(policy, perception(), frames=40)
+  assert policy.active
+  assert step(policy, perception(width=width), e2e_curvature=.0002) == .0002
+  assert not policy.active and policy.correction == 0.
+  # Retention cannot be used for fresh admission after any invalid frame.
+  step(policy, perception(width=2.65), frames=40)
+  assert not policy.active
+  step(policy, perception(), frames=round(ARM_TIME / DT) - 1)
+  assert not policy.active
+  step(policy, perception())
+  assert policy.active
+
+
+@pytest.mark.parametrize('side', [3, 5])
+def test_narrow_width_retention_still_requires_both_current_painted_lines(side):
+  policy = LanePolicy()
+  step(policy, perception(), frames=40)
+  narrow = perception(width=2.65)
+  assert step(policy, narrow) > 0.
+  narrow['lane_lines_prob'][0, side] = .69
+  assert step(policy, narrow, e2e_curvature=.0002) == .0002
+  assert not policy.active and policy.correction == 0.
+
+
+def test_narrow_width_retention_uses_new_midpoint_not_remembered_geometry():
+  policy = LanePolicy()
+  step(policy, perception(offset=.25), frames=40)
+  assert policy.correction > 0.
+  result = step(policy, perception(offset=-.25, width=2.65), frames=10)
+  assert policy.active and result < 0.
+
+
+def test_active_width_retention_does_not_accept_diverging_paint():
+  policy = LanePolicy()
+  step(policy, perception(), frames=40)
+  data = perception()
+  data['lane_lines'][0, 2, :, 0] += .05 * np.asarray(ModelConstants.X_IDXS)
+  assert step(policy, data, e2e_curvature=.0002) == .0002
+  assert not policy.active
+
+
 def test_width_divergence_rejects_a_merge_shape():
   policy = LanePolicy()
   data = perception()

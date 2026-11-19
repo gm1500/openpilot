@@ -15,7 +15,7 @@ ARM_LINE_PROB = 0.92
 RETAIN_LINE_PROB = 0.70
 MIN_LANE_WIDTH = 2.6                         # m
 MAX_LANE_WIDTH = 5.2                         # m
-MIN_WIDTH_MARGIN = 0.10                     # m inside accepted width range
+MIN_WIDTH_MARGIN = 0.10                     # m admission margin; upper bound also retained while active
 MAX_WIDTH_CHANGE = 0.75                     # m across the fitted horizon
 ARM_TIME = 0.75                             # s of strong two-line confidence
 WIDTH_FIT_START, WIDTH_FIT_END = 8.0, 55.0    # m
@@ -76,10 +76,13 @@ def inner_probs(model_output: dict[str, np.ndarray]) -> tuple[float, float]:
   return float(probs[0, 3]), float(probs[0, 5])
 
 
-def lane_width(left: np.ndarray, right: np.ndarray, fit: np.ndarray) -> tuple[float, bool]:
+def lane_width(left: np.ndarray, right: np.ndarray, fit: np.ndarray, *, retaining: bool = False) -> tuple[float, bool]:
   low, median, high = np.percentile((right - left)[fit], (10.0, 50.0, 90.0))
-  edge = min(low - MIN_LANE_WIDTH, MAX_LANE_WIDTH - high)
-  valid = MIN_LANE_WIDTH <= median <= MAX_LANE_WIDTH and edge >= MIN_WIDTH_MARGIN and high - low <= MAX_WIDTH_CHANGE
+  # Keep a margin when acquiring paint. With strong live paint, a small narrowing
+  # need not reset active centering. No previous width or geometry is reused.
+  minimum = MIN_LANE_WIDTH if retaining else MIN_LANE_WIDTH + MIN_WIDTH_MARGIN
+  valid = (MIN_LANE_WIDTH <= median <= MAX_LANE_WIDTH and low >= minimum and
+           high <= MAX_LANE_WIDTH - MIN_WIDTH_MARGIN and high - low <= MAX_WIDTH_CHANGE)
   return float(median), bool(valid)
 
 
@@ -222,9 +225,10 @@ class LanePolicy:
     valid_left = np.isfinite(left_prob) and left_prob >= RETAIN_LINE_PROB and np.all(np.isfinite(left[fit]))
     valid_right = np.isfinite(right_prob) and right_prob >= RETAIN_LINE_PROB and np.all(np.isfinite(right[fit]))
     if valid_left and valid_right:
-      _, valid_width = lane_width(left, right, fit)
+      strong = min(left_prob, right_prob) >= ARM_LINE_PROB
+      _, valid_width = lane_width(left, right, fit, retaining=self.active and strong)
       if valid_width:
-        return 0.5 * (left + right), min(left_prob, right_prob) >= ARM_LINE_PROB
+        return 0.5 * (left + right), strong
     # Width is checked only from this frame. Missing paint cannot be replaced
     # with a remembered width, a road edge, or an inferred boundary.
     return None, False

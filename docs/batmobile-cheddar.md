@@ -62,6 +62,13 @@ SET; mapped-speed recovery retains the coordinated handoff. There is no manual
 Chill/E2E/CEM mode cycle.
 
 Painted-lane centering requires two sufficiently confident, plausible lane lines.
+Entry requires both line probabilities to remain at least **0.92** for **0.75 s**,
+with the fitted width inside **2.70–5.10 m**. An active policy can retain ordinary
+widths with both probabilities at least **0.70**. A narrower **2.60–2.70 m** fit
+can retain an already-active policy only while both probabilities remain at
+least **0.92**; it cannot start centering. The existing width-variation check
+still applies. Every decision uses the current two painted lines, and missing
+paint or geometry below the retention floor immediately returns to E2E.
 It retains the bounded curvature correction, fresh-confidence arming, visual
 status and curve-reversal pause, which decreases from **0.30 s** at low speed to
 **0.05 s** at 100 km/h. Missing paint returns to the model path. Nudgeless lane
