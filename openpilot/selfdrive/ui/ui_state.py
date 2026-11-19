@@ -177,6 +177,11 @@ class UIState:
   def is_offroad(self) -> bool:
     return not self.started
 
+  @property
+  def started_frame(self) -> int:
+    """Current drive boundary for freshness checks shared by onroad widgets."""
+    return self._started_frame
+
   def received_since_started(self, service: str) -> bool:
     return self.sm.recv_frame[service] > self._started_frame
 
