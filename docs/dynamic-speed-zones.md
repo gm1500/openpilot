@@ -3,7 +3,7 @@
 This implementation evaluates explicitly mapped OSM conditional speed limits
 and verified municipal restrictions at the vehicle's current location. There is no hard-coded home city,
 school timetable, timezone or UTC offset. It uses the existing road matcher,
-speed-limit display and SLC qualification/driver-override behavior.
+speed-limit display and SLC validity/driver-override behavior.
 
 ## Time and location
 
@@ -115,7 +115,7 @@ provisioned environment. Tests exercise city/timezone changes, DST, weekday and
 date boundaries, reverse-direction restrictions, invalid clocks, missing
 dependencies, road ambiguity and existing map behavior. Device installation and
 live construction/school coverage still require validation. Dynamic rules retain
-SLC's qualification and override checks. Upcoming targets use the separate
+SLC's validity and override checks, without an added warning delay. Upcoming targets use the separate
 Advanced speed limit changes setting and its geometry and distance checks.
 
 Timezone data and code licensing/attribution are distributed with timezonefinder:

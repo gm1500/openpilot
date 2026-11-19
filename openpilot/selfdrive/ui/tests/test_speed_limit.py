@@ -7,7 +7,7 @@ from openpilot.selfdrive.ui.onroad import speed_limit as ui
 from openpilot.selfdrive.ui.onroad.lane_policy_style import boundary_colors, PAINT_GREEN
 
 
-def test_candidate_number_flashes_immediately_without_waiting_for_actuation(monkeypatch):
+def test_candidate_display_has_no_independent_warning_and_pulse_tracks_controller(monkeypatch):
   state = NS(map_cruise_state='active', map_cruise_enabled=True, map_cruise_supported=True, map_cruise_pulsing=False,
              map_cruise_e2e=False, engaged=True, speed_limit=80/3.6, speed_limit_is_advisory=False,
              speed_limit_preview=100/3.6, speed_limit_preview_advisory=False, is_metric=True,
@@ -21,18 +21,30 @@ def test_candidate_number_flashes_immediately_without_waiting_for_actuation(monk
   rect = rl.Rectangle(0, 0, 180, 204)
   button._render(rect)
   assert draw.call_args.args[1] == 100/3.6
-  assert draw.call_args.args[6] == 0.  # bright green immediately
+  assert draw.call_args.args[6] is None  # preview alone never starts a warning
   now[0] = 103.
   button._render(rect)
-  assert draw.call_args.args[6] is None  # a cancelled actuation cannot pulse forever
+  assert draw.call_args.args[6] is None
   state.map_cruise_pulsing = True
   button._render(rect)
-  assert draw.call_args.args[6] == 0.
+  assert draw.call_args.args[6] == 0.  # controller adjustment is shown immediately
+  now[0] += .25
+  button._render(rect)
+  assert draw.call_args.args[6] == .25
   state.speed_limit_preview = 60/3.6
   now[0] = 104.
   button._render(rect)
   assert draw.call_args.args[1] == 60/3.6
   assert draw.call_args.args[6] == 0.
+  # Cancellation takes effect immediately even for a newly displayed limit.
+  state.map_cruise_pulsing = False
+  now[0] += .1
+  button._render(rect)
+  assert draw.call_args.args[6] is None
+  state.speed_limit_preview = 50/3.6
+  button._render(rect)
+  assert draw.call_args.args[1] == 50/3.6
+  assert draw.call_args.args[6] is None
 
 
 def test_no_limit_icon_has_no_maximum_or_units_and_candidate_exits_icon(monkeypatch):

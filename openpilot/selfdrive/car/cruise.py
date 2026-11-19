@@ -81,11 +81,9 @@ class VCruiseHelper:
       self.v_cruise_kph = V_CRUISE_UNSET
       self.v_cruise_cluster_kph = V_CRUISE_UNSET
 
-    candidate = self.map_cruise.preview_pending_kph
-    if candidate is None:
-      candidate = self.map_cruise.pending_kph
-    if candidate is None and self.map_cruise.tracking:
-      candidate = self.map_cruise.target_kph
+    # Feedback tracks the actual cruise target. An upcoming preview can be
+    # displayed separately, but must not replace the current adjustment pulse.
+    candidate = self.map_cruise.target_kph if self.map_cruise.tracking else None
     # Finishing the SET that engaged cruise is not a subsequent manual override.
     # This exemption only affects feedback; ordinary +/- and hold behavior stays above.
     held_override = any(timer and not (button == ButtonType.decelCruise and self._map_set_held)

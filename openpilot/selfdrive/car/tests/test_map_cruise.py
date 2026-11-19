@@ -31,9 +31,9 @@ class TestMapCruise(unittest.TestCase):
     self.tick(button, False)
 
 
-  def test_dedicated_set_accepts_fresh_limit_before_automatic_qualification(self):
+  def test_dedicated_set_reselects_fresh_limit_after_manual_override(self):
     self.tick()
-    self.assertIsNone(self.helper.map_cruise.target_kph)
+    self.assertEqual(self.helper.map_cruise.target_kph, 50)
     self.tap(ButtonType.setCruise)
     self.assertEqual(self.helper.v_cruise_kph, 50)
     self.assertEqual(self.helper.map_pulse.target_kph, 50)
@@ -42,7 +42,7 @@ class TestMapCruise(unittest.TestCase):
     self.assertEqual(self.helper.v_cruise_kph, 51)  # no delayed auto reapply after SET then manual +
     self.limit = 60
     self.tick()
-    self.assertEqual(self.helper.v_cruise_kph, 51)
+    self.assertEqual(self.helper.v_cruise_kph, 60)
     self.tap(ButtonType.setCruise)
     self.assertEqual(self.helper.v_cruise_kph, 60)
 
@@ -140,7 +140,7 @@ class TestMapCruise(unittest.TestCase):
     self.cs.vEgo = 20 / 3.6
     self.limit = 30
     self.tick(ButtonType.decelCruise, True)
-    self.assertIsNone(self.helper.map_cruise.target_kph)
+    self.assertEqual(self.helper.map_cruise.target_kph, 30)
     self.helper.initialize_v_cruise(self.cs, 105)
     self.assertEqual(self.helper.v_cruise_kph, 30)
     self.limit = 60
@@ -210,7 +210,7 @@ class TestMapCruise(unittest.TestCase):
         self.tick(ticks=210)
         self.assertEqual(self.helper.map_pulse.target_kph, 60)
 
-  def test_cancel_during_qualification_does_not_restart_pulse_on_apply(self):
+  def test_pedal_cancellation_does_not_restart_pulse_after_release(self):
     self.tick(ticks=100)
     self.assertEqual(self.helper.map_pulse.target_kph, 50)
     self.cs.gasPressed = True
@@ -220,11 +220,11 @@ class TestMapCruise(unittest.TestCase):
     self.assertEqual(self.helper.v_cruise_kph, 50)
     self.assertIsNone(self.helper.map_pulse.target_kph)
 
-  def test_pulse_missing_map_cancels_preview_but_retains_applied_target(self):
-    self.tick(ticks=100)
+  def test_pulse_missing_map_retains_applied_target_until_speed_settles(self):
+    self.tick()
     self.limit = None
     self.tick()
-    self.assertIsNone(self.helper.map_pulse.target_kph)
+    self.assertEqual(self.helper.map_pulse.target_kph, 50)
     self.limit = 50
     self.tick(ticks=210)
     self.assertEqual(self.helper.map_pulse.target_kph, 50)
@@ -253,10 +253,8 @@ class TestMapCruise(unittest.TestCase):
         self.helper.update_v_cruise(self.cs, True, True)
       self.assertEqual(self.helper.v_cruise_kph, expected)
 
-  def test_qualified_map_updates_both_displays(self):
-    self.tick(ticks=150)
-    self.assertEqual(self.helper.v_cruise_kph, 40)
-    self.tick(ticks=60)
+  def test_fresh_map_updates_both_displays_immediately(self):
+    self.tick()
     self.assertEqual(self.helper.v_cruise_kph, 50)
     self.assertEqual(self.helper.v_cruise_cluster_kph, 50)
     self.assertEqual(self.helper.map_cruise.state(True), 'active')
@@ -264,7 +262,7 @@ class TestMapCruise(unittest.TestCase):
     self.tick(ticks=210)
     self.assertEqual(self.helper.v_cruise_kph, 30)
 
-  def test_merge_approach_qualifies_both_directions_and_preserves_manual_adjustment(self):
+  def test_valid_map_speed_applies_despite_legacy_ahead_metadata_and_preserves_manual_adjustment(self):
     from openpilot.cereal import log
     class SM(dict):
       pass
@@ -290,10 +288,7 @@ class TestMapCruise(unittest.TestCase):
         self.limit = current
         self.tick(ticks=210)
         self.limit = upcoming
-        for distance in (200., 180.):
-          update_map(distance)
-          self.assertEqual(self.helper.v_cruise_kph, current)
-        update_map(160.)  # two seconds of fresh fixes, still before the merge
+        update_map(200.)
         self.assertEqual(self.helper.v_cruise_kph, upcoming)
         self.assertEqual(self.helper.v_cruise_cluster_kph, upcoming)
         self.tap(ButtonType.decelCruise)
@@ -313,7 +308,7 @@ class TestMapCruise(unittest.TestCase):
       self.assertEqual(decoded.mapSpeedLimit.distanceAhead, 203.)
       self.assertAlmostEqual(decoded.mapSpeedLimit.speedLimit * 3.6, 70., places=4)
 
-  def test_unknown_stale_frozen_and_bad_limits_hold(self):
+  def test_unknown_stale_future_and_bad_limits_hold(self):
     self.tick(ticks=210)
     for limit in (None, math.nan, math.inf, -10, 0, 5, 146):
       self.limit = limit
@@ -321,17 +316,40 @@ class TestMapCruise(unittest.TestCase):
       self.assertEqual(self.helper.v_cruise_kph, 50)
       self.assertEqual(self.helper.map_cruise.state(True), 'waiting')
     self.limit = 60
-    for stamp in (self.now - 10, self.now + 20, self.now):
+    for stamp in (self.now - 10, self.now + 20):
       self.tick(ticks=220, fix_time=stamp)
       self.assertEqual(self.helper.v_cruise_kph, 50)
 
-  def test_flapping_limits_and_gap_reset_qualification(self):
+  def test_each_valid_changed_limit_applies_without_an_added_timer(self):
+    expected = 40
     for limit in (50, 60, 50, 60, 50, None, 50):
       self.limit = limit
-      self.tick(ticks=100)
-      self.assertEqual(self.helper.v_cruise_kph, 40)
-    self.tick(ticks=110)
+      self.tick()
+      expected = limit if limit is not None else expected
+      self.assertEqual(self.helper.v_cruise_kph, expected)
+
+  def test_fresh_stable_gps_stamp_accepts_new_limit_then_expires(self):
+    self.tick()
+    stamp = self.now
+    self.limit = 60
+    self.tick(fix_time=stamp)
+    self.assertEqual(self.helper.v_cruise_kph, 60)
+    self.limit = 70
+    self.tick(fix_time=stamp)
+    self.assertEqual(self.helper.v_cruise_kph, 70)
+    self.now += 3.1
+    self.limit = 80
+    self.tick(fix_time=stamp)
+    self.assertEqual(self.helper.v_cruise_kph, 70)
+    self.assertIsNone(self.helper.map_cruise.target_kph)
+
+  def test_out_of_order_gps_cannot_replace_current_limit(self):
+    self.tick()
+    self.limit = 60
+    self.tick(fix_time=self.now - .1)
     self.assertEqual(self.helper.v_cruise_kph, 50)
+    self.tick()
+    self.assertEqual(self.helper.v_cruise_kph, 60)
 
   def test_set_and_resume_reengagement(self):
     self.tick(ticks=210)
@@ -369,7 +387,7 @@ class TestMapCruise(unittest.TestCase):
       self.assertEqual(self.helper.v_cruise_kph, 30)
       self.assertEqual(self.helper.v_cruise_cluster_kph, 30)
 
-  def test_configured_initial_speed_without_qualified_map(self):
+  def test_configured_initial_speed_without_valid_map(self):
     self.limit = None
     self.tick()
     self.helper.initialize_v_cruise(self.cs, 105)
@@ -390,9 +408,7 @@ class TestMapCruise(unittest.TestCase):
     self.tap(ButtonType.accelCruise)
     self.assertEqual(self.helper.v_cruise_kph, 51)
     self.limit = 60
-    self.tick(ticks=150)
-    self.assertEqual(self.helper.v_cruise_kph, 51)
-    self.tick(ticks=60)
+    self.tick()
     self.assertEqual(self.helper.v_cruise_kph, 60)
     self.assertEqual(self.helper.v_cruise_cluster_kph, 60)
     self.limit = 40
@@ -520,11 +536,13 @@ class TestMapCruise(unittest.TestCase):
         self.tick(ticks=220)
         self.assertEqual(self.helper.v_cruise_kph, 60)
 
-  def test_manual_buttons_win_over_pending_map_qualification(self):
+  def test_manual_buttons_win_when_new_map_limit_arrives_on_press(self):
     for button, expected in ((ButtonType.decelCruise, 39), (ButtonType.accelCruise, 41)):
       with self.subTest(button=button):
         self.setUp()
-        self.tick(ticks=100)
+        self.limit = None
+        self.tick()
+        self.limit = 50
         self.tap(button)
         self.tick(ticks=220)
         self.assertEqual(self.helper.v_cruise_kph, expected)

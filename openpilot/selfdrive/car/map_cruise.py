@@ -7,7 +7,6 @@ from openpilot.selfdrive.car.slc_settings import SLCSettings
 
 MAP_MESSAGE_MAX_AGE = 0.8
 MAP_GPS_MAX_AGE = 3.0
-MAP_STABLE_TIME = 2.0
 MAP_MISSING_TIME = 1.0
 MAP_ADVANCE_TIME = 2.0
 MAP_MERGE_ADVANCE_TIME = 8.0
@@ -97,10 +96,9 @@ class MapCruise:
     self.tracking = True
     self.target_kph: float | None = None
     self._candidate: float | None = None
-    self._since = 0.
-    self._first_fix = 0.
     self._last_fix = 0.
-    self._last_qualified: float | None = None
+    self._last_current_limit: float | None = None
+    self._last_preview_limit: float | None = None
     self.automatic_e2e = self.e2e_fallback = self.fallback_set_pending = False
     self._missing_since: float | None = None
     self.settings = SLCSettings()
@@ -109,61 +107,39 @@ class MapCruise:
     self._previous_metric = self.metric
     self._manual_override = False
     self.current_kph = 255.
-    self._preview_key = None
-    self._preview_since = self._preview_first_fix = self._preview_last_fix = self._preview_seen = 0.
-    self._preview_qualified = self.preview_active = False
-    self.preview_pending_kph: float | None = None
+    self.preview_active = False
     self.preview_speed_ms: float | None = None
     self.preview_advisory = False
 
-  def _anticipate(self, speed_ms, gps_time, now, preview, way_id, v_ego):
+  def _anticipate(self, speed_ms, gps_time, now, preview, v_ego):
     self.preview_active = False
-    self.preview_pending_kph = self.preview_speed_ms = None
+    self.preview_speed_ms = None
     self.preview_advisory = False
     if not self.enabled or not self.settings.advance:
-      self._preview_key = None
-      self._preview_qualified = False
-      return speed_ms, None
-    # Carry qualification across the boundary only for the SAME identified way
-    # and limit, with a fresh position. A different/changed road starts normally.
-    entered = (self._preview_qualified and self._preview_key is not None and speed_ms is not None and
-               self._preview_key[:2] == (way_id, round(speed_ms, 4)) and 0 <= now - self._preview_seen <= MAP_GPS_MAX_AGE and
-               0 < gps_time <= now and now - gps_time <= MAP_GPS_MAX_AGE and gps_time >= self._preview_last_fix)
-    qualified_fix = self._preview_first_fix if entered else None
+      return speed_ms
     valid = (preview is not None and 0 < gps_time <= now and now - gps_time <= MAP_GPS_MAX_AGE and
+             gps_time >= self._last_fix and
              math.isfinite(preview.speed) and 8 <= round(preview.speed * CV.MS_TO_KPH, 3) <= 145 and preview.way_id > 0 and
              math.isfinite(preview.distance) and 0 <= preview.distance <= 1000 and math.isfinite(v_ego) and 2 <= v_ego <= 75)
     if valid:
-      key = preview.way_id, round(preview.speed, 4), preview.advisory, preview.merge
-      if (key != self._preview_key or not 0 <= now - self._preview_seen <= MAP_MESSAGE_MAX_AGE or gps_time < self._preview_last_fix):
-        self._preview_since, self._preview_first_fix = now, gps_time
-        self._preview_qualified = False
-      self._preview_key, self._preview_seen, self._preview_last_fix = key, now, gps_time
-      self._preview_qualified |= now - self._preview_since >= MAP_STABLE_TIME and gps_time > self._preview_first_fix
       target = self.settings.target(preview.speed * CV.MS_TO_KPH, self.metric)
-      # Display the new posted speed as soon as this fresh, matched candidate
-      # is considered. This feedback does not bypass qualification or apply SET.
+      # A matched preview is available immediately. Display remains independent
+      # of the distance and road-entry checks that determine when SET changes.
       if speed_ms is None or round(preview.speed, 4) != round(speed_ms, 4):
-        self.preview_pending_kph = target
         self.preview_speed_ms = preview.speed
         self.preview_advisory = preview.advisory
-      # Earlier braking uses the distance needed to shed speed plus the existing
-      # two-second lead. Raising SET early requires mapd's unique, aligned,
-      # model-confirmed unrestricted highway merge; ordinary higher zones wait.
+      # Earlier braking uses the distance needed to shed speed plus two seconds
+      # of travel. This is a distance allowance, not a timer before applying SET.
+      # Raising SET early requires mapd's unique, aligned, model-confirmed merge.
       lowering = 8 <= self.current_kph <= 145 and target <= self.current_kph and (speed_ms is None or preview.speed < speed_ms)
       braking_distance = max(0.0, v_ego ** 2 - preview.speed ** 2) / (2 * MAP_APPROACH_DECEL)
       lower_range = min(300.0, max(50.0, v_ego * MAP_ADVANCE_TIME + braking_distance))
       merging = preview.merge and not preview.advisory and speed_ms is None and 8 <= self.current_kph <= 145
       in_range = lowering and preview.distance <= lower_range or merging and preview.distance <= min(250.0, v_ego * MAP_MERGE_ADVANCE_TIME)
-      if self._preview_qualified and in_range:
+      if in_range:
         self.preview_active = True
-        return preview.speed, self._preview_first_fix
-    elif not 0 <= now - self._preview_seen <= MAP_GPS_MAX_AGE or gps_time < self._preview_last_fix:
-      # A short map gap cannot apply an early target. Retain only its already
-      # earned qualification, for a fresh exact-way/limit match at the boundary.
-      self._preview_key = None
-      self._preview_qualified = False
-    return speed_ms, qualified_fix
+        return preview.speed
+    return speed_ms
 
   def update(self, enabled: bool, speed_ms: float | None, gps_time: float, now: float, automatic_e2e: bool = False,
              *, preview=None, way_id=0, v_ego=0.):
@@ -175,36 +151,42 @@ class MapCruise:
       self._manual_override = False
     self.enabled = enabled
     actual_speed = speed_ms
-    speed_ms, qualified_fix = self._anticipate(speed_ms, gps_time, now, preview, way_id, v_ego)
+    speed_ms = self._anticipate(speed_ms, gps_time, now, preview, v_ego)
     speed = speed_ms * CV.MS_TO_KPH if speed_ms is not None else math.nan
     # Do not turn an unsupported walking-zone/highway limit into a different limit
     # by clipping it. Ordinary cruise retains its existing 8..145 km/h bounds.
     speed = round(speed, 3) if math.isfinite(speed) else math.nan
     candidate = speed if 8 <= speed <= 145 else None
-    if not (0 < gps_time <= now and now - gps_time <= MAP_GPS_MAX_AGE):
+    if not (0 < gps_time <= now and now - gps_time <= MAP_GPS_MAX_AGE and gps_time >= self._last_fix):
       candidate = None
-    if candidate is None or candidate != self._candidate or gps_time < self._last_fix:
-      self._candidate, self._since, self._first_fix = candidate, now, gps_time
-      self.target_kph = None
-      if qualified_fix is not None:
-        self._since = now - MAP_STABLE_TIME
-        self._first_fix = qualified_fix
-    self._last_fix = gps_time
-    # A single frozen GPS fix cannot qualify a new target merely by waiting.
-    if candidate is not None and now - self._since >= MAP_STABLE_TIME and gps_time > self._first_fix:
-      self.target_kph = self.settings.target(candidate, self.metric)
+    self._candidate = candidate
+    self.target_kph = self.settings.target(candidate, self.metric) if candidate is not None else None
+    # mapd already validates the road match; an additional warning/debounce here
+    # leaves the previous SET (including the E2E ceiling) active after map recovery.
+    # Reusing a still-fresh GPS fix is valid; an older or expired fix is not.
+    if candidate is not None:
+      self._last_fix = gps_time
+      actual_kph = actual_speed * CV.MS_TO_KPH if actual_speed is not None else math.nan
+      actual_kph = round(actual_kph, 3) if math.isfinite(actual_kph) else math.nan
+      new_limit = 8 <= actual_kph <= 145 and actual_kph != self._last_current_limit
+      if new_limit:
+        self._last_current_limit = actual_kph
+        self._last_preview_limit = None
+      if self.preview_active:
+        new_limit |= candidate != self._last_preview_limit
+        self._last_preview_limit = candidate
       if settings_changed and not self.settings.accepts(self.target_kph, self.current_kph):
         self.tracking = False
       self._previous_settings, self._previous_metric = self.settings, self.metric
-      if self.enabled and candidate != self._last_qualified:
+      # Withdrawing a preview after manual SET drops below it exposes the same
+      # current road again. That source switch is not a new speed zone and must
+      # not resume SLC or erase the preview limit across a brief data gap.
+      if self.enabled and new_limit:
         permitted = self.settings.accepts(self.target_kph, self.current_kph)
         if not self._manual_override or self.settings.resume_policy == 0:
           self.tracking = permitted
           if permitted:
             self._manual_override = False
-      # A brief map gap recovering the SAME limit is not a new speed zone.
-      # Preserve manual selection unless the no-speed E2E fallback recovers.
-      self._last_qualified = candidate
     self.automatic_e2e = self.enabled and automatic_e2e
     if not self.automatic_e2e:
       self.e2e_fallback = self.fallback_set_pending = False
@@ -235,30 +217,20 @@ class MapCruise:
     if not self.preview_active and self.target_kph is not None and (abs(set_kph - self.target_kph) < .01 or not self.tracking):
       self.e2e_fallback = self.fallback_set_pending = False
 
-  @property
-  def pending_kph(self) -> float | None:
-    """Preview qualification without changing tracking or the cruise target."""
-    if self.enabled and self.target_kph is None and (self.tracking or self._candidate != self._last_qualified):
-      return self.settings.target(self._candidate, self.metric) if self._candidate is not None else None
-    return None
-
   def select_current(self):
-    """An explicit SET accepts a fresh match without the automatic debounce."""
+    """An explicit SET accepts a fresh match even when automatic following is paused."""
     if self.enabled:
       self.tracking = True
       self._manual_override = False
       self._previous_settings, self._previous_metric = self.settings, self.metric
       if self._candidate is not None:
-        self._last_qualified = self._candidate
         self.target_kph = self.settings.target(self._candidate, self.metric)
 
   def pause(self):
-    """A manual selection also wins over this limit's pending qualification."""
+    """A manual selection wins over this limit's automatic application."""
     self.tracking = False
     self._manual_override = True
     self.fallback_set_pending = False
-    if self._candidate is not None:
-      self._last_qualified = self._candidate
 
   def state(self, engaged: bool) -> str:
     if not self.supported:

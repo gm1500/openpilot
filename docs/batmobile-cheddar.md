@@ -62,10 +62,11 @@ guards remain.
 
 - SLC retains offsets, acceptance/resume preferences, live maps, optional offline
   packages, scheduled updates and conditional school/construction restrictions.
-  Advanced preview is optional. A fresh candidate can flash its posted limit
-  green before qualification completes; displaying it does not change SET.
-  Lower-limit anticipation and the narrow highway-merge exception retain their
-  geometry, freshness and qualification checks.
+  Advanced preview is optional. Fresh valid limits apply without an extra
+  two-second qualification or warning timer. Green sign pulsing follows the
+  controller's actual adjustment. Lower-limit anticipation and the narrow
+  highway-merge exception retain their geometry, freshness and distance checks;
+  ordinary higher limits still wait for road entry.
 - Engaged driving always requests the narrow, zoomed camera view, including
   low-speed and automatic E2E operation. Disengaged driving retains low-speed
   wide-view hysteresis. Camera and overlay crops share calibrated alignment on

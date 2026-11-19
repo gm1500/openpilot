@@ -48,10 +48,7 @@ class TestSLCFallback(unittest.TestCase):
     self.tick()
     self.assertEqual(self.helper.v_cruise_kph, 105)
     self.limit = 40.0
-    self.tick(150)
-    self.assertTrue(self.helper.map_cruise.e2e_fallback)
-    self.assertEqual(self.helper.v_cruise_kph, 105)
-    self.tick(60)
+    self.tick()
     self.assertEqual(self.helper.v_cruise_kph, 40)
     self.assertFalse(self.helper.map_cruise.e2e_fallback)
     self.assertEqual(self.helper.map_cruise.state(True), 'active')
@@ -121,9 +118,7 @@ class TestSLCFallback(unittest.TestCase):
     self.assertEqual(self.helper.v_cruise_kph, 105)
     self.assertIsNone(self.helper.map_pulse.target_kph)
     self.limit = 70.
-    self.tick(190)
-    self.assertIsNone(self.helper.map_pulse.target_kph)  # still qualifying, still E2E
-    self.tick(20)
+    self.tick()
     self.assertFalse(self.helper.map_cruise.e2e_fallback)
     self.assertEqual(self.helper.v_cruise_kph, 70)
     self.assertEqual(self.helper.map_pulse.target_kph, 70)
@@ -139,25 +134,35 @@ class TestSLCFallback(unittest.TestCase):
     self.assertFalse(self.helper.map_cruise.e2e_fallback)
     self.assertEqual(self.helper.v_cruise_kph, 50)
 
-  def test_recovery_requires_two_seconds_of_advancing_usable_map_data(self):
+  def test_first_valid_sixty_replaces_105_and_never_reenters_fallback_while_fresh(self):
     self.unknown()
     self.ready = True
     self.tick()
-    self.limit = 30.0
-    self.tick(210, fixed_gps=self.now)
-    self.assertTrue(self.helper.map_cruise.e2e_fallback)
     self.assertEqual(self.helper.v_cruise_kph, 105)
-    self.limit = None
+    self.limit = 60.
+    self.cs.vEgo = 59 / 3.6
+    self.tick(fixed_gps=self.now)
+    self.assertEqual(self.helper.v_cruise_kph, 60)
+    self.assertEqual(self.helper.v_cruise_cluster_kph, 60)
+    self.assertEqual(self.helper.map_cruise.target_kph, 60)
+    self.assertFalse(self.helper.map_cruise.e2e_fallback)
+    self.assertFalse(self.helper.map_cruise.fallback_set_pending)
+    self.cs.vEgo = 60 / 3.6
+    for _ in range(500):
+      self.tick()
+      self.assertEqual(self.helper.v_cruise_kph, 60)
+      self.assertFalse(self.helper.map_cruise.e2e_fallback)
+
+  def test_expired_fix_cannot_exit_fallback_but_fresh_same_limit_can(self):
+    self.unknown()
+    self.ready = True
     self.tick()
-    self.limit = 30.0
-    self.tick(150)
-    self.limit = None
-    self.tick()
-    self.limit = 30.0
-    self.tick(150)
+    self.limit = 60.
+    self.tick(fixed_gps=self.now - 3.1)
+    self.assertEqual(self.helper.v_cruise_kph, 105)
     self.assertTrue(self.helper.map_cruise.e2e_fallback)
-    self.tick(60)
-    self.assertEqual(self.helper.v_cruise_kph, 30)
+    self.tick()
+    self.assertEqual(self.helper.v_cruise_kph, 60)
     self.assertFalse(self.helper.map_cruise.e2e_fallback)
 
   def test_manual_lower_set_is_not_repeatedly_raised_and_recovery_resumes_same_limit(self):
@@ -174,7 +179,7 @@ class TestSLCFallback(unittest.TestCase):
     self.assertEqual(self.helper.v_cruise_kph, 50)
     self.assertFalse(self.helper.map_cruise.e2e_fallback)
 
-  def test_fresh_explicit_set_can_accept_recovered_limit_before_auto_debounce(self):
+  def test_fresh_explicit_set_accepts_recovered_limit(self):
     self.unknown()
     self.ready = True
     self.tick()

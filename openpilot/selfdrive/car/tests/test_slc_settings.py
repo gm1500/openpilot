@@ -53,7 +53,7 @@ class Drive:
     return self.tick(limit, 1, [car.CarState.ButtonEvent(type=ButtonType.setCruise, pressed=False)])
 
 
-def test_default_accepts_new_qualified_limits_with_offset():
+def test_default_accepts_new_valid_limits_with_offset():
   d = Drive(SLCSettings(offset_value=5))
   assert d.tick(50) == 55
   assert d.tick(30) == 35
@@ -102,7 +102,7 @@ def test_changing_preferences_cannot_raise_lower_only_target_or_resume_manual_ov
   assert d.tick(50) == 60
 
 
-def test_setting_change_during_same_limit_requalification_is_applied():
+def test_setting_change_during_same_limit_recovery_is_applied():
   d = Drive(SLCSettings())
   assert d.tick(50) == 50
   d.tick(None, 1)

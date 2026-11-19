@@ -27,9 +27,13 @@ The current upstream CPU camera renderer is retained, without the former EGL
 texture crossfade. Brief invalid inputs retain the current request; offroad resets
 it. The same framing policy applies to comma 4.
 
-The speed-limit sign flashes the new posted limit green as soon as a fresh valid
-candidate is considered. Cruise actuation retains its own qualification. When no
-mapped limit is available, the sign shows the automatic end-to-end icon and
+The speed-limit sign displays the new posted limit without a separate warning
+countdown. Green pulsing follows the controller's actual speed adjustment and
+stops when that adjustment is cancelled or completed. A future preview stays
+visible but does not flash for a different adjustment; matching includes the
+configured speed offset. A fresh valid limit can
+apply on its first update; preview geometry, range and manual-override rules
+still apply. When no mapped limit is available, the sign shows the automatic end-to-end icon and
 OVERRIDE without a MAXIMUM or km/h label. The configurable initial no-map ceiling
 is 105 km/h by default. There is no manual CEM/EXP mode selector.
 

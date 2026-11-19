@@ -20,13 +20,13 @@ The comma 3X settings panel provides:
 | Automatic map updates | Manual (default); Daily; Weekly |
 | Weekly update day | Monday through Sunday; shown when Weekly is selected |
 
-Offsets affect the cruise target, not the displayed posted limit. Targets keep the existing 8–145 km/h bounds and only operate on cars supporting the existing SLC integration. Ordinary cruise +/− buttons retain manual control. New limits retain the existing two-second qualification and fresh-position checks. SET explicitly accepts a fresh map limit; the existing current-speed floor on explicit SET is unchanged.
+Offsets affect the cruise target, not the displayed posted limit. Targets keep the existing 8–145 km/h bounds and only operate on cars supporting the existing SLC integration. Ordinary cruise +/− buttons retain manual control. Fresh valid current-road limits apply on the first update, with no extra two-second warning or qualification delay. Publisher, GPS, heading and road-match validity checks remain required. SET explicitly accepts a fresh map limit; the existing current-speed floor on explicit SET is unchanged.
 
 “Lower only” compares the new adjusted target with the current cruise setting. “SET to accept” waits for explicit map SET (including re-engagement with SET). Manual override preferences govern when automatic following resumes after the driver adjusts cruise. Defaults preserve the prior automatic behavior with no offset.
 
 ### Advanced speed limit changes
 
-This optional setting qualifies an upcoming mapped limit before entering its segment,
+This optional setting anticipates an upcoming mapped limit before entering its segment,
 using the existing measured-motion history and a fresh model path when choosing between
 connected forks. A lower target can start within the estimated distance needed to
 reduce speed at 1 m/s² plus two seconds of travel (minimum 50 m, maximum 300 m).
@@ -41,15 +41,17 @@ mapped legal/advisory restriction and exactly one directed continuation onto a
 one-way motorway or trunk road. A fresh, low-uncertainty model path must agree with
 the connected geometry, heading must be within 15 degrees of the receiving road,
 and predicted curvature at the target speed must imply no more than 1.5 m/s²
-lateral acceleration. After stable qualification, its speed can be selected within
+lateral acceleration. Once this geometry is valid, its speed can be selected within
 eight seconds of travel, capped at 250 m. Missing map tags do not prove a road has
 no restriction; this remains an experimental map-based target.
-Prequalification removes the additional two-second wait after entry. It requires
-two seconds of consistent previews and advancing GPS, so late or ambiguous matches
-retain the normal delay. A fresh, valid upcoming different limit is exposed to the
-green flashing display immediately, before qualification finishes. It displays the
-new posted limit, without the cruise offset. Missing or stale preview data clears
-that candidate; it never bypasses the checks that control when SET changes.
+There is no additional consumer timer for a valid preview or current-road limit.
+The two-second term in the lower-limit approach distance is a travel allowance,
+not a warning delay. Ordinary higher limits apply immediately upon a valid road-entry
+match. A fresh upcoming different limit can be displayed before the approach bounds
+permit changing SET. The green pulse follows an actual selected speed adjustment;
+it does not impose a delay and is independent of the unadjusted posted-limit value.
+Missing or stale preview data clears that display candidate and cannot authorize SET.
+
 
 The model path compares road shape; it does not identify legal speeds, measure traffic
 flow, or guarantee which exit the driver will take. Competing branches must have actual
@@ -86,7 +88,7 @@ Installed maps and their last successful update date remain available during rep
 
 ## Map behavior
 
-Installed tiles provide an independent local speed-limit fallback when the normal live road cache is unavailable. Disk reads run separately from network requests, so an online timeout cannot block the offline lookup. GPS freshness, road matching, direction, conditional-speed handling and candidate qualification still apply. An untagged or ambiguous road can still have no usable limit.
+Installed tiles provide an independent local speed-limit fallback when the normal live road cache is unavailable. Disk reads run separately from network requests, so an online timeout cannot block the offline lookup. GPS freshness, road matching, direction, conditional-speed handling and candidate validity checks still apply. An untagged or ambiguous road can still have no usable limit.
 
 Live maps work without installing any regional packages. The live query remains 1.5 km on the original Overpass provider, with the same 2 MiB response limit and fresh-position/coverage checks. A fresh online result takes priority. The bulk format does not contain OSM node IDs or complete junction topology, so offline geometry is not used to invent junction connections. Live data continues to supply richer junction/control information. This version therefore supports offline speed limits, not complete offline replacement of every map-derived feature.
 

@@ -143,6 +143,33 @@ def run_startup_smoke():
         road._calc_frame_matrix(rect)
         road.render(rect)
         layout.render(rect)
+    # A future posted preview must not inherit green feedback for a different
+    # current adjustment. Compare against the offset-adjusted target, not SET.
+    ui_state.params.put_bool('MapCruiseEnabled', True, block=True)
+    ui_state.params.put_bool('IsMetric', True, block=True)
+    ui_state.params.put('SlcOffsetValue', 10, block=True)
+    ui_state.update_params()
+    ui_state.CP = msgs['carParams'].carParams.as_reader()
+    map_state = msgs['mapCruiseState'].mapCruiseState
+    map_state.previewValid = True
+    map_state.previewSpeed = 60 / 3.6
+    map_state.adjustingSpeed = 100 / 3.6
+    ui_state.update()
+    assert abs(ui_state.speed_limit_preview - 60 / 3.6) < .001
+    assert not ui_state.map_cruise_pulsing
+    map_state.adjustingSpeed = 70 / 3.6
+    ui_state.update()
+    assert ui_state.map_cruise_pulsing
+    ui_state.params.put_bool('IsMetric', False, block=True)
+    ui_state.update_params()
+    ui_state.update()
+    assert not ui_state.map_cruise_pulsing  # a +10 mph offset is not +10 km/h
+    map_state.adjustingSpeed = 76.093 / 3.6
+    ui_state.update()
+    assert ui_state.map_cruise_pulsing
+    map_state.adjustingSpeed = 0.
+    ui_state.update()
+    assert not ui_state.map_cruise_pulsing
     print('onroad transitions rendered', flush=True)
     gui_app.close()
 

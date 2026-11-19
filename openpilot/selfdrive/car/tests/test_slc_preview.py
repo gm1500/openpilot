@@ -58,7 +58,7 @@ def test_lower_limit_uses_braking_distance_and_keeps_posted_limit_distinct():
   assert not d.helper.map_cruise.preview_active
 
 
-def test_higher_limit_waits_for_entry_without_second_qualification_delay():
+def test_higher_limit_waits_for_entry_then_applies_immediately():
   d = Drive()
   d.approach(110.)
   d.preview = replace(d.preview, distance=1.)
@@ -71,28 +71,39 @@ def test_higher_limit_waits_for_entry_without_second_qualification_delay():
   assert d.target == 110
 
 
-@pytest.mark.parametrize('issue', ['off', 'frozen', 'changed_way', 'stale', 'reversed'])
-def test_unqualified_preview_does_not_bypass_normal_delay(issue):
+@pytest.mark.parametrize('issue', ['off', 'invalid_way', 'stale', 'reversed', 'missing'])
+def test_unusable_preview_does_not_apply_an_early_lower_limit(issue):
   d = Drive()
+  d.preview = MapPreview(70 / 3.6, 20., 2)
   if issue == 'off':
     d.settings = replace(d.settings, advance=False)
-  if issue == 'frozen':
-    d.gps = d.now
-  d.approach(110.)
-  if issue == 'changed_way':
-    d.preview = replace(d.preview, way_id=3)
-    d.tick()
+  elif issue == 'invalid_way':
+    d.preview = replace(d.preview, way_id=0)
   elif issue == 'stale':
-    d.now += 3.1
+    d.gps = d.now - 3.1
   elif issue == 'reversed':
-    d.gps = d.now - 1.
-    d.tick()
-  d.speed, d.way, d.preview = 110., 2, None
+    d.gps = d.now - .1
+  else:
+    d.preview = None
   d.tick()
   assert d.target == 100
+  assert not d.helper.map_cruise.preview_active
+  # A fresh current-road match does not depend on earlier preview history.
+  d.speed, d.way, d.preview, d.gps = 70., 2, None, None
+  d.tick()
+  assert d.target == 70
 
 
-def test_short_boundary_gap_preserves_only_exact_way_entry_qualification():
+def test_fresh_lower_preview_in_range_applies_on_first_frame_with_unchanged_gps():
+  d = Drive()
+  d.gps = d.now
+  d.preview = MapPreview(70 / 3.6, 20., 2)
+  d.tick()
+  assert d.target == 70
+  assert d.helper.map_cruise.preview_active
+
+
+def test_boundary_gap_never_blocks_new_fresh_current_limit():
   d = Drive()
   d.approach(110.)
   d.speed, d.preview = None, None
@@ -163,6 +174,47 @@ def test_preview_does_not_raise_lower_manual_target_or_release_no_speed_e2e():
   d.speed, d.way, d.preview = 70., 2, None
   d.tick()
   assert not d.helper.map_cruise.e2e_fallback
+
+
+@pytest.mark.parametrize('resume_policy', [0, 1])
+@pytest.mark.parametrize('next_limit', ['preview_entry', 'different_current', 'different_preview'])
+@pytest.mark.parametrize('button,manual_speed', [(ButtonType.decelCruise, 69), (ButtonType.accelCruise, 71)])
+def test_manual_speed_survives_same_preview_source_switches_and_gaps(resume_policy, next_limit, button, manual_speed):
+  d = Drive(resume_policy=resume_policy)
+  preview = MapPreview(70 / 3.6, 20., 2)
+  d.preview = preview
+  d.tick()
+  assert d.target == 70
+  for pressed in (True, False):
+    d.cs.buttonEvents = [car.CarState.ButtonEvent(type=button, pressed=pressed)]
+    d.tick()
+  d.cs.buttonEvents = []
+  assert d.target == manual_speed
+  assert not d.helper.map_cruise.tracking
+
+  # Neither withdrawal, reappearance, nor brief invalid GPS is a new speed zone.
+  for upcoming, stale in ((preview, False), (None, False), (preview, False),
+                          (replace(preview, way_id=99), False), (preview, True),
+                          (None, False), (preview, False)):
+    d.preview = upcoming
+    d.gps = d.now - 3.1 if stale else None
+    for _ in range(5):
+      d.tick()
+      assert d.target == manual_speed
+      assert not d.helper.map_cruise.tracking
+
+  if next_limit == 'preview_entry':
+    d.speed, d.way, d.preview = 70., 2, None
+    expected = 70
+  elif next_limit == 'different_current':
+    d.speed, d.way, d.preview = 60., 3, None
+    expected = 60
+  else:
+    d.preview = MapPreview(60 / 3.6, 20., 3)
+    expected = 60
+  d.tick()
+  assert d.target == (expected if resume_policy == 0 else manual_speed)
+  assert d.helper.map_cruise.tracking == (resume_policy == 0)
 
 
 @pytest.mark.parametrize('speed', [8., 70., 145.])
@@ -242,15 +294,13 @@ def test_merge_target_keeps_restrictions_and_user_controls(issue):
   assert d.target <= 70.
 
 
-def test_merge_geometry_must_qualify_before_raising_set():
+def test_confirmed_merge_applies_immediately_without_requalifying_geometry():
   d = Drive()
   d.speed = None
   d.preview = MapPreview(110 / 3.6, 100., 2)
   d.tick(220)
   d.preview = replace(d.preview, merge=True)
-  d.tick(100)
-  assert not d.helper.map_cruise.preview_active
-  d.tick(110)
+  d.tick()
   assert d.helper.map_cruise.preview_active and d.target == 110
 
 
@@ -261,7 +311,7 @@ def test_advisory_fifty_metres_ahead_is_an_early_lower_target():
   assert d.target == 40 and d.helper.map_cruise.preview_active
 
 
-def test_distant_speed_can_qualify_without_being_applied():
+def test_distant_speed_is_visible_without_being_applied():
   d = Drive()
   d.speed = None
   d.preview = MapPreview(60 / 3.6, 800., 2)
@@ -275,10 +325,8 @@ def test_new_preview_is_available_immediately_without_changing_set(speed, adviso
   d.preview = MapPreview(speed / 3.6, 800., 2, advisory=advisory)
   d.tick()
   map_cruise = d.helper.map_cruise
-  assert map_cruise.preview_pending_kph == speed + 5
   assert map_cruise.preview_speed_ms == speed / 3.6
   assert map_cruise.preview_advisory == advisory
-  assert not map_cruise._preview_qualified
   assert not map_cruise.preview_active
   assert d.target == 105
 
@@ -288,7 +336,7 @@ def test_unusable_or_unchanged_preview_clears_display_candidate(issue):
   d = Drive()
   d.preview = MapPreview(70 / 3.6, 800., 2)
   d.tick()
-  assert d.helper.map_cruise.preview_pending_kph == 70
+  assert d.helper.map_cruise.preview_speed_ms == 70 / 3.6
   if issue == 'missing':
     d.preview = None
   elif issue == 'stale':
@@ -302,13 +350,12 @@ def test_unusable_or_unchanged_preview_clears_display_candidate(issue):
   else:
     d.settings = replace(d.settings, advance=False)
   d.tick()
-  assert d.helper.map_cruise.preview_pending_kph is None
   assert d.helper.map_cruise.preview_speed_ms is None
   assert not d.helper.map_cruise.preview_advisory
   assert d.target == 100
 
 
-def test_preview_wire_defaults_and_posted_speed_are_distinct_from_offset_target():
+def test_preview_wire_keeps_future_posted_speed_distinct_from_actual_adjustment():
   packet = log.Event.new_message(valid=True, logMonoTime=int(100e9))
   state = packet.init('mapCruiseState')
   assert not state.previewValid
@@ -325,5 +372,5 @@ def test_preview_wire_defaults_and_posted_speed_are_distinct_from_offset_target(
     assert decoded.mapCruiseState.previewValid
     assert decoded.mapCruiseState.previewAdvisory
     assert decoded.mapCruiseState.previewSpeed * 3.6 == pytest.approx(70)
-    assert decoded.mapCruiseState.adjustingSpeed * 3.6 == pytest.approx(75)
+    assert decoded.mapCruiseState.adjustingSpeed * 3.6 == pytest.approx(105)
     assert decoded.mapCruiseState.setSpeed * 3.6 == pytest.approx(105)

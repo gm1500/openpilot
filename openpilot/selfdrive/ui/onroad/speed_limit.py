@@ -88,8 +88,6 @@ class SpeedLimitButton(Widget):
     self.show_sign = True
     self._pulse_since: float | None = None
     self._pulse_limit: float | None = None
-    self._preview_limit: float | None = None
-    self._preview_since = float('-inf')
     self._click_delay = 0.2  # consume release before the camera's tap handler
     self.set_enabled(lambda: self.show_sign and ui_state.map_cruise_supported)
     self.set_click_callback(lambda: ui_state.set_map_cruise_enabled(not ui_state.map_cruise_enabled))
@@ -111,13 +109,8 @@ class SpeedLimitButton(Widget):
     pulsing = (ui_state.map_cruise_pulsing and ui_state.map_cruise_enabled and ui_state.map_cruise_supported and
                speed_limit is not None and (candidate is not None or not ui_state.map_cruise_e2e))
     now = rl.get_time()
-    # Recognizing a new limit is immediate feedback; card still owns sustained
-    # actuation feedback and its manual/pedal/lead cancellation rules.
-    if candidate != self._preview_limit:
-      self._preview_limit = candidate
-      self._preview_since = now
-    pulsing |= (candidate is not None and 0 <= now - self._preview_since < 2. and ui_state.engaged and
-                ui_state.map_cruise_enabled and ui_state.map_cruise_supported)
+    # Green feedback follows the controller's adjustment; there is no separate
+    # warning countdown when a new posted preview appears.
     if not pulsing:
       self._pulse_since = None
     elif self._pulse_since is None or self._pulse_limit != speed_limit:

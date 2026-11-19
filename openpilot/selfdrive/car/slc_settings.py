@@ -11,7 +11,7 @@ class SLCSettings:
   offset_value: int = 0
   change_policy: int = 0  # 0 = automatic, 1 = lower only, 2 = explicit SET
   resume_policy: int = 0  # 0 = next changed limit, 1 = explicit SET
-  advance: bool = False  # qualify ahead; lower targets may start up to two seconds early
+  advance: bool = False  # anticipate mapped speed changes within their approach distance
   e2e_ceiling_kph: int = 105  # initial SET when automatic no-map E2E is acknowledged
 
   @classmethod

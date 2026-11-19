@@ -12,6 +12,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.lib.prime_state import PrimeState
 from openpilot.selfdrive.ui.lib.notifications import Notifications
 from openpilot.selfdrive.car.map_cruise import map_cruise_supported, read_map_display, lead_limits_speed, MAP_MESSAGE_MAX_AGE
+from openpilot.selfdrive.car.slc_settings import SLCSettings
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.hardware import HARDWARE, PC
 from openpilot.common.hardware.usb import cable_connected, get_usb_state, is_chestnut_usb_id, usb_host_connected
@@ -101,6 +102,7 @@ class UIState:
     self.speed_limit: float | None = None  # OSM m/s
     self.speed_limit_is_advisory = False
     self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
+    self.slc_settings = SLCSettings.read(self.params)
     self.map_cruise_state = "waiting"
     self.map_cruise_pulsing = False
     self.map_cruise_e2e = False
@@ -215,12 +217,15 @@ class UIState:
         self.speed_limit_preview_advisory = map_state.previewAdvisory
       adjusting_kph = round(self.sm['mapCruiseState'].adjustingSpeed * 3.6, 3)
       cs = self.sm['carState']
+      displayed_speed = self.speed_limit_preview if self.speed_limit_preview is not None else self.speed_limit
+      displayed_target = self.slc_settings.target(displayed_speed * 3.6, self.is_metric) if displayed_speed is not None else None
       # Completion/cancellation is latched in card, not inferred from speed
       # mismatch, so a later speed drift cannot restart a finished pulse.
       self.map_cruise_pulsing = (self.map_cruise_enabled and self.map_cruise_supported and self.engaged and
                                  (self.speed_limit_preview is not None or not map_state.e2eFallback and self.speed_limit is not None) and
                                  cs.cruiseState.available and not (cs.standstill or cs.gasPressed or cs.brakePressed) and
                                  8 <= adjusting_kph <= 145 and 8 <= cs.vCruise <= 145 and
+                                 displayed_target is not None and abs(displayed_target - adjusting_kph) < .01 and
                                  not lead_limits_speed(self.sm, self.started_frame, now))
     self._update_status()
     self._update_chestnut_state()
@@ -358,6 +363,7 @@ class UIState:
     self.navigation_enabled = self.params.get_bool("NavigationEnabled")
     self.nav_destination_set = self.params.get("NavDestination") is not None
     self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
+    self.slc_settings = SLCSettings.read(self.params)
     self.lane_policy_enabled = get_lane_policy_enabled(self.params)
     self.lane_policy_active = self.params.get_bool("LanePolicyActive")
     self.lane_policy_blending = self.params.get_bool("LanePolicyBlending")

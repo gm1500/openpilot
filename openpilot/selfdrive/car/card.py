@@ -157,8 +157,6 @@ class Car:
     self.slc_settings = SLCSettings.read(self.params)
     self.automatic_e2e = map_cruise_supported(self.CP)
     self._last_map_status = None
-    self._map_posted_speed = None
-    self._map_posted_advisory = False
     self.is_metric = self.params.get_bool("IsMetric")
     self.initial_cruise_speed = self.params.get("InitialCruiseSpeedKph", return_default=True)
 
@@ -190,8 +188,6 @@ class Car:
 
     now = self.can_log_mono_time * 1e-9 if REPLAY else time.monotonic()
     map_speed, gps_time = read_map_speed(self.sm, now, replay=REPLAY)
-    self._map_posted_speed = map_speed
-    self._map_posted_advisory = self.sm['mapSpeedLimit'].speedLimit == 0
     # Logs predating SLC retain the original manual button behavior.
     map_enabled = self.map_cruise_enabled and (not REPLAY or self.sm.seen['mapSpeedLimit'])
     self.v_cruise_helper.update_v_cruise(CS, self.sm['carControl'].enabled, self.is_metric,
@@ -236,8 +232,6 @@ class Car:
     selector = self.v_cruise_helper.map_cruise
     adjusting = self.v_cruise_helper.map_pulse.target_kph
     preview_speed, preview_advisory = selector.preview_speed_ms, selector.preview_advisory
-    if preview_speed is None and selector.pending_kph is not None:
-      preview_speed, preview_advisory = self._map_posted_speed, self._map_posted_advisory
     status = (selector.state(self.sm['carControl'].enabled and CS.cruiseState.available),
               selector.target_kph, selector.e2e_fallback, selector.automatic_e2e, CS.vCruise,
               adjusting, preview_speed, preview_advisory)
