@@ -16,6 +16,9 @@ cereal = env.Library('cereal', [f'gen/cpp/{s}.c++' for s in all_output])
 # Build messaging
 services_h = env.Command(['services.h'], ['services.py'], 'python3 ' + cereal_dir.path + '/services.py > $TARGET')
 
-socketmaster = env.Library('socketmaster', ['messaging/socketmaster.cc'])
+socketmaster_objects = env.Object(['messaging/socketmaster.cc'])
+# Service registry additions must invalidate native messaging on branch switches.
+env.Depends(socketmaster_objects, [services_h, 'services.py'])
+socketmaster = env.Library('socketmaster', socketmaster_objects)
 
 Export('cereal', 'socketmaster')
