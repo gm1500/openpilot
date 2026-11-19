@@ -28,23 +28,31 @@ safety calibration on the upstream opendbc base.
 
 ## Driving behavior
 
-Ordinary mapped-speed operation uses native real-lead MPC and cruise planning
-with an anticipatory limit on positive cruise acceleration near SET.
+Ordinary mapped-speed operation uses native real-lead MPC with the restored
+pre-Cheddar Chill cruise acceleration curve and direct speed-error response.
 The stock personalities remain **Aggressive: 1.25 s**, **Standard: 1.45 s**, and
 **Relaxed: 1.75 s**, with their upstream jerk settings. `radard.py` and
 `longcontrol.py` remain byte-for-byte upstream. Vision leads use upstream model
 velocity with its ego-speed correction; native radar association and filtering
 remain available where the vehicle supplies radar.
 
-The cruise approach limit reserves speed headroom for measured positive vehicle
-acceleration during the configured actuator delay and its reduction at the
-existing cruise jerk limit. It reduces positive cruise demand before reaching
-SET, while retaining the native acceleration ceiling, smoothing and jerk limits.
-It does not add braking from that prediction; existing negative cruise demand
-and stronger real-lead/E2E braking retain their normal arbitration. A sudden
-lower SET while already accelerating can still overshoot during the retained
-actuator delay and acceleration reduction. This is deterministic control, not
-driver-style learning; the upstream gas-override boost removal is included.
+Chill positive acceleration is limited to **1.6, 1.2, 0.8 and 0.6 m/s²** at
+**0, 36, 90 and 144 km/h**, interpolated between those points: approximately
+**1.02 m/s² at 60 km/h** and **0.69 m/s² at 120 km/h**. Automatic no-map E2E
+retains the **2.0 m/s²** ceiling. The selected positive output also obeys its
+mode's ceiling. The measured-acceleration taper and newer one-second cruise
+filter have been removed; the original speed-dependent cruise jerk limits remain.
+
+When a lead or model candidate is controlling acceleration, positive cruise
+history is bounded by the selected positive output. Releasing that constraint
+therefore cannot uncover an accumulated high cruise request. Negative lead
+braking is not copied into positive cruise history. Stronger lead/model braking
+still wins the existing minimum-candidate selection. A lower mode ceiling applies
+immediately; an already-high acceleration request can drop when that ceiling
+changes. SET is applied before map recovery clears E2E in the same card update.
+The vehicle's actuator delay and existing acceleration can still cause transient
+overshoot after a late lower SET. The upstream gas-override boost removal remains
+included; this policy has no learned acceleration boost.
 
 The narrow slowing assist can enter only when the model's current lead-speed
 estimate is **below 55 km/h**, with a present accepted lead and sustained model
@@ -123,8 +131,10 @@ unchanged upstream lead-processing files. Preserve these checks when updating
 upstream; schema and service additions require rebuilding native consumers.
 
 Subsequent recorded drives have been reviewed to diagnose UI and SLC behavior.
-The cruise approach change has offline planner replay and synthetic closed-loop
-validation; it has not yet been validated in a vehicle. These checks do not
+The restored cruise limits and handoff change have offline planner replay and
+synthetic closed-loop validation; this revision has not yet been validated in a
+vehicle. The narrow-paint exception has qualification replay and unit coverage,
+not closed-loop lateral validation. These checks do not
 establish road performance, model-inference timing, camera transition appearance
 or braking improvement. No new road-validation result is implied by retaining
 an archived feature.

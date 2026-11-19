@@ -19,7 +19,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mode import slc_e2e_fallback
 from openpilot.selfdrive.car.map_cruise import map_cruise_supported
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
-from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop, smooth_value
+from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
@@ -28,23 +28,22 @@ REPLAY = "REPLAY" in os.environ
 J_CRUISE_VALS = [1.6, 1.2, 0.8, 0.6]
 J_CRUISE_BP = [0., 10.0, 25., 40.]
 A_CRUISE_MIN = -0.5
+A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
+A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
 
-def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, a_target_prev, dt, *, a_ego, actuator_delay):
+def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, a_target_prev, dt, *, max_accel=ACCEL_MAX):
+  target_accel = np.clip(v_cruise - v_ego, A_CRUISE_MIN, max_accel)
   j_cruise = np.interp(v_ego, J_CRUISE_BP, J_CRUISE_VALS)
-  target_accel = smooth_value(v_cruise - v_ego, a_cruise_prev, tau=1.0, dt=dt)
-  # Leave enough speed headroom for actuator delay and the existing jerk-limited
-  # unwind. This only limits positive cruise acceleration; it cannot request
-  # extra braking or weaken a stronger lead/model candidate.
-  positive_accel = max(a_ego, 0.0) if np.isfinite(a_ego) else 0.0
-  remaining_speed_gain = positive_accel * actuator_delay + positive_accel ** 2 / (2.0 * j_cruise)
-  approach_accel = max(v_cruise - v_ego - remaining_speed_gain, 0.0)
-  target_accel = min(target_accel, approach_accel)
-  target_accel = np.clip(target_accel, A_CRUISE_MIN, ACCEL_MAX)
-  target_accel = float(np.clip(target_accel, min(a_cruise_prev, a_target_prev) - j_cruise * dt, a_cruise_prev + j_cruise * dt))
-
-  return target_accel
+  # A lead/model constraint may hide a higher cruise candidate. Resume positive
+  # propulsion from the selected output, without retaining braking from a lead
+  # that has gone away. Ordinary negative cruise demand remains independent.
+  positive_history = min(a_cruise_prev, max(a_target_prev, 0.0))
+  target_accel = float(np.clip(target_accel, min(a_cruise_prev, a_target_prev) - j_cruise * dt,
+                             positive_history + j_cruise * dt))
+  # A lower mode ceiling applies immediately, including on recovery from E2E.
+  return min(target_accel, max_accel)
 
 
 class LongitudinalPlanner:
@@ -140,8 +139,9 @@ class LongitudinalPlanner:
                                               action_t=action_t)
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
 
-    self.a_cruise = get_cruise_accel(v_cruise, v_ego, self.a_cruise, self.output_a_target, self.dt,
-                                     a_ego=sm['carState'].aEgo, actuator_delay=self.CP.longitudinalActuatorDelay)
+    full_e2e = self.slc_e2e_fallback or not self.CP.openpilotLongitudinalControl
+    max_accel = ACCEL_MAX if full_e2e else float(np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS))
+    self.a_cruise = get_cruise_accel(v_cruise, v_ego, self.a_cruise, self.output_a_target, self.dt, max_accel=max_accel)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
@@ -149,7 +149,6 @@ class LongitudinalPlanner:
     # Chill retains native real-lead MPC and cruise. The model action is enabled
     # by no-limit fallback or qualified stopping intent; stock-ACC advisory
     # planning retains its upstream candidate selection.
-    full_e2e = self.slc_e2e_fallback or not self.CP.openpilotLongitudinalControl
     if full_e2e or self.stop_target.requested:
       candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
@@ -162,7 +161,7 @@ class LongitudinalPlanner:
     if self.e2e_assist_active:
       self.mpc.source = LongitudinalPlanSource.e2e
     self.output_should_stop |= assist_stop
-    self.output_a_target = np.clip(output_a_target, ACCEL_MIN, ACCEL_MAX)
+    self.output_a_target = np.clip(output_a_target, ACCEL_MIN, max_accel)
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
 
