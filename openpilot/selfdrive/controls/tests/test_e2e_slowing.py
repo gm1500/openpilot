@@ -229,5 +229,3 @@ class TestModelLeadSpeed(unittest.TestCase):
     self.assertIsNone(get_model_lead_speed(model, math.nan))
     model.leadsV3 = []
     self.assertIsNone(get_model_lead_speed(model, 12.))
-
-

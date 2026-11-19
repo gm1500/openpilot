@@ -55,4 +55,3 @@ struct Offline {
   ways @4 :List(Way);
   overlap @5 :Float64;
 }
-
