@@ -1,6 +1,8 @@
 import raylib_nb as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
+from openpilot.selfdrive.ui.onroad.gap_lane_button import GapLaneButton
+from openpilot.selfdrive.ui.onroad.speed_limit import SpeedLimitButton
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -10,14 +12,14 @@ from openpilot.system.ui.widgets import Widget
 # Constants
 SET_SPEED_NA = 255
 KM_TO_MILE = 0.621371
-CRUISE_DISABLED_CHAR = '–'
 
 
 @dataclass(frozen=True)
 class UIConfig:
   header_height: int = 300
-  set_speed_width_metric: int = 200
-  set_speed_width_imperial: int = 172
+  border_size: int = 30
+  button_size: int = 192
+  set_speed_width: int = 180
   set_speed_height: int = 204
 
 
@@ -25,21 +27,14 @@ class UIConfig:
 class FontSizes:
   current_speed: int = 176
   speed_unit: int = 66
-  max_speed: int = 40
-  set_speed: int = 90
 
 
 @dataclass(frozen=True)
 class Colors:
   WHITE = rl.WHITE
-  DISENGAGED = rl.Color(145, 155, 149, 255)
-  OVERRIDE = rl.Color(145, 155, 149, 255)  # Added
   ENGAGED = rl.Color(128, 216, 166, 255)
   GREY = rl.Color(166, 166, 166, 255)
-  DARK_GREY = rl.Color(114, 114, 114, 255)
-  BLACK_TRANSLUCENT = rl.Color(0, 0, 0, 166)
   WHITE_TRANSLUCENT = rl.Color(255, 255, 255, 200)
-  BORDER_TRANSLUCENT = rl.Color(255, 255, 255, 75)
   HEADER_GRADIENT_START = rl.Color(0, 0, 0, 114)
   HEADER_GRADIENT_END = rl.BLANK
 
@@ -54,14 +49,15 @@ class HudRenderer(Widget):
     super().__init__()
     """Initialize the HUD renderer."""
     self.is_cruise_set: bool = False
-    self.is_cruise_available: bool = True
     self.set_speed: float = SET_SPEED_NA
     self.speed: float = 0.0
     self.v_ego_cluster_seen: bool = False
 
-    self._font_semi_bold: rl.Font = gui_app.font(FontWeight.SEMI_BOLD)
     self._font_bold: rl.Font = gui_app.font(FontWeight.BOLD)
     self._font_medium: rl.Font = gui_app.font(FontWeight.MEDIUM)
+
+    self._speed_limit_button = self._child(SpeedLimitButton())
+    self._gap_lane_button = self._child(GapLaneButton())
 
   def _update_state(self) -> None:
     """Update HUD state based on car state and controls state."""
@@ -76,7 +72,6 @@ class HudRenderer(Widget):
 
     self.set_speed = car_state.vCruiseCluster
     self.is_cruise_set = 0 < self.set_speed < SET_SPEED_NA
-    self.is_cruise_available = self.set_speed != -1
 
     if self.is_cruise_set and not ui_state.is_metric:
       self.set_speed *= KM_TO_MILE
@@ -99,53 +94,25 @@ class HudRenderer(Widget):
       COLORS.HEADER_GRADIENT_END,
     )
 
-    if self.is_cruise_available:
-      self._draw_set_speed(rect)
+    self._draw_set_speed(rect)
 
     self._draw_current_speed(rect)
 
+    lane_icon_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
+    lane_icon_y = rect.y + rect.height - UI_CONFIG.border_size - UI_CONFIG.button_size
+    self._gap_lane_button.render(rl.Rectangle(lane_icon_x, lane_icon_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
+
+  def user_interacting(self) -> bool:
+    return self._gap_lane_button.is_pressed or self._speed_limit_button.is_pressed
+
   def _draw_set_speed(self, rect: rl.Rectangle) -> None:
-    """Draw the MAX speed indicator box."""
-    set_speed_width = UI_CONFIG.set_speed_width_metric if ui_state.is_metric else UI_CONFIG.set_speed_width_imperial
-    x = rect.x + 60 + (UI_CONFIG.set_speed_width_imperial - set_speed_width) // 2
-    y = rect.y + 45
-
-    set_speed_rect = rl.Rectangle(x, y, set_speed_width, UI_CONFIG.set_speed_height)
-    rl.draw_rectangle_rounded(set_speed_rect, 0.35, 10, COLORS.BLACK_TRANSLUCENT)
-    rl.draw_rectangle_rounded_lines_ex(set_speed_rect, 0.35, 10, 6, COLORS.BORDER_TRANSLUCENT)
-
-    max_color = COLORS.GREY
-    set_speed_color = COLORS.DARK_GREY
+    set_color = COLORS.GREY
     if self.is_cruise_set:
-      set_speed_color = COLORS.WHITE
-      if ui_state.status == UIStatus.ENGAGED:
-        max_color = COLORS.ENGAGED
-      elif ui_state.status == UIStatus.DISENGAGED:
-        max_color = COLORS.DISENGAGED
-      elif ui_state.status == UIStatus.OVERRIDE:
-        max_color = COLORS.OVERRIDE
-
-    max_text = tr("MAX")
-    max_text_width = measure_text_cached(self._font_semi_bold, max_text, FONT_SIZES.max_speed).x
-    rl.draw_text_ex(
-      self._font_semi_bold,
-      max_text,
-      rl.Vector2(x + (set_speed_width - max_text_width) / 2, y + 27),
-      FONT_SIZES.max_speed,
-      0,
-      max_color,
-    )
-
-    set_speed_text = CRUISE_DISABLED_CHAR if not self.is_cruise_set else str(round(self.set_speed))
-    speed_text_width = measure_text_cached(self._font_bold, set_speed_text, FONT_SIZES.set_speed).x
-    rl.draw_text_ex(
-      self._font_bold,
-      set_speed_text,
-      rl.Vector2(x + (set_speed_width - speed_text_width) / 2, y + 77),
-      FONT_SIZES.set_speed,
-      0,
-      set_speed_color,
-    )
+      set_color = COLORS.ENGAGED if ui_state.status == UIStatus.ENGAGED else COLORS.WHITE
+    sign = rl.Rectangle(rect.x + 56, rect.y + 45, UI_CONFIG.set_speed_width, UI_CONFIG.set_speed_height)
+    self._speed_limit_button.set_speed = self.set_speed if self.is_cruise_set else None
+    self._speed_limit_button.set_color = set_color
+    self._speed_limit_button.render(sign)
 
   def _draw_current_speed(self, rect: rl.Rectangle) -> None:
     """Draw the current vehicle speed and unit."""

@@ -11,6 +11,7 @@ from openpilot.common.realtime import drop_realtime
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.lib.prime_state import PrimeState
 from openpilot.selfdrive.ui.lib.notifications import Notifications
+from openpilot.selfdrive.car.map_cruise import map_cruise_supported, read_map_display, lead_limits_speed, MAP_MESSAGE_MAX_AGE
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.hardware import HARDWARE, PC
 from openpilot.common.hardware.usb import cable_connected, get_usb_state, is_chestnut_usb_id, usb_host_connected
@@ -22,6 +23,17 @@ BACKLIGHT_MIN = 30  # the lowest backlight the display shows properly
 # auto brightness goes below the backlight's floor by dimming the UI, down to 40% black
 BRIGHTNESS_MIN = BACKLIGHT_MIN * 0.6 if HARDWARE.get_device_type() == "mici" else BACKLIGHT_MIN
 PARAM_UPDATE_TIME = 1 / 5.0
+
+
+def get_lane_policy_enabled(params: Params) -> bool:
+  """Read the typed BOOL parameter while tolerating a legacy raw value."""
+  value = params.get("LanePolicyEnabled")
+  if value is None:
+    # The persistent selector defaults on before a preference has been saved.
+    return True
+  if isinstance(value, (bytes, bytearray)):
+    return value == b"1"
+  return bool(value)
 
 
 class UIStatus(Enum):
@@ -59,6 +71,7 @@ class UIState:
         "radarState",
         "deviceState",
         "pandaStates",
+        "peripheralState",
         "carParams",
         "driverMonitoringState",
         "carState",
@@ -71,16 +84,28 @@ class UIState:
         "gpsLocationExternal",
         "gpsLocation",
         "navInstruction",
+        "mapSpeedLimit",
+        "mapCruiseState",
         "carOutput",
         "carControl",
         "vehicleParameters",
         "testJoystick",
         "rawAudioData",
+        "sentryState",
+        "sentryRecorderState",
       ]
     )
 
     self.prime_state = PrimeState()
     self.notifications = Notifications()
+    self.speed_limit: float | None = None  # OSM m/s
+    self.speed_limit_is_advisory = False
+    self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
+    self.map_cruise_state = "waiting"
+    self.map_cruise_pulsing = False
+    self.map_cruise_e2e = False
+    self.speed_limit_preview = None
+    self.speed_limit_preview_advisory = False
 
     # UI Status tracking
     self.status: UIStatus = UIStatus.DISENGAGED
@@ -96,6 +121,9 @@ class UIState:
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
     self.navigation_enabled: bool = self.params.get_bool("NavigationEnabled")
     self.nav_destination_set: bool = self.params.get("NavDestination") is not None
+    self.lane_policy_enabled: bool = get_lane_policy_enabled(self.params)
+    self.lane_policy_active: bool = self.params.get_bool("LanePolicyActive")
+    self.lane_policy_blending: bool = self.params.get_bool("LanePolicyBlending")
     self.chestnut_present: bool = False
     self.chestnut_compiled: bool = chestnut_compiled()
     self.chestnut_active: bool | None = None
@@ -134,6 +162,12 @@ class UIState:
     self._on_body_changed_callbacks.append(callback)
 
   @property
+  def sentry_active(self) -> bool:
+    return (self.params.get_bool('SentryEnabled') and not self.params.get_bool('SentryOffThisDrive') and
+            not self.ignition and not self.started and self.sm.valid['sentryState'] and
+            0 <= time.monotonic()-self.sm.recv_time['sentryState'] < 2. and self.sm['sentryState'].capture)
+
+  @property
   def engaged(self) -> bool:
     return self.started and self.sm["selfdriveState"].enabled
 
@@ -155,6 +189,34 @@ class UIState:
 
     self.sm.update(0)
     self._update_state()
+    now = time.monotonic()
+    self.speed_limit = read_map_display(self.sm, now)
+    if not self.started or self.sm.recv_frame['mapSpeedLimit'] < self.started_frame:
+      self.speed_limit = None
+    self.speed_limit_is_advisory = self.speed_limit is not None and self.sm['mapSpeedLimit'].speedLimit == 0
+    self.map_cruise_e2e = False
+    self.speed_limit_preview = None
+    self.speed_limit_preview_advisory = False
+    self.map_cruise_state = "waiting"
+    self.map_cruise_pulsing = False
+    if (self.started and self.sm.valid['mapCruiseState'] and self.sm.recv_frame['mapCruiseState'] >= self.started_frame and
+        0 <= now - self.sm.logMonoTime['mapCruiseState'] * 1e-9 <= MAP_MESSAGE_MAX_AGE and
+        0 <= now - self.sm.recv_time['mapCruiseState'] <= MAP_MESSAGE_MAX_AGE):
+      map_state = self.sm['mapCruiseState']
+      self.map_cruise_state = str(map_state.state)
+      self.map_cruise_e2e = bool(self.map_cruise_enabled and self.map_cruise_supported and map_state.e2eFallback)
+      if map_state.previewValid and 8 <= map_state.previewSpeed * 3.6 <= 145:
+        self.speed_limit_preview = map_state.previewSpeed
+        self.speed_limit_preview_advisory = map_state.previewAdvisory
+      adjusting_kph = round(self.sm['mapCruiseState'].adjustingSpeed * 3.6, 3)
+      cs = self.sm['carState']
+      # Completion/cancellation is latched in card, not inferred from speed
+      # mismatch, so a later speed drift cannot restart a finished pulse.
+      self.map_cruise_pulsing = (self.map_cruise_enabled and self.map_cruise_supported and self.engaged and
+                                 (self.speed_limit_preview is not None or not map_state.e2eFallback and self.speed_limit is not None) and
+                                 cs.cruiseState.available and not (cs.standstill or cs.gasPressed or cs.brakePressed) and
+                                 8 <= adjusting_kph <= 145 and 8 <= cs.vCruise <= 145 and
+                                 not lead_limits_speed(self.sm, self.started_frame, now))
     self._update_status()
     self._update_chestnut_state()
     device.update()
@@ -247,6 +309,31 @@ class UIState:
     else:
       self.chestnut_state = ChestnutState.ACTIVE
 
+  @property
+  def map_cruise_supported(self) -> bool:
+    return map_cruise_supported(self.CP)
+
+  def set_map_cruise_enabled(self, enabled: bool) -> None:
+    self.params.put_bool("MapCruiseEnabled", enabled)
+    self.map_cruise_enabled = enabled
+    self.map_cruise_state = "waiting" if enabled else "off"
+    self.map_cruise_pulsing = False
+    self.map_cruise_e2e = False
+
+  def set_lane_policy_enabled(self, enabled: bool) -> None:
+    """Persist the HUD selector and update its in-memory state immediately."""
+    self.params.put_bool("LanePolicyEnabled", enabled)
+    self.lane_policy_enabled = enabled
+
+  @property
+  def lane_policy_line_color(self) -> tuple[int, int, int] | None:
+    if self.lane_policy_enabled:
+      if self.lane_policy_active:
+        return (128, 216, 166) if self.engaged else (97, 183, 230)
+      if self.lane_policy_blending:
+        return (97, 183, 230)
+    return None
+
   def update_params(self) -> None:
     # For slower operations
     # Update longitudinal control state
@@ -265,6 +352,10 @@ class UIState:
     self.personality_param = self.params.get("LongitudinalPersonality", return_default=True)
     self.navigation_enabled = self.params.get_bool("NavigationEnabled")
     self.nav_destination_set = self.params.get("NavDestination") is not None
+    self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
+    self.lane_policy_enabled = get_lane_policy_enabled(self.params)
+    self.lane_policy_active = self.params.get_bool("LanePolicyActive")
+    self.lane_policy_blending = self.params.get_bool("LanePolicyBlending")
     self.chestnut_active = self.params.get("ChestnutActive")
     self.chestnut_loading = self.params.get_bool("ChestnutLoading")
     self.chestnut_alert = any(self.params.get(k) is not None for k, a in OFFROAD_ALERTS.items() if k.startswith("Offroad_Chestnut") and a["severity"] >= 0)
@@ -295,6 +386,8 @@ class Device:
     self._interactive_timeout_callbacks: list[Callable] = []
     self._prev_timed_out = False
     self._awake: bool = True
+    self.sentry_motion_until = 0.
+    self.sentry_prompt_visible = False
 
     self._offroad_brightness: int = BACKLIGHT_OFFROAD
     self._last_brightness: int = 0
@@ -302,6 +395,14 @@ class Device:
     self._brightness_thread: threading.Thread | None = None
     self._brightness_event = threading.Event()
     self._brightness_target: int = 0
+
+  @property
+  def sentry_screen(self) -> bool:
+    return not self.sentry_prompt_visible and ui_state.sentry_active and time.monotonic() > self._interaction_time
+
+  @property
+  def sentry_eye_visible(self) -> bool:
+    return self.sentry_screen and ui_state.sm['sentryState'].eyeEnabled and time.monotonic() < self.sentry_motion_until
 
   @property
   def awake(self) -> bool:
@@ -333,8 +434,8 @@ class Device:
     if self._interaction_time <= 0:
       self._reset_interactive_timeout()
 
-    self._update_brightness()
     self._update_wakefulness()
+    self._update_brightness()
 
   def _start_brightness_thread(self):
     if self._brightness_thread is None or not self._brightness_thread.is_alive():
@@ -370,6 +471,9 @@ class Device:
     brightness = self._brightness_filter.update(clipped_brightness)
     gui_app.set_dim(1 - brightness / BACKLIGHT_MIN)
     brightness = round(max(brightness, BACKLIGHT_MIN))
+    if self.sentry_screen:
+      brightness = 100 if self.sentry_eye_visible else 0
+      gui_app.set_dim(0.0)
     if not self._awake:
       brightness = 0
 
@@ -392,7 +496,14 @@ class Device:
         callback()
     self._prev_timed_out = interaction_timeout
 
-    self._set_awake(ui_state.ignition or not interaction_timeout or PC)
+    # A touch suppresses all Sentry wakeups for the whole interactive period.
+    # The eye follows live activity, not the potentially 60-second recording tail.
+    state = ui_state.sm['sentryState']
+    if not interaction_timeout or not ui_state.sentry_active:
+      self.sentry_motion_until = 0.
+    elif state.motion and state.motionCamera in (1, 2) or state.sensorActive:
+      self.sentry_motion_until = time.monotonic()+.75
+    self._set_awake(ui_state.ignition or not interaction_timeout or self.sentry_eye_visible or PC)
 
   def _set_awake(self, on: bool):
     if on != self._awake:

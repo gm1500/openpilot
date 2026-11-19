@@ -67,6 +67,10 @@ class CameraView(Widget):
 
   def switch_stream(self, stream_type: VisionStreamType) -> None:
     if self._stream_type == stream_type:
+      # An engagement can reverse a pending low-speed wide-camera request.
+      self._target_client = None
+      self._target_stream_type = None
+      self._switching = False
       return
 
     if self._switching and self._target_stream_type == stream_type:

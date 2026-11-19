@@ -223,6 +223,17 @@ class MultipleButtonAction(ItemAction):
     if 0 <= index < len(self.buttons):
       self.selected_button = index
 
+  def get_selected_button(self) -> int:
+    return self.selected_button
+
+  def is_button_selected(self, index: int) -> bool:
+    return index == self.selected_button
+
+  def select_button(self, index: int):
+    self.selected_button = index
+    if self.callback:
+      self.callback(index)
+
   def _render(self, rect: rl.Rectangle):
     spacing = RIGHT_ITEM_PADDING
     button_y = rect.y + (rect.height - BUTTON_HEIGHT) / 2
@@ -234,7 +245,7 @@ class MultipleButtonAction(ItemAction):
       # Check button state
       mouse_pos = rl.get_mouse_position()
       is_pressed = rl.check_collision_point_rec(rl.Vector2(mouse_pos.x, mouse_pos.y), button_rect) and self.enabled and self.is_pressed
-      is_selected = i == self.selected_button
+      is_selected = self.is_button_selected(i)
 
       # Button colors
       if is_selected:
@@ -265,9 +276,7 @@ class MultipleButtonAction(ItemAction):
       button_x = self._rect.x + i * (self.button_width + spacing)
       button_rect = rl.Rectangle(button_x, button_y, self.button_width, BUTTON_HEIGHT)
       if rl.check_collision_point_rec(rl.Vector2(mouse_pos.x, mouse_pos.y), button_rect):
-        self.selected_button = i
-        if self.callback:
-          self.callback(i)
+        self.select_button(i)
 
 
 class ListItem(Widget):

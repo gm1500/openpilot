@@ -4,6 +4,8 @@ from enum import IntEnum
 from collections.abc import Callable
 from openpilot.selfdrive.ui.layouts.settings.developer import DeveloperLayout
 from openpilot.selfdrive.ui.layouts.settings.device import DeviceLayout
+from openpilot.selfdrive.ui.layouts.settings.sentry import SentryLayout
+from openpilot.selfdrive.ui.layouts.settings.slc import SLCLayout
 from openpilot.selfdrive.ui.layouts.settings.firehose import FirehoseLayout
 from openpilot.selfdrive.ui.layouts.settings.software import SoftwareLayout
 from openpilot.selfdrive.ui.layouts.settings.toggles import TogglesLayout
@@ -37,6 +39,8 @@ class PanelType(IntEnum):
   SOFTWARE = 3
   FIREHOSE = 4
   DEVELOPER = 5
+  SENTRY = 6
+  SLC = 7
 
 
 @dataclass
@@ -62,6 +66,8 @@ class SettingsLayout(Widget):
       PanelType.SOFTWARE: PanelInfo(tr_noop("Software"), SoftwareLayout()),
       PanelType.FIREHOSE: PanelInfo(tr_noop("Firehose"), FirehoseLayout()),
       PanelType.DEVELOPER: PanelInfo(tr_noop("Developer"), DeveloperLayout()),
+      PanelType.SLC: PanelInfo(tr_noop("SLC"), SLCLayout()),
+      PanelType.SENTRY: PanelInfo(tr_noop("Sentry"), SentryLayout()),
     }
 
     self._font_medium = gui_app.font(FontWeight.MEDIUM)
@@ -116,8 +122,9 @@ class SettingsLayout(Widget):
 
     # Navigation buttons
     y = rect.y + 300
+    nav_height = min(NAV_BTN_HEIGHT, (rect.height - 300) / len(self._panels))
     for panel_type, panel_info in self._panels.items():
-      button_rect = rl.Rectangle(rect.x + 50, y, rect.width - 150, NAV_BTN_HEIGHT)
+      button_rect = rl.Rectangle(rect.x + 50, y, rect.width - 150, nav_height)
 
       # Button styling
       is_selected = panel_type == self._current_panel
@@ -133,7 +140,7 @@ class SettingsLayout(Widget):
       # Store button rect for click detection
       panel_info.button_rect = button_rect
 
-      y += NAV_BTN_HEIGHT
+      y += nav_height
 
   def _draw_current_panel(self, rect: rl.Rectangle):
     rl.draw_rectangle_rounded(
