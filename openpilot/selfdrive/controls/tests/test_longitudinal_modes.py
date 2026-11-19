@@ -88,6 +88,25 @@ class TestLongitudinalModes(unittest.TestCase):
     self.sm['mapCruiseState'].e2eFallback = False
     self.assertFalse(self.tick().slcE2eFallback)
 
+  def test_chill_uses_second_lead_forecast_and_falls_back_when_incomplete(self):
+    lead = self.sm['radarState'].leadTwo
+    lead.present, lead.modelProb, lead.dRel, lead.vLead = True, .99, 30., 10.
+    self.assertTrue(self.tick().hasLead)
+    radar_only_obstacle = self.planner.mpc.params[-1, 2]
+
+    # The model predicts 10 m of travel and a 10 m/s drop from the tracked state.
+    forecast = self.sm['modelV2'].init('leadsV3', 2)[1]
+    forecast.x = [40., 50., 50., 50., 50., 50.]
+    forecast.v = [11., 1., 1., 1., 1., 1.]
+    self.assertFalse(self.tick().slcE2eFallback)
+    self.assertAlmostEqual(self.planner.mpc.params[-1, 2], 40.)
+    self.assertGreater(radar_only_obstacle, 40.)
+
+    for velocities in ([11.], [11., float('nan'), 1., 1., 1., 1.]):
+      forecast.v = velocities
+      self.tick()
+      self.assertAlmostEqual(self.planner.mpc.params[-1, 2], radar_only_obstacle)
+
   def test_stale_invalid_or_disabled_mode_request_cannot_acknowledge_a_ceiling_raise(self):
     state = self.sm['mapCruiseState']
     state.e2eFallback = True
