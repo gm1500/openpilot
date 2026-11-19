@@ -31,10 +31,17 @@ A_CRUISE_MIN = -0.5
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
 
-def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, a_target_prev, dt):
-  target_accel = smooth_value(v_cruise - v_ego, a_cruise_prev, tau=1.0, dt=dt)
-  target_accel = np.clip(target_accel, A_CRUISE_MIN, ACCEL_MAX)
+def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, a_target_prev, dt, *, a_ego, actuator_delay):
   j_cruise = np.interp(v_ego, J_CRUISE_BP, J_CRUISE_VALS)
+  target_accel = smooth_value(v_cruise - v_ego, a_cruise_prev, tau=1.0, dt=dt)
+  # Leave enough speed headroom for actuator delay and the existing jerk-limited
+  # unwind. This only limits positive cruise acceleration; it cannot request
+  # extra braking or weaken a stronger lead/model candidate.
+  positive_accel = max(a_ego, 0.0) if np.isfinite(a_ego) else 0.0
+  remaining_speed_gain = positive_accel * actuator_delay + positive_accel ** 2 / (2.0 * j_cruise)
+  approach_accel = max(v_cruise - v_ego - remaining_speed_gain, 0.0)
+  target_accel = min(target_accel, approach_accel)
+  target_accel = np.clip(target_accel, A_CRUISE_MIN, ACCEL_MAX)
   target_accel = float(np.clip(target_accel, min(a_cruise_prev, a_target_prev) - j_cruise * dt, a_cruise_prev + j_cruise * dt))
 
   return target_accel
@@ -133,7 +140,8 @@ class LongitudinalPlanner:
                                               action_t=action_t)
     output_should_stop_mpc = should_stop(v_ego, output_a_target_mpc)
 
-    self.a_cruise = get_cruise_accel(v_cruise, v_ego, self.a_cruise, self.output_a_target, self.dt)
+    self.a_cruise = get_cruise_accel(v_cruise, v_ego, self.a_cruise, self.output_a_target, self.dt,
+                                     a_ego=sm['carState'].aEgo, actuator_delay=self.CP.longitudinalActuatorDelay)
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),

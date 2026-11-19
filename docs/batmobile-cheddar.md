@@ -28,12 +28,23 @@ safety calibration on the upstream opendbc base.
 
 ## Driving behavior
 
-Ordinary mapped-speed operation uses native real-lead MPC and cruise planning.
+Ordinary mapped-speed operation uses native real-lead MPC and cruise planning
+with an anticipatory limit on positive cruise acceleration near SET.
 The stock personalities remain **Aggressive: 1.25 s**, **Standard: 1.45 s**, and
 **Relaxed: 1.75 s**, with their upstream jerk settings. `radard.py` and
 `longcontrol.py` remain byte-for-byte upstream. Vision leads use upstream model
 velocity with its ego-speed correction; native radar association and filtering
 remain available where the vehicle supplies radar.
+
+The cruise approach limit reserves speed headroom for measured positive vehicle
+acceleration during the configured actuator delay and its reduction at the
+existing cruise jerk limit. It reduces positive cruise demand before reaching
+SET, while retaining the native acceleration ceiling, smoothing and jerk limits.
+It does not add braking from that prediction; existing negative cruise demand
+and stronger real-lead/E2E braking retain their normal arbitration. A sudden
+lower SET while already accelerating can still overshoot during the retained
+actuator delay and acceleration reduction. This is deterministic control, not
+driver-style learning; the upstream gas-override boost removal is included.
 
 The narrow slowing assist can enter only when the model's current lead-speed
 estimate is **below 55 km/h**, with a present accepted lead and sustained model
@@ -98,8 +109,9 @@ audit checks real schema construction, service/parameter registration and the
 unchanged upstream lead-processing files. Preserve these checks when updating
 upstream; schema and service additions require rebuilding native consumers.
 
-The rebuilt branch has **not** completed an on-device drive or a full driving-model
-replay. Unit tests, synthetic planner cases and geometry checks do not establish
-road performance, model-inference timing, camera transition appearance or braking
-improvement. No new road-validation result is implied by retaining an archived
-feature.
+Subsequent recorded drives have been reviewed to diagnose UI and SLC behavior.
+The cruise approach change has offline planner replay and synthetic closed-loop
+validation; it has not yet been validated in a vehicle. These checks do not
+establish road performance, model-inference timing, camera transition appearance
+or braking improvement. No new road-validation result is implied by retaining
+an archived feature.
