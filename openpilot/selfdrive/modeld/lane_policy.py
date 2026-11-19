@@ -17,6 +17,9 @@ MIN_LANE_WIDTH = 2.6                         # m
 MAX_LANE_WIDTH = 5.2                         # m
 MIN_WIDTH_MARGIN = 0.10                     # m admission margin; upper bound also retained while active
 MAX_WIDTH_CHANGE = 0.75                     # m across the fitted horizon
+NARROW_RETAIN_MEDIAN, NARROW_RETAIN_LOW = 2.50, 2.45  # m, tolerance for live model width estimates only
+NARROW_RETAIN_SPREAD = 0.20                  # m, require near-parallel painted boundaries
+NARROW_RETAIN_STD = 0.10                     # m, maximum near-field uncertainty of either painted line
 ARM_TIME = 0.75                             # s of strong two-line confidence
 WIDTH_FIT_START, WIDTH_FIT_END = 8.0, 55.0    # m
 ANCHOR_BLEND_START, ANCHOR_BLEND_END = 10.0, 45.0  # m, spatial transition to lane geometry
@@ -76,13 +79,17 @@ def inner_probs(model_output: dict[str, np.ndarray]) -> tuple[float, float]:
   return float(probs[0, 3]), float(probs[0, 5])
 
 
-def lane_width(left: np.ndarray, right: np.ndarray, fit: np.ndarray, *, retaining: bool = False) -> tuple[float, bool]:
+def lane_width(left: np.ndarray, right: np.ndarray, fit: np.ndarray, *, retaining: bool = False,
+               stable_narrow: bool = False) -> tuple[float, bool]:
   low, median, high = np.percentile((right - left)[fit], (10.0, 50.0, 90.0))
   # Keep a margin when acquiring paint. With strong live paint, a small narrowing
   # need not reset active centering. No previous width or geometry is reused.
   minimum = MIN_LANE_WIDTH if retaining else MIN_LANE_WIDTH + MIN_WIDTH_MARGIN
   valid = (MIN_LANE_WIDTH <= median <= MAX_LANE_WIDTH and low >= minimum and
            high <= MAX_LANE_WIDTH - MIN_WIDTH_MARGIN and high - low <= MAX_WIDTH_CHANGE)
+  if stable_narrow:
+    valid |= (NARROW_RETAIN_MEDIAN <= median <= MAX_LANE_WIDTH and low >= NARROW_RETAIN_LOW and
+              high <= MAX_LANE_WIDTH - MIN_WIDTH_MARGIN and high - low <= NARROW_RETAIN_SPREAD)
   return float(median), bool(valid)
 
 
@@ -227,6 +234,14 @@ class LanePolicy:
     if valid_left and valid_right:
       strong = min(left_prob, right_prob) >= ARM_LINE_PROB
       _, valid_width = lane_width(left, right, fit, retaining=self.active and strong)
+      if not valid_width and self.active and strong:
+        # A narrow estimate needs precise near-field paint and near-parallel
+        # geometry across the current fit; no previous width is carried over.
+        stds = np.asarray(output.get('lane_lines_stds', []))
+        if stds.shape == output['lane_lines'].shape:
+          near_stds = stds[0, 1:3, 0, 0]
+          if np.all(np.isfinite(near_stds)) and np.all((near_stds >= 0.0) & (near_stds <= NARROW_RETAIN_STD)):
+            _, valid_width = lane_width(left, right, fit, stable_narrow=True)
       if valid_width:
         return 0.5 * (left + right), strong
     # Width is checked only from this frame. Missing paint cannot be replaced

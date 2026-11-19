@@ -66,9 +66,15 @@ Entry requires both line probabilities to remain at least **0.92** for **0.75 s*
 with the fitted width inside **2.70–5.10 m**. An active policy can retain ordinary
 widths with both probabilities at least **0.70**. A narrower **2.60–2.70 m** fit
 can retain an already-active policy only while both probabilities remain at
-least **0.92**; it cannot start centering. The existing width-variation check
-still applies. Every decision uses the current two painted lines, and missing
-paint or geometry below the retention floor immediately returns to E2E.
+least **0.92**; it cannot start centering. A further model-estimate tolerance
+can retain already-active centering with median width at least **2.50 m** and
+10th-percentile width at least **2.45 m**, but only when both probabilities are
+at least **0.92**, both near-field line standard deviations are at most
+**0.10 m**, and the robust width spread is at most **0.20 m**. These bounds are
+qualification tolerances, not a measurement of the physical road width. Ordinary
+widths retain their existing variation check. Every decision uses the current
+two painted lines; no old width or boundary is substituted. Missing paint or
+geometry outside the applicable bounds immediately returns to E2E.
 It retains the bounded curvature correction, fresh-confidence arming, visual
 status and curve-reversal pause, which decreases from **0.30 s** at low speed to
 **0.05 s** at 100 km/h. Missing paint returns to the model path. Nudgeless lane

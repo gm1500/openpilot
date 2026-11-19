@@ -12,7 +12,7 @@ from openpilot.selfdrive.modeld.lane_policy import (
 )
 
 
-def perception(offset=0.25, width=3.6, probability=.99, curvature=0., horizon=100.):
+def perception(offset=0.25, width=3.6, probability=.99, curvature=0., horizon=100., std=.05):
   x = np.asarray(ModelConstants.X_IDXS)
   center = offset + .5 * curvature * x**2
   lanes = np.zeros((1, 4, len(x), 2))
@@ -23,7 +23,8 @@ def perception(offset=0.25, width=3.6, probability=.99, curvature=0., horizon=10
   plan[0, :, 1] = .5 * curvature * plan_x**2
   probs = np.zeros((1, 8))
   probs[0, 3] = probs[0, 5] = probability
-  return {'lane_lines': lanes, 'lane_lines_prob': probs, 'plan': plan, 'desire_state': np.zeros((1, 8))}
+  return {'lane_lines': lanes, 'lane_lines_stds': np.full_like(lanes, std),
+          'lane_lines_prob': probs, 'plan': plan, 'desire_state': np.zeros((1, 8))}
 
 
 def step(policy, data, frames=1, **kwargs):
@@ -124,8 +125,8 @@ def test_narrow_retention_does_not_combine_weaker_paint_with_less_width_margin(p
   assert not policy.active and policy.correction == 0.
 
 
-@pytest.mark.parametrize('width', [2.59, 5.15])
-def test_retention_keeps_lower_floor_and_original_upper_width_bound(width):
+@pytest.mark.parametrize('width', [2.49, 5.15])
+def test_retention_keeps_absolute_lower_floor_and_original_upper_width_bound(width):
   policy = LanePolicy()
   step(policy, perception(), frames=40)
   assert policy.active
@@ -157,6 +158,87 @@ def test_narrow_width_retention_uses_new_midpoint_not_remembered_geometry():
   assert policy.correction > 0.
   result = step(policy, perception(offset=-.25, width=2.65), frames=10)
   assert policy.active and result < 0.
+
+
+def test_stable_live_narrow_paint_preserves_active_centering_and_follows_new_midpoint():
+  policy = LanePolicy()
+  step(policy, perception(offset=.25), frames=40)
+  for _ in range(20):
+    step(policy, perception(offset=.25, width=2.55))
+    assert policy.active
+  assert step(policy, perception(offset=-.25, width=2.55), frames=10) < 0.
+  assert policy.active
+
+
+def test_narrow_tolerance_accepts_its_bounds_but_requires_tighter_geometry_when_uncertain():
+  policy = LanePolicy()
+  step(policy, perception(), frames=40)
+  assert step(policy, perception(width=2.50, probability=.92, std=.10)) > 0.
+  assert policy.active
+  assert step(policy, perception(width=2.59, std=.2), e2e_curvature=.0002) == .0002
+  assert not policy.active
+
+
+def test_narrow_estimate_tolerance_cannot_arm_or_carry_across_a_gap():
+  policy = LanePolicy()
+  narrow = perception(width=2.55)
+  assert step(policy, narrow, frames=50) == 0.
+  assert not policy.active
+  step(policy, perception(), frames=40)
+  assert step(policy, narrow) > 0.
+  step(policy, narrow, blinkers_active=True)
+  assert not policy.active
+  assert step(policy, narrow, frames=50) == 0.
+  assert not policy.active
+
+
+@pytest.mark.parametrize('probability', [.70, .85, .919])
+def test_narrow_estimate_tolerance_requires_both_strong_live_paints(probability):
+  policy = LanePolicy()
+  step(policy, perception(), frames=40)
+  data = perception(width=2.55)
+  data['lane_lines_prob'][0, 5] = probability
+  assert step(policy, data, e2e_curvature=.0002) == .0002
+  assert not policy.active
+
+
+@pytest.mark.parametrize('bad_std', ['missing', 'shape', 'nan', 'infinity', 'negative', 'uncertain'])
+def test_narrow_estimate_requires_known_low_uncertainty_without_affecting_normal_width(bad_std):
+  data = perception()
+  if bad_std == 'missing':
+    del data['lane_lines_stds']
+  elif bad_std == 'shape':
+    data['lane_lines_stds'] = np.zeros((4,))
+  else:
+    value = {'nan': np.nan, 'infinity': np.inf, 'negative': -.01, 'uncertain': .1001}[bad_std]
+    data['lane_lines_stds'][0, 2, 0, 0] = value
+  policy = LanePolicy()
+  step(policy, data, frames=40)
+  assert policy.active
+  data['lane_lines'] = perception(width=2.55)['lane_lines']
+  assert step(policy, data, e2e_curvature=.0002) == .0002
+  assert not policy.active
+
+
+@pytest.mark.parametrize('bad_width', ['median', 'low', 'diverging', 'wide'])
+def test_narrow_estimate_retention_rejects_bad_current_geometry(bad_width):
+  policy = LanePolicy()
+  step(policy, perception(), frames=40)
+  data = perception(width=2.55)
+  x = np.asarray(ModelConstants.X_IDXS)
+  fit = np.flatnonzero((x >= 8.) & (x <= 55.))
+  widths = np.full(len(x), 2.55)
+  if bad_width == 'median':
+    widths[:] = 2.49
+  elif bad_width == 'low':
+    widths[fit[:2]] = 2.44
+  elif bad_width == 'diverging':
+    widths[fit] = np.linspace(2.42, 2.75, len(fit))
+  else:
+    widths[:] = 5.15
+  data['lane_lines'][0, 2, :, 0] = data['lane_lines'][0, 1, :, 0] + widths
+  assert step(policy, data, e2e_curvature=.0002) == .0002
+  assert not policy.active
 
 
 def test_active_width_retention_does_not_accept_diverging_paint():
