@@ -68,7 +68,8 @@ class TestLongitudinalModes(unittest.TestCase):
     for s in self.sm.services:
       if refresh_map or s != 'mapCruiseState':
         self.sm.recv_time[s] = self.now
-        self.sm.logMonoTime[s] = int(self.now * 1e9)
+        # Publish just before receipt so float conversion cannot put a packet in the future.
+        self.sm.logMonoTime[s] = int(self.now * 1e9) - 100
     with patch('openpilot.selfdrive.controls.lib.longitudinal_planner.time.monotonic', return_value=self.now), \
          patch('openpilot.selfdrive.controls.lib.longitudinal_planner.cloudlog.info'):
       self.planner.update(self.sm)
@@ -87,6 +88,43 @@ class TestLongitudinalModes(unittest.TestCase):
     self.assertEqual(str(plan.longitudinalPlanSource), 'e2e')
     self.sm['mapCruiseState'].e2eFallback = False
     self.assertFalse(self.tick().slcE2eFallback)
+
+  def test_aggressive_model_candidate_scales_in_full_e2e(self):
+    for personality, speed, model_accel, expected in (
+      ('aggressive', 5., -.5, -.5), ('aggressive', 7.5, -.75, -.725),
+      ('aggressive', 10., -.5, -.4), ('aggressive', 20., -1., -1.),
+      ('standard', 20., -.5, -.5), ('relaxed', 20., -.5, -.5),
+    ):
+      with self.subTest(personality=personality, speed=speed, model_accel=model_accel):
+        self.sm['selfdriveState'].personality = personality
+        self.sm['mapCruiseState'].e2eFallback = True
+        self.sm['carState'].vEgo = speed
+        self.set_model_speed(speed)
+        self.sm['modelV2'].action.desiredAcceleration = model_accel
+        self.planner = LongitudinalPlanner(self.cp, init_v=speed)
+        plan = self.tick()
+        self.assertEqual(str(plan.longitudinalPlanSource), 'e2e')
+        self.assertAlmostEqual(plan.aTarget, expected, places=5)
+
+  def test_aggressive_keeps_chill_stop_and_slowing_inputs(self):
+    self.sm['selfdriveState'].personality = 'aggressive'
+    self.sm['modelV2'].action.desiredAcceleration = -.5
+    self.assertGreater(self.tick().aTarget, -.5)  # ordinary cruise
+    self.assertEqual(str(self.sink.plan.longitudinalPlanSource), 'cruise')
+    predicted = endpoint_model()
+    self.sm['carState'].vEgo = 8.
+    self.planner = LongitudinalPlanner(self.cp, init_v=8.)
+    model = self.sm['modelV2']
+    model.position.x, model.position.y = predicted.position.x, predicted.position.y
+    model.velocity.x, model.velocity.y = predicted.velocity.x, predicted.velocity.y
+    with patch.object(self.planner.stop_target, 'update', wraps=self.planner.stop_target.update) as stop, \
+         patch.object(self.planner.e2e_assist, 'update', wraps=self.planner.e2e_assist.update) as assist:
+      plan = self.tick()
+    self.assertTrue(plan.e2eStopActive)
+    self.assertFalse(plan.slcE2eFallback)
+    self.assertLessEqual(plan.aTarget, -.5)
+    self.assertEqual(stop.call_args.kwargs['e2e_accel'], -.5)
+    self.assertEqual(assist.call_args.kwargs['e2e_accel'], -.5)
 
   def test_chill_uses_second_lead_forecast_and_falls_back_when_incomplete(self):
     lead = self.sm['radarState'].leadTwo

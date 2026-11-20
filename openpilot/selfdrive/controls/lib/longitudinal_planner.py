@@ -6,6 +6,7 @@ import numpy as np
 import openpilot.cereal.messaging as messaging
 from opendbc.car.structs import car
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
+from openpilot.cereal import log
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
@@ -30,6 +31,7 @@ J_CRUISE_BP = [0., 10.0, 25., 40.]
 A_CRUISE_MIN = -0.5
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
+AGGRESSIVE_ACCEL_BOOST = 0.1  # m/s^2
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
 
@@ -69,6 +71,7 @@ class LongitudinalPlanner:
 
   def update(self, sm):
     v_ego = sm['carState'].vEgo
+    personality = sm['selfdriveState'].personality
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
     if sm['controlsState'].forceDecel:
@@ -114,12 +117,12 @@ class LongitudinalPlanner:
     else:
       self.stop_target.reset()
 
-    self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
+    self.mpc.set_weights(prev_accel_constraint, personality=personality)
     if self.CP.openpilotLongitudinalControl:
       self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)
     else:
       self.mpc.set_cur_state(v_ego, sm['carState'].aEgo)
-    self.mpc.update(sm['radarState'], personality=sm['selfdriveState'].personality,
+    self.mpc.update(sm['radarState'], personality=personality,
                     stop_distance=self.stop_target.distance if self.stop_target.active else None,
                     model_leads=sm['modelV2'].leadsV3)
 
@@ -151,7 +154,13 @@ class LongitudinalPlanner:
     # by no-limit fallback or qualified stopping intent; stock-ACC advisory
     # planning retains its upstream candidate selection.
     if full_e2e or self.stop_target.requested:
-      candidates.append((output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e))
+      e2e_candidate = output_a_target_e2e
+      # Keep stop detection and slowing assist on the raw model request.
+      if full_e2e and personality == log.LongitudinalPersonality.aggressive:
+        speed_scale = np.interp(v_ego, [5.0, 10.0], [0.0, 1.0])
+        accel_scale = np.interp(e2e_candidate, [-1.0, -0.5], [0.0, 1.0])
+        e2e_candidate += AGGRESSIVE_ACCEL_BOOST * speed_scale * accel_scale
+      candidates.append((e2e_candidate, LongitudinalPlanSource.e2e, output_should_stop_e2e))
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(stop for _, _, stop in candidates) or self.stop_target.holding
 
