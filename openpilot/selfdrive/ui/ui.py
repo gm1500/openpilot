@@ -29,7 +29,7 @@ def set_core_affinity(cores: set[int]):
 
 def main():
   cores = {5, }
-  # above plannerd and radard. the threads it starts don't inherit that, so they can't hold off the renderer
+  # Above plannerd. Child threads don't inherit this priority, so they can't hold off the renderer.
   config_realtime_process(0, Priority.CTRL_HIGH)
   if COMMA_HARDWARE:
     os.sched_setscheduler(0, os.SCHED_FIFO | os.SCHED_RESET_ON_FORK, os.sched_param(Priority.CTRL_HIGH))

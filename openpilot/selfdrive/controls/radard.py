@@ -8,6 +8,7 @@ import capnp
 from openpilot.cereal import messaging, log
 from opendbc.car.structs import car
 from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.common.hardware import HARDWARE
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL, Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
@@ -252,7 +253,9 @@ class RadarD:
 
 # fuses camera and radar data for best lead detection
 def main() -> None:
-  config_realtime_process(5, Priority.CTRL_LOW)
+  # On comma 3X, let lead updates preempt the renderer on their shared core.
+  priority = Priority.CTRL_HIGH + 1 if HARDWARE.get_device_type() == "tizi" else Priority.CTRL_LOW
+  config_realtime_process(5, priority)
 
   # wait for stats about the car to come in from controls
   cloudlog.info("radard is waiting for CarParams")
