@@ -10,19 +10,132 @@ $Cxx.namespace("cereal");
 # DO rename the structs
 # DON'T change the identifier (e.g. @0x81c2f05a394cf4af)
 
-struct CustomReserved0 @0x81c2f05a394cf4af {
+struct MapSpeedLimit @0x81c2f05a394cf4af {
+  speedLimit @0 :Float32;  # current/merge-approach legal limit in m/s; zero if unavailable, requires Event.valid
+  gpsMonoTime @1 :UInt64; # timestamp of the matched GPS fix, nanoseconds
+  headingValid @2 :Bool;
+  # Retain old ordinals for recorded-log compatibility; no runtime publisher.
+  displaySpeedLimitDEPRECATED @3 :Float32;
+  displayValidDEPRECATED @4 :Bool;
+  displayGpsMonoTimeDEPRECATED @5 :UInt64;
+  displayIsAdvisoryDEPRECATED @6 :Bool;
+  advisorySpeed @7 :Float32; # fresh matched recommendation in m/s; fallback when speedLimit is zero
+  distanceAhead @8 :Float32; # metres to a unique ramp-merge limit; zero on the current road
+  positionEstimated @9 :Bool; # bounded wheel/steering projection, including a recent parked restart
+  positionMonoTime @10 :UInt64; # observation time of the projected position; never rewrite gpsMonoTime
+  zoneType @11 :ZoneType; # active restriction on the current matched road; old logs default to none
+  zoneSource @12 :Text; # municipal restriction identifier, when consulted
+  nextSpeedLimit @13 :Float32; # separate upcoming legal limit, m/s; never a posted current limit
+  nextSpeedLimitDistance @14 :Float32; # remaining directed road distance, metres
+  nextSpeedLimitWayId @15 :UInt64;
+  nextSpeedLimitValid @16 :Bool; # independent of current speed availability
+  matchedWayId @17 :UInt64;
+  nextSpeedLimitAdvisory @18 :Bool; # preview is a recommendation, not a posted legal limit
+  nextSpeedLimitMerge @19 :Bool; # unique unrestricted ramp -> aligned highway, model confirmed
+  enum ZoneType {
+    none @0;
+    construction @1;
+    school @2;
+  }
 }
 
-struct CustomReserved1 @0xaedffd8f31e7b55d {
+struct MapCruiseState @0xaedffd8f31e7b55d {
+  state @0 :State;
+  targetSpeed @1 :Float32; # qualified map target in m/s, zero if unavailable
+  pendingSpeedDEPRECATED @2 :Float32;
+  adjustingSpeed @3 :Float32; # UI pulse target until ego speed settles; zero if cancelled/complete
+  e2eFallback @4 :Bool; # no usable speed: request E2E before raising SET; clear after recovery SET
+  automaticE2e @5 :Bool; # automatic SLC fallback is supported and enabled
+  setSpeed @6 :Float32; # actual applied SET, m/s; lets planner order recovery across services
+  previewSpeed @7 :Float32; # valid upcoming posted/advisory speed, m/s, before control debounce
+  previewValid @8 :Bool;
+  previewAdvisory @9 :Bool;
+  enum State {
+    off @0;
+    armed @1;
+    active @2;
+    paused @3;
+    waiting @4;
+    unsupported @5;
+  }
 }
 
-struct CustomReserved2 @0xf35cc4560bbf6ec2 {
+struct MapTrafficControl @0xf35cc4560bbf6ec2 {
+  kind @0 :Kind;
+  nodeId @1 :UInt64;
+  wayId @2 :UInt64;
+  distance @3 :Float32; # signed distance along connected road geometry, metres
+  matchedWayId @4 :UInt64;
+  gpsMonoTime @5 :UInt64;
+  positionMonoTime @6 :UInt64;
+  positionEstimated @7 :Bool; # short motion bridge only while the real GPS anchor remains fresh
+  reason @8 :Text; # target, noJunction, ambiguousFork/Road, roadAlignment, or unavailable input
+  enum Kind {
+    none @0;
+    stopSignDEPRECATED @1;
+    trafficLightDEPRECATED @2;
+    junction @3; # connected intersection, split or merge; no control tags required
+  }
 }
 
-struct CustomReserved3 @0xda96579883444c35 {
+struct StopTargetState {
+  active @0 :Bool;
+  distance @1 :Float32; # remaining ego travel to the tracked target, -1 when inactive
+  holding @2 :Bool;
+  horizonCandidate @3 :Bool;
+  horizonStable @4 :Bool; # retired diagnostic; reserved for old logs
+  horizonDistance @5 :Float32; # unshifted candidate stop travel, -1 when absent
+  horizonRemaining @6 :Float32; # seconds of compact trajectory after endpoint onset
+  horizonStableTime @7 :Float32; # retired diagnostic; reserved for old logs
+  horizonSpread @8 :Float32; # retired diagnostic; reserved for old logs
+  approaching @9 :Bool; # E2E approach enabled; no stationary virtual obstacle
+  approachDistance @10 :Float32; # age-compensated endpoint preview, not a committed stop
 }
 
-struct CustomReserved4 @0x80ae746ee2596b11 {
+struct SentryState @0xda96579883444c35 {
+  sessionActive @0 :Bool;
+  capture @1 :Bool;
+  phase @2 :Text;
+  motion @3 :Bool;
+  motionX @4 :Float32;
+  motionY @5 :Float32;
+  motionCamera @6 :UInt8;
+  motionScore @7 :Float32;
+  recordUntilMonoTime @8 :UInt64;
+  latitude @9 :Float64;
+  longitude @10 :Float64;
+  locationAccuracy @11 :Float32;
+  locationSavedAt @12 :Float64;
+  locationSource @13 :Text;
+  locationValid @14 :Bool;
+  eyeEnabled @15 :Bool;
+  cameraMask @16 :UInt8;
+  timeZone @17 :Text;
+  utcOffsetSeconds @18 :Int32;
+  # Confirmed recording source (VisionStreamType), independent of the eye.
+  triggerCamera @19 :UInt8;
+  # Short-lived sound envelope above ambient, normalized for the eye glow.
+  soundLevel @20 :Float32;
+  # Brief confirmed sensor activity, independent of the saved recording tail.
+  sensorActive @21 :Bool;
+  gyroActive @22 :Bool;
+  audioActive @23 :Bool;
+  accelActive @24 :Bool;
+  # Strongest gyro sample relative to its threshold in this controller tick.
+  # All values are rad/s; zero when no fresh sample was evaluated.
+  gyroMagnitude @25 :Float32;
+  gyroThreshold @26 :Float32;
+  gyroNoise @27 :Float32;
+  gyroBaselineOffset @28 :Float32;  # Rolling center relative to learned bias.
+}
+
+struct SentryRecorderState @0x80ae746ee2596b11 {
+  recording @0 :Bool;
+  route @1 :Text;
+  bufferSeconds @2 :Float32;
+  bufferBytes @3 :UInt64;
+  error @4 :Text;
+  previewCamera @5 :UInt8;
 }
 
 struct CustomReserved5 @0xa5cd762cd951a455 {
@@ -68,4 +181,16 @@ struct CustomReserved18 @0xc86a3d38d13eb3ef {
 }
 
 struct CustomReserved19 @0xa4f1eb3323f5f582 {
+}
+
+struct LanePolicyState {
+  valid @0 :Bool;
+  enabled @1 :Bool;
+  active @2 :Bool;
+  leftSource @3 :BoundarySource;
+  rightSource @4 :BoundarySource;
+  enum BoundarySource {
+    none @0;
+    painted @1;
+  }
 }
