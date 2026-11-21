@@ -394,7 +394,11 @@ def main(demo=False):
       meta_extra = meta_main
 
     sm.update(0)
-    desire = DH.desire
+    # Block a previously generated lane-change pulse immediately when cruise
+    # disengages, even if inference fails and skips the post-inference update.
+    # AOL only follows the current lane; lateral permission cannot authorize a
+    # lane change or retain one for the next cruise engagement.
+    desire = DH.prepare_model_desire(sm['carState'], sm['carControl'].latActive, lane_change_enabled=sm['carControl'].enabled)
     is_rhd = sm["driverMonitoringState"].isRHD
     frame_id = sm["narrowRoadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
@@ -490,7 +494,7 @@ def main(demo=False):
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
-      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob)
+      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, lane_change_enabled=sm['carControl'].enabled)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
 

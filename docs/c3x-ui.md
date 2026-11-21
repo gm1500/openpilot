@@ -8,7 +8,8 @@ alerts retain their own messages.
 On `batmobile`, the C3x driver-monitor face has rounded Batman ears and angled
 eyes. They share the existing head-pose, depth and fade calculations, white
 opacity, steering-wheel icon and tracking arcs. Other branches retain the
-standard face.
+standard face. Driver-monitoring alerts also remain active during AOL steering
+without cruise engagement.
 
 The sidebar TEMP value shows the device's reported maximum temperature in °C,
 with the existing thermal warning colours. VEHICLE shows live supply voltage
@@ -38,11 +39,28 @@ OVERRIDE without a MAXIMUM or km/h label. The configurable initial no-map ceilin
 is 105 km/h by default. Map gaps while engaged retain the previous SET.
 
 The top-right control restores a manual E2E toggle. Tap to switch between Chill
-and E2E; long holds leave the selected mode unchanged. The control uses comma's
-original wheel or experimental icon at its original scale, without text above,
-below or inside the button. E2E respects the current map target including its
-configured offset, or a lower manual SET. The same button is included in both HUD
+and E2E; a 0.6-second hold toggles AOL and never also changes E2E. The fill ring
+shows hold progress. The control uses comma's original wheel or experimental
+icon at its original scale, without text above, below or inside the button.
+Solid hands grip the icon, with forearms fading to transparent. E2E respects the
+current map target including its configured offset, or a lower manual SET.
+
+| AOL state | Appearance | Meaning |
+| --- | --- | --- |
+| OFF | Original icon without hands, dark background | AOL disabled; ordinary cruise-linked steering remains available |
+| READY | White hands, dark background | Enabled, but not currently steering |
+| ON | Green hands, dark background | Fresh controller acknowledgment and actual lateral actuation |
+| PAUSED | Solid orange hands, dark background | Brake held, Reverse/other non-Drive gear, Cancel or fault suspension |
+| Waiting / unavailable | Grey hands with a bright light-grey outline, dark background | Below steering speed, waiting for fresh state, or unsupported safety configuration |
+
+Brake, regen, parking brake and non-Drive gear pause AOL temporarily. Cancel
+requires SET/RESUME or an OFF-to-ON toggle to re-enable. The wheel/experimental symbol
+remains independent of the AOL status. The same button is included in both HUD
 layouts, and sleep/offroad transitions cancel pending touches.
+AOL-only steering does not initiate automatic lane changes.
+Driver Cancel and brake pauses during AOL-only steering are quiet. Normal
+cruise disengagement and fault warnings retain their sounds. The unavailable
+hands have a dark-grey body and brighter contour; both forearms fade to clear.
 
 Three following-gap bars represent stock Cheddar Aggressive, Standard and Relaxed
 personalities. Tap to cycle; hold to toggle painted-lane centering. A green ring

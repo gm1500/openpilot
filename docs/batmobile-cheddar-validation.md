@@ -1,10 +1,54 @@
 # Batmobile validation
 
-## E2E and map-gap update — 2026-11-20
+## AOL startup and speed-floor correction — 2026-11-20
+
+The installed AOL build correctly advertised GM lateral-only support, but never
+requested it. All 1,752 GM-mode Panda samples in the diagnostic logs carried a
+latched `interruptRateCan2` fault. The fault first appeared during ELM327 startup;
+the diagnostic controller then stopped receiving/forwarding traffic, its error
+counter remained constant, and the driving controllers stayed clean. An earlier
+pre-AOL drive showed the same historical diagnostic bit.
+
+Reconstruction from three full log segments covered 17,713 host samples. Of the
+9,958 samples above 10 km/h, 9,524 satisfied the other readiness conditions; the
+remaining samples were brake/gear pauses or Cancel events. Message ages stayed
+within the configured freshness limits. This identified the blanket Panda-fault
+gate as the startup blocker, rather than a missing parameter or UI color bug.
+
+The correction separately qualifies this exact historical diagnostic after two
+seconds of fresh quiet telemetry, retaining all other fault gates and explicit
+rearming after a new failure. A shared AOL speed helper also enforces the
+Silverado's 10 km/h steering floor independently of the warning-suppression
+override. Low speed withdraws AOL without latching a fault; the UI outlines the
+hands until steering is available and confirmed active.
+
+Validation from this source tree:
+
+- AOL health, speed boundaries, host/control separation, E2E and lane-button UI,
+  and lane-change behavior: 296 tests and 21 subtests passed.
+- SLC fallback/preview/settings, Sentry, and stock power monitoring: 238 tests
+  and seven subtests passed, including the configured parked voltage cutoff.
+- Ruff and whitespace checks passed. Native Params used the existing build
+  after its source inputs were compared byte-for-byte with this tree.
+
+The corrected host replay qualifies the historical fault while parked, then
+first requests AOL at 10.003 km/h. An onroad replay with the actual GM27 native
+safety library, recorded CAN traffic and reconstructed heartbeat requests grants
+lateral permission and the host observes its acknowledgment. Cancel, SET rearm
+and brake release retain their intended behavior. The replay submits recorded
+commands; it does not generate a new closed-loop AOL steering trajectory.
+
+This correction changes Python code only; it adds no parameters, schema changes,
+or Panda firmware changes relative to the original AOL build. The log analysis
+uses recorded publication times to reconstruct consumer timing. It does not
+establish real vehicle actuation, UI timing, or road behavior after the change.
+
+## E2E, AOL and map-gap update — 2026-11-20
 
 The update is based on upstream `d0800d005e8ef89a468c24d358984da83f84cbe0`,
 preserving the radard/plannerd CPU-core change and the retained GM tuning.
-The preceding complete Batmobile revision was
+The previous complete branch is preserved as
+`archive/batmobile-pre-aol-20261120` at
 `bd579d480fa0d1517f46063510acbb007b6089b8`.
 
 Current checks include:
@@ -13,10 +57,25 @@ Current checks include:
   with six expected base/unsupported skips.
 - Planner mode selection, cruise recovery, stopping and immediate SLC handoff:
   111 tests passed, including the native MPC cases.
+- AOL host state, readiness, driver monitoring, control separation and existing
+  signal/lane-change behavior: 114 tests and 21 subtests passed. Coverage includes
+  temporary brake/gear pauses, faults occurring during those pauses, and blocking
+  automatic lane changes during AOL-only steering.
 - Sentry and stock system-power monitoring: 135 tests passed.
-The manual E2E setting is persistent and defaults OFF. UI coverage exercises
-mode selection, current-control freshness, interrupted contacts and long holds
-that leave the selected mode unchanged.
+- Native Params rebuilt with both new persistent settings; default AOL ON,
+  saved OFF, and default E2E OFF verified. Cereal schemas were regenerated.
+- Native x86 pandad compiled and linked with the current schemas and heartbeat
+  protocol, with warnings treated as errors and no missing dynamic dependencies.
+- UI gestures, colors, fresh-state/steering-speed gates and saved defaults:
+  66 tests passed, including the unavailable outline and pause precedence.
+- All-brand native safety: 3,138 tests and 10,953 subtests passed, with 1,451
+  expected abstract/base skips. The GM subset, MISRA checks, Panda protocol,
+  and actual ARM DEBUG/RELEASE application and bootstub builds passed. A separate
+  reviewer reproduced and checked the pause-fault, stale-host, capability-reset
+  and SET/RESUME rearming cases.
+
+A final combined host/SLC/planner/UI/power run passed 478 tests and 64 subtests,
+with six expected skips. These counts overlap the focused suites above.
 
 The route-83 speed-selector replay used 49,700 recorded input frames across the
 requested clip. The previous helper matched 49,699 recorded SET values; the
