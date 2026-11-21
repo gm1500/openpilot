@@ -13,13 +13,13 @@ class TestDesireHelper(unittest.TestCase):
     self.helper = DesireHelper()
     self.carstate = SimpleNamespace(vEgo=25., leftBlinker=False, rightBlinker=False, leftBlindspot=False, rightBlindspot=False)
 
-  def step(self, signal="off", active=True, prob=1., speed=25., blindspot=False, frames=1):
+  def step(self, signal="off", active=True, prob=1., speed=25., blindspot=False, frames=1, cruise_enabled=True):
     self.carstate.leftBlinker = signal in ("left", "hazards")
     self.carstate.rightBlinker = signal in ("right", "hazards")
     self.carstate.leftBlindspot = self.carstate.rightBlindspot = blindspot
     self.carstate.vEgo = speed
     for _ in range(frames):
-      self.helper.update(self.carstate, active, prob)
+      self.helper.update(self.carstate, active, prob, lane_change_enabled=cruise_enabled)
     return self.helper.lane_change_state
 
   def assert_off(self):
@@ -79,6 +79,60 @@ class TestDesireHelper(unittest.TestCase):
     self.start()
 
   def test_startup_with_existing_signal_is_not_a_request(self):
+    self.step("right", frames=50)
+    self.assert_off()
+    self.start()
+
+  def test_aol_signal_edges_never_start_lane_changes(self):
+    for signal in ("left", "right", "hazards"):
+      with self.subTest(signal=signal):
+        self.setUp()
+        self.step(cruise_enabled=False)
+        self.step(signal, cruise_enabled=False, frames=100)
+        self.assert_off()
+        self.step(cruise_enabled=False)
+        self.step(signal, cruise_enabled=False, frames=100)
+        self.assert_off()
+
+  def test_aol_to_cruise_with_held_signal_requires_new_signal(self):
+    for signal in ("left", "right"):
+      with self.subTest(signal=signal):
+        self.setUp()
+        self.step(cruise_enabled=False)
+        self.step(signal, cruise_enabled=False, frames=20)
+        self.step(signal, frames=100)
+        self.assert_off()
+        self.start(signal)
+
+  def test_signal_on_same_frame_as_aol_to_cruise_is_not_a_request(self):
+    self.step(cruise_enabled=False)
+    self.step("right", frames=50)
+    self.assert_off()
+    self.start()
+
+  def test_cruise_to_aol_cancels_pending_or_active_maneuver(self):
+    for waiting in (True, False):
+      with self.subTest(waiting=waiting):
+        self.setUp()
+        self.step()
+        self.step("right", blindspot=waiting, frames=2)
+        self.assertNotEqual(self.helper.lane_change_state, LaneChangeState.off)
+        self.step("right", cruise_enabled=False)
+        self.assert_off()
+        self.assertEqual(self.helper.lane_change_timer, 0.)
+        self.step("right", frames=50)
+        self.assert_off()
+        self.start()
+
+  def test_inference_failure_cannot_keep_request_across_aol_to_cruise(self):
+    self.start()
+    desire = self.helper.prepare_model_desire(self.carstate, True, lane_change_enabled=False)
+    self.assertEqual(desire, log.Desire.none)
+    self.assert_off()
+    # No post-inference update occurred. The next frame is cruise-engaged with
+    # the same signal; neither the model input nor helper may reuse that pulse.
+    desire = self.helper.prepare_model_desire(self.carstate, True, lane_change_enabled=True)
+    self.assertEqual(desire, log.Desire.none)
     self.step("right", frames=50)
     self.assert_off()
     self.start()

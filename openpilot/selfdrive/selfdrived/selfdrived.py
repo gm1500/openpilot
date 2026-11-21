@@ -2,6 +2,7 @@
 import os
 import time
 import threading
+import math
 
 import openpilot.cereal.messaging as messaging
 
@@ -14,6 +15,7 @@ from msgq.visionipc import VisionIpcClient
 from openpilot.common.params import Params
 from openpilot.selfdrive.controls.lib.longitudinal_mode import slc_e2e_fallback
 from openpilot.selfdrive.car.map_cruise import map_cruise_supported
+from openpilot.selfdrive.car.lateral_only import lateral_only_speed_available
 from openpilot.common.realtime import config_realtime_process, Priority, Ratekeeper, DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.gps import get_gps_location_service
@@ -23,6 +25,8 @@ from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
+from openpilot.selfdrive.selfdrived.always_on_lateral import AlwaysOnLateralState, lateral_events_clear, lateral_safety_supported
+from openpilot.selfdrive.selfdrived.lateral_panda_health import LateralPandaHealth
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
 from openpilot.common.version import get_build_metadata
@@ -104,6 +108,7 @@ class SelfdriveD:
     self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
     self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
     self.manual_e2e = self.params.get_bool("ExperimentalMode")
+    self.always_on_lateral_enabled = bool(self.params.get("AlwaysOnLateral", return_default=True))
     openpilot_enabled = self.params.get_bool("OpenpilotEnabledToggle")
 
     car_recognized = self.CP.brand != 'mock'
@@ -133,6 +138,11 @@ class SelfdriveD:
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
     self.state_machine = StateMachine()
+    self.always_on_lateral = AlwaysOnLateralState()
+    self.lateral_panda_health = LateralPandaHealth()
+    self.car_state_mono_time = 0.
+    self.car_state_received = False
+    self.car_state_valid = False
     self.rk = Ratekeeper(100, print_delay_threshold=None)
 
     # Determine startup event
@@ -476,6 +486,10 @@ class SelfdriveD:
   def data_sample(self):
     _car_state = messaging.recv_one(self.car_state_sock)
     CS = _car_state.carState if _car_state else self.CS_prev
+    self.car_state_received = _car_state is not None
+    if _car_state is not None:
+      self.car_state_mono_time = _car_state.logMonoTime * 1e-9
+      self.car_state_valid = _car_state.valid
 
     self.sm.update(0)
 
@@ -520,6 +534,46 @@ class SelfdriveD:
 
     return CS
 
+  def update_always_on_lateral(self, CS):
+    now = self.sm.logMonoTime['modelV2'] * 1e-9 if REPLAY else time.monotonic()
+    pandas = self.sm['pandaStates']
+    fresh = (self.car_state_valid and 0 <= now - self.car_state_mono_time <= .15 and self.sm.all_checks())
+    for service, max_age in (('modelV2', .25), ('driverMonitoringState', .3), ('pandaStates', .3),
+                             ('extrinsicsCalibration', .8), ('deviceMotion', .25), ('vehicleParameters', .3),
+                             ('deviceState', 1.5)):
+      fresh &= (self.sm.valid[service] and 0 <= now - self.sm.logMonoTime[service] * 1e-9 <= max_age and
+                (REPLAY or 0 <= now - self.sm.recv_time[service] <= max_age))
+    supported = self.sm.valid['pandaStates'] and lateral_safety_supported(self.CP, pandas)
+    onroad = self.sm['deviceState'].started and any(ps.ignitionLine or ps.ignitionCan for ps in pandas)
+    active_pandas = [ps for ps in pandas if ps.safetyModel not in IGNORED_SAFETY_MODES]
+    firmware_allowed = bool(active_pandas) and all(ps.lateralAllowed for ps in active_pandas)
+    firmware_suspended = any(ps.lateralSuspended for ps in active_pandas)
+    panda_time = self.sm.logMonoTime['pandaStates'] * 1e-9
+    panda_fresh = (self.sm.valid['pandaStates'] and 0 <= now - panda_time <= .3 and
+                   (REPLAY or 0 <= now - self.sm.recv_time['pandaStates'] <= .3))
+    panda_healthy = self.lateral_panda_health.check(self.CP, pandas, panda_time, panda_fresh)
+    dm = self.sm['driverMonitoringState']
+    paused = CS.brakePressed or CS.regenBraking or CS.parkingBrake or CS.gearShifter != car.CarState.GearShifter.drive
+    ready = (self.initialized and fresh and CS.canValid and not CS.canTimeout and
+             not CS.steerFaultTemporary and not CS.steerFaultPermanent and not CS.steeringDisengage and
+             self.sm['extrinsicsCalibration'].calStatus == log.ExtrinsicsCalibration.Status.calibrated and
+             not dm.lockout and not dm.alwaysOnLockout and dm.alertLevel != AlertLevel.three and not dm.noResponseForceDecel and
+             panda_healthy and
+             math.isfinite(self.sm['modelV2'].action.desiredCurvature) and lateral_events_clear(self.events, paused=paused))
+    cancel = self.car_state_received and any(be.type == ButtonType.cancel for be in CS.buttonEvents)
+    rearm = self.car_state_received and CS.buttonEnable
+    self.always_on_lateral.update(enabled=self.always_on_lateral_enabled, onroad=onroad, supported=supported,
+                                 ready=ready, firmware_allowed=firmware_allowed, firmware_suspended=firmware_suspended,
+                                 cancel=cancel, rearm=rearm, now=now, paused=paused,
+                                 speed_available=lateral_only_speed_available(self.CP, CS))
+    # Lateral-only assistance needs the same driver warnings even though cruise
+    # stays disabled. A lateral shutdown also surfaces its existing fault alert.
+    if self.always_on_lateral.requested or self.always_on_lateral.active:
+      if ET.WARNING not in self.state_machine.current_alert_types:
+        self.state_machine.current_alert_types.append(ET.WARNING)
+    if self.always_on_lateral.just_stopped:
+      self.state_machine.current_alert_types += [ET.USER_DISABLE, ET.SOFT_DISABLE, ET.IMMEDIATE_DISABLE]
+
   def update_alerts(self, CS):
     clear_event_types = set()
     if ET.WARNING not in self.state_machine.current_alert_types:
@@ -545,6 +599,11 @@ class SelfdriveD:
     ss.personality = self.personality
     mode_now = self.sm.logMonoTime['modelV2'] * 1e-9 if REPLAY else time.monotonic()
     ss.experimentalMode = map_cruise_supported(self.CP) and (self.manual_e2e or slc_e2e_fallback(self.sm, mode_now, replay=REPLAY))
+    ss.alwaysOnLateralSupported = self.always_on_lateral.supported
+    ss.alwaysOnLateralRequested = self.always_on_lateral.requested
+    ss.alwaysOnLateralActive = self.always_on_lateral.active
+    ss.alwaysOnLateralSuspended = self.always_on_lateral.suspended or self.always_on_lateral.paused
+    ss.alwaysOnLateralFaulted = self.always_on_lateral.suspended
 
     ss.alertText1 = self.AM.current_alert.alert_text_1
     ss.alertText2 = self.AM.current_alert.alert_text_2
@@ -569,6 +628,7 @@ class SelfdriveD:
     self.update_events(CS)
     if not self.CP.passive and self.initialized:
       self.enabled, self.active = self.state_machine.update(self.events)
+    self.update_always_on_lateral(CS)
     self.update_alerts(CS)
 
     self.publish_selfdriveState(CS)
@@ -581,6 +641,7 @@ class SelfdriveD:
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
       self.manual_e2e = self.params.get_bool("ExperimentalMode")
+      self.always_on_lateral_enabled = bool(self.params.get("AlwaysOnLateral", return_default=True))
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
       time.sleep(0.1)
 
