@@ -1,5 +1,54 @@
 # Batmobile validation
 
+## AOL audio and indicator refinement — 2026-11-20
+
+Cancel and brake/regen/parking-brake pauses during AOL-only steering suppress
+only their new disengagement chimes. Normal cruise disengagement, queued alerts
+and simultaneous fault warnings retain their sounds. AOL-origin warning faults
+keep their original duration without being renewed while suspended, including
+single-frame faults that soundd could otherwise miss. OFF, successful rearm and
+offroad transitions clear only those retained warnings. Shared event alerts and
+steering authority are unchanged.
+
+Unavailable hands now have a grey body and bright light-grey outline, with both
+forearms fading out. Active, ready, paused and off indications are unchanged.
+
+The combined final-source regression run passed 518 tests and 45 subtests,
+covering AOL, alert lifetimes, the normal cruise state machine, speed/Panda
+readiness, both hold controls, stop presentation and existing stop/slow-assist
+logic. Ruff and whitespace checks passed. This refinement is Python-only and
+introduces no settings or parameter migration. Device audio is not yet verified.
+
+## Lane-wide stop-bar presentation — 2026-11-20
+
+Reviewed upstream `45e522b` (lane-wide stop bar, PR #39429) and `ccbd8c0`
+(planned stops without a lead, PR #39352). Both were already in Batmobile's
+upstream history; the new drawing was confined to mici. The C3X presentation
+now uses the lane-wide flat quad, road projection, edge easing and fades while
+retaining its existing colours, ModelStop marker, stop distance and labels.
+
+The upstream cue detects the first predicted forward speed below 1 m/s. It adds
+no red-light classification. Batmobile already uses a qualified slow terminal
+trajectory before near-standstill `shouldStop`. Comparing 10,799 recorded model
+frames found 650 raw mici-only candidates, all below 9.21 km/h: 610 were within
+the upstream 8 m appearance floor and the other 40 were hidden by its lead rule.
+Several described acceleration/creeping. No additional independent appearance
+candidate justified changing control qualification in this sample. This is not
+a traffic-light ground-truth evaluation or a claim about every driving scenario.
+
+The port preserves existing stop-distance filters instead of stacking mici's
+30% per-model-frame correction on top. Only lateral edges, visibility and
+engagement brightness are animated. Fresh ordinary withdrawal may fade briefly;
+stale data, invalid calibration, a new lead, drive/timestamp resets and released
+held/green markers cannot leave a cached target. Flat-quad inset tests cover
+camera roll and skew so the red fill remains inside its yellow outline.
+
+Stop geometry, animation, actual renderer integration, existing ModelStop and
+stop/slow-assist regression checks passed 194 tests and 45 subtests. The actual
+CPU renderer was also inspected with a simulated-road animation and both AOL
+indicator sizes. No model, planner, firmware, schema or parameter changes are
+required by this presentation update. On-device appearance remains unverified.
+
 ## AOL startup and speed-floor correction — 2026-11-20
 
 The installed AOL build correctly advertised GM lateral-only support, but never

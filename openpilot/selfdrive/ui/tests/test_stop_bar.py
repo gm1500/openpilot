@@ -6,9 +6,9 @@ from unittest.mock import patch
 import numpy as np
 import raylib_nb as rl
 
-from openpilot.selfdrive.ui.onroad.lead_geometry import lead_fill_alpha, rounded_polygon
+from openpilot.selfdrive.ui.onroad.lead_geometry import lead_fill_alpha
 from openpilot.selfdrive.ui.onroad.model_stop import ModelStop, StopMarker
-from openpilot.selfdrive.ui.onroad.stop_bar import draw_stop_bar, stop_bar_geometry
+from openpilot.selfdrive.ui.onroad.stop_bar import _flat_fan, _inset_quad, draw_stop_bar, stop_bar_geometry
 from openpilot.selfdrive.ui.tests.test_model_stop import SM, model
 
 
@@ -350,7 +350,7 @@ class TestStopBar(unittest.TestCase):
   def project(x, y, z):
     return (1080 + 900 * y / x, 400 + 900 * z / x) if x > 0 else None
 
-  def test_bar_tracks_stop_point_but_stays_horizontal(self):
+  def test_lane_wide_bar_tracks_exact_stop_point_and_camera_perspective(self):
     scale = min(self.rect.width / 1080., self.rect.height / 540.)
     for distance, yaw in ((20., 0.), (60., 0.), (20., .4), (20., -.4)):
       x = distance + 1.52
@@ -358,16 +358,49 @@ class TestStopBar(unittest.TestCase):
       points, docked = stop_bar_geometry(marker, 1.5, self.project, self.rect)
       self.assertFalse(docked)
       np.testing.assert_allclose(points[:2].mean(axis=0), self.project(x, 0., 1.5))
-      self.assertAlmostEqual(np.ptp(points[:, 0]), 450.)
+      self.assertAlmostEqual(points[1, 0] - points[0, 0], 900 * 3.6 / x)
       self.assertEqual(points[0, 1], points[1, 1])
       self.assertEqual(points[2, 1], points[3, 1])
-      self.assertGreater(points[0, 0], points[3, 0])
-      self.assertLess(points[1, 0], points[2, 0])
-      self.assertAlmostEqual(points[1, 0] - points[0, 0], .8 * (points[2, 0] - points[3, 0]))
-      self.assertLessEqual(np.ptp(points[:, 1]), 24 * scale + 1e-6)
+      center_depth = np.linalg.norm(points[[2, 3]].mean(axis=0) - points[:2].mean(axis=0))
+      self.assertLessEqual(center_depth, 10 * scale + 1e-6)
+      self.assertGreaterEqual(center_depth, 3 * scale - 1e-6)
       if yaw == 0.:
         depth = self.project(x - min(6., .25 * x), 0., 1.5)[1] - self.project(x, 0., 1.5)[1]
-        self.assertAlmostEqual(np.ptp(points[:, 1]), 2 * np.clip(depth, 3 * scale, 12 * scale))
+        self.assertAlmostEqual(np.ptp(points[:, 1]), np.clip(depth, 3 * scale, 10 * scale))
+
+  def test_curved_path_controls_near_edge_without_moving_target_anchor(self):
+    marker = StopMarker((30., 3., .2), .2, 200.)
+    path = np.array([(0., 0., 0.), (24., 1., .1), (30., 3., .2), (60., 10., .3)])
+    points, docked = stop_bar_geometry(marker, 1.5, self.project, self.rect, path=path, edges=(-1.6, 2.))
+    self.assertFalse(docked)
+    np.testing.assert_allclose(points[0], self.project(30., 1.4, 1.7))
+    np.testing.assert_allclose(points[1], self.project(30., 5., 1.7))
+    near_center = np.mean([self.project(24., -.6, 1.6), self.project(24., 3., 1.6)], axis=0)
+    direction = near_center - points[:2].mean(axis=0)
+    actual_direction = points[[3, 2]].mean(axis=0) - points[:2].mean(axis=0)
+    np.testing.assert_allclose(actual_direction / np.linalg.norm(actual_direction), direction / np.linalg.norm(direction))
+    self.assertEqual(marker.distance, 200.)  # published range never becomes a geometry estimate
+
+  def test_ground_bar_follows_camera_roll(self):
+    marker = StopMarker((30., 0., 0.), 0., 28.48)
+    def project_roll(x, y, z):
+      px, py = self.project(x, y, z)
+      return px, py + .1 * (px - 1080)
+    points, docked = stop_bar_geometry(marker, 1.5, project_roll, self.rect)
+    self.assertFalse(docked)
+    self.assertAlmostEqual(points[1, 1] - points[0, 1], .1 * (points[1, 0] - points[0, 0]))
+
+  def test_red_fill_stays_inside_rotated_or_skewed_yellow_outline(self):
+    for points in (np.array([(30., 100.), (300., 70.), (302., 77.), (27., 107.)]),
+                   np.array([(30., 100.), (300., 160.), (304., 166.), (25., 106.)])):
+      for vertices in (points, points[::-1]):
+        inner = _inset_quad(vertices, 3.)
+        directions = np.roll(vertices, -1, axis=0) - vertices
+        normals = np.column_stack((-directions[:, 1], directions[:, 0]))
+        if np.sum(normals * (vertices.mean(axis=0) - vertices)) < 0:
+          normals *= -1
+        for edge, normal in zip(vertices, normals, strict=True):
+          self.assertTrue(np.all((inner - edge) @ normal > 0.))
 
   def test_close_passed_and_unprojectable_stops_remain_visible_as_a_bar(self):
     for x in (0., -2., 1.52, 2., 5.):
@@ -385,7 +418,7 @@ class TestStopBar(unittest.TestCase):
     self.assertTrue(docked)
     self.assertTrue(np.all(np.isfinite(points)))
     self.assertAlmostEqual(np.ptp(points[:, 0]), 450.)
-    self.assertAlmostEqual(np.ptp(points[:, 1]), 24 * min(self.rect.width / 1080., self.rect.height / 540.))
+    self.assertAlmostEqual(np.ptp(points[:, 1]), 10 * min(self.rect.width / 1080., self.rect.height / 540.))
 
   def test_regular_lead_color_response_and_opaque_bar_fill(self):
     self.assertEqual(lead_fill_alpha(50., -8.), 0)
@@ -403,16 +436,12 @@ class TestStopBar(unittest.TestCase):
       draw_stop_bar(marker, 4., 1.5, self.project, self.rect, None, False)
       self.assertEqual(text.call_args.args[1], 'STOP TARGET  65.6 ft')
 
-  def test_trajectory_bar_is_half_width_green_with_the_same_profile_and_thickness(self):
+  def test_trajectory_bar_is_lane_wide_green_with_the_same_profile_and_thickness(self):
     for position in ((21.52, 0., 0.), None):
       marker = StopMarker(position, 0., 20., label='STOP TARGET', trajectory_only=True)
       points, _ = stop_bar_geometry(marker, 1.5, self.project, self.rect)
       full, _ = stop_bar_geometry(StopMarker(position, 0., 20.), 1.5, self.project, self.rect)
-      self.assertAlmostEqual(np.ptp(points[:, 0]), .5 * np.ptp(full[:, 0]))
-      self.assertAlmostEqual(np.ptp(points[:, 1]), np.ptp(full[:, 1]))
-      self.assertEqual(points[0, 1], points[1, 1])
-      self.assertEqual(points[2, 1], points[3, 1])
-      self.assertAlmostEqual(points[1, 0] - points[0, 0], .8 * (points[2, 0] - points[3, 0]))
+      np.testing.assert_array_equal(points, full)
       with patch.dict(sys.modules, {'openpilot.system.ui.lib.text_measure': NS(measure_text_cached=lambda *args: NS(x=240., y=30.))}), \
            patch.object(rl, 'draw_triangle_fan') as polygon, patch.object(rl, 'draw_rectangle_rounded'), patch.object(rl, 'draw_text_ex'):
         draw_stop_bar(marker, 8., 1.5, self.project, self.rect, None, True)
@@ -434,14 +463,15 @@ class TestStopBar(unittest.TestCase):
       draw_stop_bar(marker, 8., 1.5, lambda *p: None, self.rect, None, True)
       self.assertEqual(polygon.call_count, 0)
 
-  def test_rounded_bar_fans_face_the_camera_with_either_input_winding(self):
+  def test_flat_bar_fans_face_the_camera_with_either_input_winding(self):
     # raylib DrawTriangleFan submits (center, i, i+1) with back-face culling.
     # Screen Y is downward, so every visible triangle needs negative area.
     for position in ((21.52, 0., 0.), (1.52, 0., 0.), None):
       marker = StopMarker(position, 0., 0., True, 'STOP TARGET')
       points, _ = stop_bar_geometry(marker, 1.5, self.project, self.rect)
       for vertices in (points, points[::-1]):
-        fan = np.asarray(rounded_polygon(vertices, 4.))
+        fan = np.asarray(_flat_fan(vertices))
+        self.assertEqual(len(fan), 6)
         a, b = fan[1:-1] - fan[0], fan[2:] - fan[0]
         areas = a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]
         self.assertTrue(np.all(areas <= 1e-6), areas)

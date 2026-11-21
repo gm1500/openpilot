@@ -158,6 +158,10 @@ guards remain.
   low-speed and automatic E2E operation. Disengaged driving retains low-speed
   wide-view hysteresis. Camera and overlay crops share calibrated alignment on
   the current upstream CPU renderer.
+- Stop bars use mici's lane-wide ground projection, edge easing and visibility
+  fades with Batmobile's green approach and yellow/red stop colours. Existing
+  model stop distances, readouts, lead suppression and brake holds are retained;
+  the presentation does not replace the stop detector or add distance filtering.
 - The gap button's three bars represent stock personalities: tap to cycle, hold
   to toggle painted-lane centering. The separate top-right button taps between
   Chill and E2E, while a 0.6-second hold toggles AOL. Its green hands require

@@ -77,5 +77,17 @@ occupied side flashes its bracket red at 2 Hz. Feedback also works in manual dri
 and is drawn over the on-road content.
 
 Real-lead triangles retain their top profile with broader rounding at both side
-corners. Virtual stops use the rectangular [virtual stop bar](batmobile-cheddar.md), which also
-remains visible while braking at standstill.
+corners. Virtual stops adapt mici's lane-wide, flat ground-plane bar, including
+perspective, curved-road geometry, 0.2-second lane-edge easing, 0.1-second
+visibility fade, and 0.25-second engagement brightness transition. Confident
+inner lane lines define the width; otherwise the display uses a 3.6 m fallback.
+The green approach cue and yellow-to-red confirmed/held cue retain Batmobile's
+colours, distance readout, near-stop dock and brake-hold label.
+
+The display consumes the existing ModelStop marker without another longitudinal
+filter or a replacement stop-distance estimate. The current model/target
+filters and bumper offset remain authoritative. Ordinary confirmed-target
+withdrawal may fade only with fresh, valid inputs and no real lead. Stale data,
+calibration loss, a new lead, timing/drive resets, released brake holds and green
+withdrawal clear the cached presentation immediately. Animation never changes
+the planner or retains a control target.

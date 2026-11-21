@@ -7,11 +7,12 @@ from opendbc.car.structs import car
 from dataclasses import dataclass, field
 from openpilot.common.params import Params
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
-from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.ui.ui_state import UIStatus, ui_state
 from openpilot.selfdrive.ui.onroad.lead_geometry import lead_fill_alpha, rounded_triangle
 from openpilot.selfdrive.ui.onroad.lane_policy_style import boundary_colors
 from openpilot.selfdrive.ui.onroad.model_stop import ModelStop, PATH_HALF_WIDTH
 from openpilot.selfdrive.ui.onroad.stop_bar import draw_stop_bar
+from openpilot.selfdrive.ui.onroad.stop_bar_animation import StopBarPresentation, stop_bar_fade_allowed
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.polygon import draw_polygon, Gradient
 from openpilot.system.ui.widgets import Widget
@@ -53,6 +54,7 @@ class ModelRenderer(Widget):
     self._lead_vehicles = [LeadVehicle(), LeadVehicle()]
     self._path_offset_z = HEIGHT_INIT[0]
     self._model_stop = ModelStop(Params().get("ModelStopFrontOffset", return_default=True))
+    self._stop_bar = StopBarPresentation(1 / gui_app.target_fps)
 
     # Initialize ModelPoints objects
     self._path = ModelPoints()
@@ -86,7 +88,19 @@ class ModelRenderer(Widget):
 
   def _render(self, rect: rl.Rectangle):
     sm = ui_state.sm
-    self._model_stop.update(sm, ui_state.started_frame, time.monotonic())
+    now = time.monotonic()
+    self._model_stop.update(sm, ui_state.started_frame, now)
+    calibrated = (sm.valid['extrinsicsCalibration'] and
+                  ui_state.received_since_started('extrinsicsCalibration') and
+                  str(sm['extrinsicsCalibration'].calStatus) == 'calibrated' and
+                  0 <= now - sm.recv_time['extrinsicsCalibration'] <= .8 and
+                  0 <= round(now * 1e9) - sm.logMonoTime['extrinsicsCalibration'] <= 800_000_000)
+    marker = self._model_stop.marker if calibrated else None
+    allow_fade_out = (calibrated and marker is None and
+                      stop_bar_fade_allowed(sm, ui_state.started_frame, now, self._stop_bar.marker))
+    self._stop_bar.update(marker, sm['modelV2'], now=now, started_frame=ui_state.started_frame,
+                          engaged=ui_state.status != UIStatus.DISENGAGED, allow_fade_out=allow_fade_out,
+                          model_time=sm.logMonoTime['modelV2'] * 1e-9)
 
     # Check if data is up-to-date
     if not ui_state.received_since_started("extrinsicsCalibration") or not ui_state.received_since_started("modelV2"):
@@ -128,10 +142,10 @@ class ModelRenderer(Widget):
     self._draw_lane_lines()
     self._draw_path()
 
-    if (self._model_stop.marker is not None and sm.valid['extrinsicsCalibration'] and
-        str(extrinsics_calibration.calStatus) == 'calibrated'):
-      draw_stop_bar(self._model_stop.marker, sm['carState'].vEgo, self._path_offset_z, self._project_stop_point,
-                    rect, gui_app.font(FontWeight.BOLD), ui_state.is_metric)
+    if self._stop_bar.marker is not None and calibrated:
+      draw_stop_bar(self._stop_bar.marker, sm['carState'].vEgo, self._path_offset_z, self._project_stop_point,
+                    rect, gui_app.font(FontWeight.BOLD), ui_state.is_metric, path=self._path.raw_points,
+                    edges=self._stop_bar.edges, opacity=self._stop_bar.opacity)
 
     if render_lead_indicator and radar_state:
       self._draw_lead_indicator()
