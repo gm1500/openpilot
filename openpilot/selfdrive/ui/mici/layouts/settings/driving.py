@@ -6,6 +6,7 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.mici.layouts.settings.initial_cruise_speed import InitialCruiseSpeedButton
+from openpilot.selfdrive.ui.layouts.settings.toggles import DESCRIPTIONS
 
 PERSONALITY_TO_INT = log.LongitudinalPersonality.schema.enumerants
 
@@ -25,6 +26,10 @@ class DrivingLayoutMici(NavScroller):
                                  description="Warn when you drift across a detected lane line.\n" +
                                              "Only above 31 mph (50 km/h), with no turn signal.")
     always_on_dm_toggle = BigParamControl("always-on driver monitor", "AlwaysOnDM", description="Monitor the driver even when openpilot is not engaged.")
+    self._e2e_toggle = BigParamControl("E2E driving", "ExperimentalMode", description=DESCRIPTIONS["ExperimentalMode"],
+                                       toggle_callback=ui_state.set_experimental_mode)
+    aol_toggle = BigParamControl("AOL", "AlwaysOnLateral", description=DESCRIPTIONS["AlwaysOnLateral"],
+                                toggle_callback=ui_state.set_always_on_lateral)
     enable_openpilot = BigParamControl("enable openpilot", "OpenpilotEnabledToggle", toggle_callback=restart_needed_callback,
                                        description="Enable to use openpilot driver assistance.\n" +
                                                    "Disable to use your car's stock driver assistance.")
@@ -32,6 +37,8 @@ class DrivingLayoutMici(NavScroller):
     self._scroller.add_widgets([
       self._personality_toggle,
       self._initial_cruise_speed,
+      self._e2e_toggle,
+      aol_toggle,
       always_on_dm_toggle,
       ldw_toggle,
       enable_openpilot,
@@ -41,6 +48,8 @@ class DrivingLayoutMici(NavScroller):
     self._refresh_toggles = (
       ("IsLdwEnabled", ldw_toggle),
       ("AlwaysOnDM", always_on_dm_toggle),
+      ("ExperimentalMode", self._e2e_toggle),
+      ("AlwaysOnLateral", aol_toggle),
       ("OpenpilotEnabledToggle", enable_openpilot),
     )
 
@@ -72,7 +81,9 @@ class DrivingLayoutMici(NavScroller):
 
     if ui_state.CP is not None:
       self._personality_toggle.set_visible(ui_state.has_longitudinal_control)
+    self._e2e_toggle.set_enabled(ui_state.map_cruise_supported)
 
     # Refresh toggles from params to mirror external changes
     for key, item in self._refresh_toggles:
-      item.set_checked(ui_state.params.get_bool(key))
+      value = bool(ui_state.params.get(key, return_default=True)) if key == "AlwaysOnLateral" else ui_state.params.get_bool(key)
+      item.set_checked(value)

@@ -26,6 +26,13 @@ DESCRIPTIONS = {
     "without a turn signal activated while driving over 31 mph (50 km/h)."
   ),
   "AlwaysOnDM": tr_noop("Enable driver monitoring even when openpilot is not engaged."),
+  "ExperimentalMode": tr_noop("Use E2E driving with cruise SET and mapped speed caps. " +
+                              "Off retains automatic no-map and braking assists. Tap the top-right E2E button to switch modes."),
+  "AlwaysOnLateral": tr_noop("Enable AOL steering assistance on supported vehicles once the system is ready. " +
+                             "Holding the brake or selecting Reverse pauses AOL until driving is ready again. " +
+                             "Cancel suspends AOL until SET, Resume, or switching AOL off and on. " +
+                             "With cruise disengaged, AOL follows the lane without initiating lane changes. " +
+                             "Hold the top-right E2E button to switch AOL on or off."),
   'RecordFront': tr_noop("Upload data from the cabin camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
@@ -49,6 +56,18 @@ class TogglesLayout(Widget):
         lambda: tr("Disengage on Accelerator Pedal"),
         DESCRIPTIONS["DisengageOnAccelerator"],
         "disengage_on_accelerator.png",
+        False,
+      ),
+      "ExperimentalMode": (
+        lambda: tr("E2E Driving"),
+        DESCRIPTIONS["ExperimentalMode"],
+        "experimental.png",
+        False,
+      ),
+      "AlwaysOnLateral": (
+        lambda: tr("AOL"),
+        DESCRIPTIONS["AlwaysOnLateral"],
+        "chffr_wheel.png",
         False,
       ),
       "IsLdwEnabled": (
@@ -107,7 +126,7 @@ class TogglesLayout(Widget):
       toggle = toggle_item(
         title,
         desc,
-        self._params.get_bool(param),
+        bool(self._params.get(param, return_default=True)) if param == "AlwaysOnLateral" else self._params.get_bool(param),
         callback=lambda state, p=param: self._toggle_callback(state, p),
         icon=icon,
       )
@@ -157,11 +176,13 @@ class TogglesLayout(Widget):
 
     if ui_state.CP is not None:
       self._long_personality_setting.action_item.set_enabled(ui_state.has_longitudinal_control)
+    self._toggles["ExperimentalMode"].action_item.set_enabled(ui_state.map_cruise_supported and "ExperimentalMode" not in self._locked_toggles)
 
     # TODO: make a param control list item so we don't need to manage internal state as much here
     # refresh toggles from params to mirror external changes
     for param in self._toggle_defs:
-      self._toggles[param].action_item.set_state(self._params.get_bool(param))
+      value = bool(self._params.get(param, return_default=True)) if param == "AlwaysOnLateral" else self._params.get_bool(param)
+      self._toggles[param].action_item.set_state(value)
 
     # these toggles need restart, block while engaged
     for toggle_def in self._toggle_defs:
@@ -172,7 +193,12 @@ class TogglesLayout(Widget):
     self._scroller.render(rect)
 
   def _toggle_callback(self, state: bool, param: str):
-    self._params.put_bool(param, state, block=True)
+    if param == "ExperimentalMode":
+      ui_state.set_experimental_mode(state)
+    elif param == "AlwaysOnLateral":
+      ui_state.set_always_on_lateral(state)
+    else:
+      self._params.put_bool(param, state, block=True)
     if param == "IsMetric":
       self._update_toggles()
 
