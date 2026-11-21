@@ -7,7 +7,9 @@ is not evidence of a current IRQ storm, but an ongoing storm must still block
 steering. Never extend this exception to another fault, board or safety setup.
 
 Only fresh, distinct Panda samples can establish two seconds of quiet CAN1 and
-clean driving buses. Any changed counter or unhealthy sample discards that
+clean driving buses. The recorded CAN0 startup receive loss is also cumulative:
+exactly one receive loss may qualify while all live error flags and other error
+counters are clear. Any changed error counter or unhealthy sample discards that
 qualification. SelfdriveD's existing armed-AOL fault latch separately requires
 explicit driver rearming after readiness is lost; this helper cannot rearm it.
 """
@@ -39,9 +41,13 @@ def _integrity_clear(ps):
               ps.faultStatus == log.PandaState.FaultStatus.faultPerm)
 
 
-def _driving_bus_clean(bus):
+def _driving_bus_clean(bus, *, allow_startup_rx_loss=False):
+  errors_clear = all(getattr(bus, field) == 0 for field in ERROR_COUNTERS)
+  if allow_startup_rx_loss and bus.totalErrorCnt == bus.totalRxLostCnt == 1:
+    errors_clear = all(getattr(bus, field) == 0 for field in ERROR_COUNTERS
+                       if field not in ('totalErrorCnt', 'totalRxLostCnt'))
   return (not (bus.busOff or bus.errorWarning or bus.errorPassive) and bus.totalRxCnt > 0 and
-          all(getattr(bus, field) == 0 for field in ERROR_COUNTERS) and
+          errors_clear and
           all(getattr(bus, field) < CAN_INTERRUPT_RATE for field in IRQ_FIELDS) and
           all(getattr(bus, field) in NO_ERROR for field in
               ('lastError', 'lastStoredError', 'lastDataError', 'lastDataStoredError')))
@@ -90,13 +96,18 @@ class LateralPandaHealth:
     diagnostic = ps.canState1
     if (diagnostic.busOff or diagnostic.totalRxCnt or diagnostic.totalFwdCnt or
         any(getattr(diagnostic, field) != 0 for field in IRQ_FIELDS) or
-        not _driving_bus_clean(ps.canState0) or not _driving_bus_clean(ps.canState2)):
+        not _driving_bus_clean(ps.canState0, allow_startup_rx_loss=True) or not _driving_bus_clean(ps.canState2)):
       self._reset()
       return False
 
     configuration = (CP.carFingerprint, CP.alternativeExperience, ps.safetyParam,
                      ps.alternativeExperience, ps.pandaType.raw, ps.harnessStatus.raw)
-    snapshot = tuple(getattr(diagnostic, field) for field in QUIET_FIELDS)
+    # The CAN0 receive loss was already present before ELM diagnostics in the
+    # recorded startup, but selfdrived starts later. Qualify unchanged counters
+    # here instead of depending on an unobservable pre-diagnostic sample. A new
+    # loss, including 0 -> 1, must immediately withdraw any prior qualification.
+    snapshot = (tuple(getattr(diagnostic, field) for field in QUIET_FIELDS) +
+                tuple(getattr(bus, field) for bus in (ps.canState0, ps.canState2) for field in ERROR_COUNTERS))
     if (configuration != self._configuration or self._last_sample is None or
         sample_time < self._last_sample or sample_time - self._last_sample > MAX_SAMPLE_GAP or
         ps.uptime < self._last_uptime or snapshot != self._quiet_snapshot):

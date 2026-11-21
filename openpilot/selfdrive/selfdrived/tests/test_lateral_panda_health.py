@@ -44,6 +44,65 @@ def test_recorded_startup_diagnostic_requires_two_seconds_of_distinct_quiet_samp
   assert health.check(cp, [ps], 102.1, True)
 
 
+def test_recorded_single_can0_receive_loss_qualifies_only_after_stable_observation(inputs):
+  cp, ps = inputs
+  ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = 1
+  health = LateralPandaHealth()
+  # selfdrived's first observed sample can already have the startup loss.
+  for i in range(21):
+    ps.canState0.totalRxCnt += 100
+    ps.canState2.totalRxCnt += 100
+    assert health.check(cp, [ps], 100. + i / 10, True) == (i == 20)
+  assert health.check(cp, [ps], 102.1, True)
+
+
+@pytest.mark.parametrize('bus_index,total_errors,rx_lost', [(0, 1, 0), (0, 0, 1), (0, 2, 1),
+                                                          (0, 1, 2), (0, 2, 2), (2, 1, 1)])
+def test_receive_loss_allowance_is_confined_to_recorded_can0_counters(inputs, bus_index, total_errors, rx_lost):
+  cp, ps = inputs
+  bus = getattr(ps, f'canState{bus_index}')
+  bus.totalErrorCnt, bus.totalRxLostCnt = total_errors, rx_lost
+  health = LateralPandaHealth()
+  for i in range(25):
+    assert not health.check(cp, [ps], 100. + i / 10, True)
+
+
+@pytest.mark.parametrize('field,value', [('busOff', True), ('errorWarning', True), ('errorPassive', True),
+                                        ('receiveErrorCnt', 1), ('transmitErrorCnt', 1), ('totalTxLostCnt', 1),
+                                        ('canCoreResetCnt', 1), ('busOffCnt', 1), ('lastError', 'stuffError'),
+                                        ('lastStoredError', 'bit0Error'), ('lastDataError', 'ackError'),
+                                        ('lastDataStoredError', 'crcError'), ('irq0CallRate', 16000),
+                                        ('irq1CallRate', 16000), ('irq2CallRate', 16000), ('totalRxCnt', 0)])
+def test_single_receive_loss_never_exempts_other_driving_bus_health(inputs, field, value):
+  cp, ps = inputs
+  ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = 1
+  setattr(ps.canState0, field, value)
+  health = LateralPandaHealth()
+  for i in range(25):
+    assert not health.check(cp, [ps], 100. + i / 10, True)
+
+
+def test_single_receive_loss_requires_distinct_fresh_samples(inputs):
+  cp, ps = inputs
+  ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = 1
+  health = LateralPandaHealth()
+  for _ in range(100):
+    assert not health.check(cp, [ps], 100., True)
+  qualify(health, cp, ps)
+  assert not health.check(cp, [ps], 102.1, False)
+  qualify(health, cp, ps, start=102.2)
+
+
+def test_further_receive_loss_invalidates_and_cannot_requalify(inputs):
+  cp, ps = inputs
+  ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = 1
+  health = LateralPandaHealth()
+  qualify(health, cp, ps)
+  ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = 2
+  for i in range(25):
+    assert not health.check(cp, [ps], 102.1 + i / 10, True)
+
+
 def test_repeated_packet_cannot_qualify(inputs):
   cp, ps = inputs
   health = LateralPandaHealth()
@@ -201,7 +260,8 @@ def test_no_fault_path_does_not_need_exception_or_quiet_window(inputs):
   assert LateralPandaHealth().check(cp, [ps], 100., True)
 
 
-def test_health_requalification_does_not_rearm_aol_after_new_fault(inputs):
+@pytest.mark.parametrize('fault', ['diagnostic_error', 'can0_receive_loss'])
+def test_health_requalification_does_not_rearm_aol_after_new_fault(inputs, fault):
   cp, ps = inputs
   health = LateralPandaHealth()
   qualify(health, cp, ps)
@@ -210,7 +270,10 @@ def test_health_requalification_does_not_rearm_aol_after_new_fault(inputs):
           'rearm': False}
   state.update(**args, ready=health.check(cp, [ps], 102.1, True), now=102.1)
   assert state.active
-  ps.canState1.totalErrorCnt += 1
+  if fault == 'diagnostic_error':
+    ps.canState1.totalErrorCnt += 1
+  else:
+    ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = 1
   state.update(**args, ready=health.check(cp, [ps], 102.2, True), now=102.2)
   assert state.suspended and not state.active
   qualify(health, cp, ps, start=102.2)

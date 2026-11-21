@@ -1,5 +1,48 @@
 # Batmobile validation
 
+## AOL historical receive-loss qualification — 2026-11-21
+
+The next drive ran clean `9017c364` with AOL enabled, but the host never requested
+lateral-only permission. Four recorded segments contain 10,465 selfdrive samples
+above 10 km/h and 2,352 GM Panda samples. CAN0 retained `totalErrorCnt = 1` and
+`totalRxLostCnt = 1` throughout; its live error flags and the driving CAN2 bus
+were clear. This pair was already present in the first no-output Panda sample,
+before diagnostics and GM control started. The existing historical-diagnostic
+qualification required every driving-bus counter to be zero forever, so the
+unchanging receive-loss history prevented qualification for the entire sample.
+
+The correction permits only this one matching CAN0 error/receive-loss pair in
+the already-restricted Silverado/tres/GM27 diagnostic-fault qualification. CAN2
+and all other driving-bus error counters remain zero-only. Qualification needs
+two seconds of fresh, distinct samples with unchanged diagnostic and driving
+error counters, clean live bus status and the existing integrity checks. Any
+counter change resets qualification; the separate armed-AOL fault latch still
+requires explicit driver rearming after a new failure. The helper does not
+require a no-output packet that SelfdriveD might not have observed at startup.
+
+Validation from this source tree:
+
+- AOL health/state, stock state and alert management, lane-change behavior,
+  car lateral-only handling and E2E-button UI: 368 tests and 21 subtests passed.
+- Replaying all four recorded segments with the original helper rejects Panda
+  health in all 10,465 samples above 10 km/h. The corrected helper rejects none;
+  the same 1,157 samples retain their normal brake/gear pauses, and 9,308 pass
+  all explicitly reconstructed readiness gates. Qualification completes while
+  parked, before the first sample above the steering-speed floor.
+- A separate replay using the GM27 native safety library and reconstructed
+  heartbeats grants lateral permission after the host first requests it at
+  10.004 km/h; the host observes the acknowledgment about 130 ms later. It has
+  no rejected steering messages, RX rejections or new native faults. One
+  recorded gas/regen message is rejected identically with both original and
+  corrected host helpers; it is not a regression from this change.
+- Ruff and whitespace checks passed.
+
+This correction is Python-only relative to `9017c364`; it adds no parameters,
+schema changes or firmware changes. The readiness replay does not recreate
+SubMaster service-frequency checks. The native replay uses recorded commands,
+not newly generated closed-loop steering commands. Neither reconstruction
+proves physical steering or on-device behavior after the correction.
+
 ## Cancel preserves AOL state — 2026-11-21
 
 Cancel now disables cruise only. The host excludes `buttonCancel` from AOL
