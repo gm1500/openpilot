@@ -28,6 +28,8 @@ class DrivingLayoutMici(NavScroller):
     always_on_dm_toggle = BigParamControl("always-on driver monitor", "AlwaysOnDM", description="Monitor the driver even when openpilot is not engaged.")
     self._e2e_toggle = BigParamControl("E2E driving", "ExperimentalMode", description=DESCRIPTIONS["ExperimentalMode"],
                                        toggle_callback=ui_state.set_experimental_mode)
+    aol_toggle = BigParamControl("AOL", "AlwaysOnLateral", description=DESCRIPTIONS["AlwaysOnLateral"],
+                                toggle_callback=ui_state.set_always_on_lateral)
     enable_openpilot = BigParamControl("enable openpilot", "OpenpilotEnabledToggle", toggle_callback=restart_needed_callback,
                                        description="Enable to use openpilot driver assistance.\n" +
                                                    "Disable to use your car's stock driver assistance.")
@@ -36,6 +38,7 @@ class DrivingLayoutMici(NavScroller):
       self._personality_toggle,
       self._initial_cruise_speed,
       self._e2e_toggle,
+      aol_toggle,
       always_on_dm_toggle,
       ldw_toggle,
       enable_openpilot,
@@ -46,6 +49,7 @@ class DrivingLayoutMici(NavScroller):
       ("IsLdwEnabled", ldw_toggle),
       ("AlwaysOnDM", always_on_dm_toggle),
       ("ExperimentalMode", self._e2e_toggle),
+      ("AlwaysOnLateral", aol_toggle),
       ("OpenpilotEnabledToggle", enable_openpilot),
     )
 
@@ -81,5 +85,5 @@ class DrivingLayoutMici(NavScroller):
 
     # Refresh toggles from params to mirror external changes
     for key, item in self._refresh_toggles:
-      value = ui_state.params.get_bool(key)
+      value = bool(ui_state.params.get(key, return_default=True)) if key == "AlwaysOnLateral" else ui_state.params.get_bool(key)
       item.set_checked(value)

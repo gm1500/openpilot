@@ -122,6 +122,7 @@ class UIState:
     self.is_release = self.params.get_bool("IsReleaseBranch")
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
     self.experimental_mode: bool = self.params.get_bool("ExperimentalMode")
+    self.always_on_lateral: bool = bool(self.params.get("AlwaysOnLateral", return_default=True))
     self.navigation_enabled: bool = self.params.get_bool("NavigationEnabled")
     self.nav_destination_set: bool = self.params.get("NavDestination") is not None
     self.lane_policy_enabled: bool = get_lane_policy_enabled(self.params)
@@ -340,6 +341,10 @@ class UIState:
     self.params.put_bool("ExperimentalMode", enabled, block=True)
     self.experimental_mode = enabled
 
+  def set_always_on_lateral(self, enabled: bool) -> None:
+    self.params.put_bool("AlwaysOnLateral", enabled, block=True)
+    self.always_on_lateral = enabled
+
   @property
   def lane_policy_line_color(self) -> tuple[int, int, int] | None:
     if self.lane_policy_enabled:
@@ -365,6 +370,7 @@ class UIState:
     self.initial_cruise_speed = self.params.get("InitialCruiseSpeedKph", return_default=True)
     self.always_on_dm = self.params.get_bool("AlwaysOnDM")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
+    self.always_on_lateral = bool(self.params.get("AlwaysOnLateral", return_default=True))
     self.personality_param = self.params.get("LongitudinalPersonality", return_default=True)
     self.navigation_enabled = self.params.get_bool("NavigationEnabled")
     self.nav_destination_set = self.params.get("NavDestination") is not None

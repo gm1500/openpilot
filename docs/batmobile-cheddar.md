@@ -13,18 +13,22 @@ architecture, with native lead processing restored.
 | Upstream model-assets tree, unchanged | `903fd28aef90d787adceb88071fd2ca73ba88924` |
 | tinygrad, unchanged | `ec91b74b5b6b0fc924b72d3f27689679ca2438b9` |
 | msgq, unchanged | `42554d0a6f1cb2e87238c994760078be36cfdb27` |
-| panda, unchanged | `5e8131ec962f6c2d88adda4ec7166e5d308f095e` |
+| Panda base before separate AOL permission | `5e8131ec962f6c2d88adda4ec7166e5d308f095e` |
+| Panda with independent AOL heartbeat and health | `77ae0d198be68ef20f60ecbef6a58a201871522b` |
 | rednose, unchanged | `e60428b2e52f139d5fe5466d4d9fa3c6adeadad8` |
 | teleoprtc, unchanged | `f19ceb4553d1d9ccd46cc86f47483564814423ec` |
 | Upstream opendbc base | `5cb4ca34c7abb2a976fb835ba9fca6bf4386ed4c` |
-| opendbc with retained GM calibration and tests | `66e8086083e8b09783fffbf044350a2417bcfd83` |
+| opendbc GM calibration base before AOL | `66e8086083e8b09783fffbf044350a2417bcfd83` |
+| opendbc with independent GM AOL safety | `196d1b12da7ebf32fbd0081b16d3ff95817fb610` |
 
 The upstream version is **0.11.4**, with **AGNOS 20.6**. The lockfile retains
 tinygrad **0.14.0**, NumPy **2.5.3**, pycapnp **2.1.0**, and the CPU raylib package
 **6.0.0.1.post111**. Map civil-time handling adds timezonefinder **8.2.0** and
 tzdata; use the checked-in lockfile and submodule revisions when reproducing the
 build. The GM fork carries the retained Sierra/Silverado torque, mass, gas and
-safety calibration on the upstream opendbc base. The upstream move of radard and
+safety calibration on the upstream opendbc base. The checked-in Panda and
+opendbc gitlinks add a separate GM lateral-only permission; their branches are
+`batmobile-aol-20261120` in the gm1500 forks. The upstream move of radard and
 plannerd off the UI core remains included.
 
 ## Driving behavior
@@ -80,6 +84,27 @@ SLC is disabled. E2E OFF retains automatic no-map fallback and the existing
 qualified stop/slow-lead assists. Mapped recovery applies SET before clearing
 automatic fallback in the same card update. Manual E2E stays on across recovery.
 
+## Always-on lateral (AOL)
+
+AOL defaults ON when the setting has never been saved; later choices persist.
+Once booted, calibrated and ready in Drive, it can request steering without
+engaging cruise. It is supported only on the camera-long GM Sierra/Silverado
+configuration carrying the new safety flag and matching Panda firmware.
+Older firmware or another safety configuration cannot grant AOL permission.
+
+Holding the brake, regen braking, parking brake, and any gear other than Drive
+temporarily pause AOL. Brake release or return to Drive can resume it once the
+readiness checks pass. Cancel suspends it until SET/RESUME or a saved OFF-to-ON
+toggle. Fault suspension also requires explicit rearming. AOL-only steering
+cannot initiate automatic lane changes. Normal lane-change assistance remains
+available with cruise engaged, and engaging cruise with an already-held signal
+still requires a fresh signal activation before a maneuver can begin.
+
+AOL has separate host intent, Panda acknowledgment and actual steering states.
+It never grants longitudinal control. Driver-monitoring, calibration, fresh
+model/CAN messages, gear, driver torque, torque/rate limits, heartbeat and fault
+checks remain required. Driver alerts continue while AOL steers without cruise.
+
 Painted-lane centering requires two sufficiently confident, plausible lane lines.
 Entry requires both line probabilities to remain at least **0.92** for **0.75 s**,
 with the fitted width inside **2.70–5.10 m**. An active policy can retain ordinary
@@ -116,9 +141,11 @@ guards remain.
   the current upstream CPU renderer.
 - The gap button's three bars represent stock personalities: tap to cycle, hold
   to toggle painted-lane centering. The separate top-right button taps between
-  Chill and E2E; long holds leave the selected mode unchanged. The original comma
-  icons retain their dark background and have no text above or below the control.
-  Brake and blindspot indicators,
+  Chill and E2E, while a 0.6-second hold toggles AOL. Its green hands require
+  fresh, confirmed active steering; ready, off and paused states remain distinct.
+  The background stays dark in every state.
+  The original comma icons have solid hands with fading forearms and no text
+  above or below the control. Brake and blindspot indicators,
   SLC/Sentry controls and the Batmobile appearance are retained.
 - Sentry retains parked recording, sensor triggers, parking choices, power
   limits, eye display and upload coordination. Its separate encoder sockets and

@@ -1,10 +1,11 @@
 # Batmobile validation
 
-## E2E and map-gap update — 2026-11-20
+## E2E, AOL and map-gap update — 2026-11-20
 
 The update is based on upstream `d0800d005e8ef89a468c24d358984da83f84cbe0`,
 preserving the radard/plannerd CPU-core change and the retained GM tuning.
-The preceding complete Batmobile revision was
+The previous complete branch is preserved as
+`archive/batmobile-pre-aol-20261120` at
 `bd579d480fa0d1517f46063510acbb007b6089b8`.
 
 Current checks include:
@@ -13,10 +14,25 @@ Current checks include:
   with six expected base/unsupported skips.
 - Planner mode selection, cruise recovery, stopping and immediate SLC handoff:
   111 tests passed, including the native MPC cases.
+- AOL host state, readiness, driver monitoring, control separation and existing
+  signal/lane-change behavior: 114 tests and 21 subtests passed. Coverage includes
+  temporary brake/gear pauses, faults occurring during those pauses, and blocking
+  automatic lane changes during AOL-only steering.
 - Sentry and stock system-power monitoring: 135 tests passed.
-The manual E2E setting is persistent and defaults OFF. UI coverage exercises
-mode selection, current-control freshness, interrupted contacts and long holds
-that leave the selected mode unchanged.
+- Native Params rebuilt with both new persistent settings; default AOL ON,
+  saved OFF, and default E2E OFF verified. Cereal schemas were regenerated.
+- Native x86 pandad compiled and linked with the current schemas and heartbeat
+  protocol, with warnings treated as errors and no missing dynamic dependencies.
+- UI gestures, colors, fresh-state/steering-speed gates and saved defaults:
+  66 tests passed, including the unavailable outline and pause precedence.
+- All-brand native safety: 3,138 tests and 10,953 subtests passed, with 1,451
+  expected abstract/base skips. The GM subset, MISRA checks, Panda protocol,
+  and actual ARM DEBUG/RELEASE application and bootstub builds passed. A separate
+  reviewer reproduced and checked the pause-fault, stale-host, capability-reset
+  and SET/RESUME rearming cases.
+
+A final combined host/SLC/planner/UI/power run passed 478 tests and 64 subtests,
+with six expected skips. These counts overlap the focused suites above.
 
 The route-83 speed-selector replay used 49,700 recorded input frames across the
 requested clip. The previous helper matched 49,699 recorded SET values; the
