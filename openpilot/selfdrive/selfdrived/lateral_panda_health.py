@@ -8,10 +8,11 @@ steering. Never extend this exception to another fault, board or safety setup.
 
 Only fresh, distinct Panda samples can establish two seconds of quiet CAN1 and
 clean driving buses. The recorded CAN0 startup receive loss is also cumulative:
-exactly one receive loss may qualify while all live error flags and other error
-counters are clear. Any changed error counter or unhealthy sample discards that
-qualification. SelfdriveD's existing armed-AOL fault latch separately requires
-explicit driver rearming after readiness is lost; this helper cannot rearm it.
+exactly one paired error/loss may qualify. CAN2 FIFO overruns may qualify
+only if observed while parked before GM mode and both driving buses continue
+receiving. A changed counter or unhealthy sample discards qualification.
+SelfdriveD's armed-AOL fault latch requires explicit driver rearming after
+readiness is lost.
 """
 import math
 
@@ -41,11 +42,17 @@ def _integrity_clear(ps):
               ps.faultStatus == log.PandaState.FaultStatus.faultPerm)
 
 
-def _driving_bus_clean(bus, *, allow_startup_rx_loss=False):
-  errors_clear = all(getattr(bus, field) == 0 for field in ERROR_COUNTERS)
-  if allow_startup_rx_loss and bus.totalErrorCnt == bus.totalRxLostCnt == 1:
-    errors_clear = all(getattr(bus, field) == 0 for field in ERROR_COUNTERS
-                       if field not in ('totalErrorCnt', 'totalRxLostCnt'))
+def _diagnostic_fault_only(ps):
+  return (ps.pandaType == log.PandaState.PandaType.tres and
+          len(ps.faults) == 1 and ps.faults[0] == log.PandaState.FaultType.interruptRateCan2 and
+          ps.faultStatus == log.PandaState.FaultStatus.faultTemp and
+          ps.harnessStatus in (log.PandaState.HarnessStatus.normal, log.PandaState.HarnessStatus.flipped) and
+          not (ps.safetyRxInvalid or ps.rxBufferOverflow or ps.txBufferOverflow or ps.spiErrorCount))
+
+
+def _driving_bus_clean(bus, *, total_errors=0, rx_lost=0):
+  errors_clear = (bus.totalErrorCnt == total_errors and bus.totalRxLostCnt == rx_lost and
+                  all(getattr(bus, field) == 0 for field in ERROR_COUNTERS if field not in ('totalErrorCnt', 'totalRxLostCnt')))
   return (not (bus.busOff or bus.errorWarning or bus.errorPassive) and bus.totalRxCnt > 0 and
           errors_clear and
           all(getattr(bus, field) < CAN_INTERRUPT_RATE for field in IRQ_FIELDS) and
@@ -55,7 +62,54 @@ def _driving_bus_clean(bus, *, allow_startup_rx_loss=False):
 
 class LateralPandaHealth:
   def __init__(self):
+    # None means we have not seen a Panda yet. Zero permanently rules out the
+    # CAN2 allowance for this host instance, including a restart already in GM.
+    self._startup_can2_loss: int | None = None
+    self._startup_harness = None
+    self._startup_time = 0.
+    self._startup_uptime = 0
+    self._startup_rx = (0, 0)
+    self._buses_progressing = False
+    self._seen_gm = False
+    self._parked_in_elm = False
     self._reset()
+
+  def _observe_startup(self, pandas, sample_time, parked):
+    if self._startup_can2_loss == 0:
+      return
+    if len(pandas) != 1:
+      self._startup_can2_loss = 0
+      return
+    ps = pandas[0]
+    rx = (ps.canState0.totalRxCnt, ps.canState2.totalRxCnt)
+    loss = ps.canState2.totalRxLostCnt
+    elm = ps.safetyModel == car.CarParams.SafetyModel.elm327
+    if self._startup_can2_loss is None:
+      if not elm or loss not in (1, 2):
+        self._startup_can2_loss = 0
+        return
+      self._startup_can2_loss = loss
+      self._startup_harness = ps.harnessStatus.raw
+    elif (not 0 <= sample_time - self._startup_time <= MAX_SAMPLE_GAP or
+          not 0 <= ps.uptime - self._startup_uptime <= 1 or
+          rx[0] < self._startup_rx[0] or rx[1] < self._startup_rx[1]):
+      self._startup_can2_loss = 0
+      return
+
+    if (not _diagnostic_fault_only(ps) or ps.harnessStatus.raw != self._startup_harness or
+        not (ps.ignitionCan or ps.ignitionLine) or not _integrity_clear(ps) or
+        (elm and (self._seen_gm or ps.safetyParam != 1)) or
+        (not elm and (ps.safetyModel != car.CarParams.SafetyModel.gm or ps.safetyParam != GM_AOL_PARAM)) or
+        not _driving_bus_clean(ps.canState0) or not _driving_bus_clean(ps.canState2, rx_lost=self._startup_can2_loss)):
+      self._startup_can2_loss = 0
+      return
+    if sample_time != self._startup_time:
+      self._buses_progressing = rx[0] > self._startup_rx[0] and rx[1] > self._startup_rx[1]
+    self._startup_rx = rx
+    self._startup_time = sample_time
+    self._startup_uptime = ps.uptime
+    self._seen_gm = not elm
+    self._parked_in_elm |= elm and parked
 
   def _reset(self):
     self._configuration = None
@@ -65,10 +119,13 @@ class LateralPandaHealth:
     self._quiet_snapshot = None
     self._qualified = False
 
-  def check(self, CP, pandas, sample_time: float, fresh: bool) -> bool:
+  def check(self, CP, pandas, sample_time: float, fresh: bool, *, parked: bool = False) -> bool:
     if not fresh or not math.isfinite(sample_time) or sample_time <= 0 or not pandas:
+      if self._startup_can2_loss is not None:
+        self._startup_can2_loss = 0
       self._reset()
       return False
+    self._observe_startup(pandas, sample_time, parked)
     if any(not _integrity_clear(ps) for ps in pandas):
       self._reset()
       return False
@@ -85,18 +142,17 @@ class LateralPandaHealth:
       self._reset()
       return False
     ps = pandas[0]
-    if (ps.pandaType != log.PandaState.PandaType.tres or ps.safetyParam != GM_AOL_PARAM or
-        len(ps.faults) != 1 or ps.faults[0] != log.PandaState.FaultType.interruptRateCan2 or
-        ps.faultStatus != log.PandaState.FaultStatus.faultTemp or
-        ps.harnessStatus not in (log.PandaState.HarnessStatus.normal, log.PandaState.HarnessStatus.flipped) or
-        ps.safetyRxInvalid or ps.rxBufferOverflow or ps.txBufferOverflow or ps.spiErrorCount):
+    if ps.safetyParam != GM_AOL_PARAM or not _diagnostic_fault_only(ps):
       self._reset()
       return False
 
     diagnostic = ps.canState1
+    can2_loss = (self._startup_can2_loss or 0) if self._parked_in_elm else 0
+    can0_loss = int(not can2_loss and ps.canState0.totalErrorCnt == ps.canState0.totalRxLostCnt == 1)
     if (diagnostic.busOff or diagnostic.totalRxCnt or diagnostic.totalFwdCnt or
         any(getattr(diagnostic, field) != 0 for field in IRQ_FIELDS) or
-        not _driving_bus_clean(ps.canState0, allow_startup_rx_loss=True) or not _driving_bus_clean(ps.canState2)):
+        not _driving_bus_clean(ps.canState0, total_errors=can0_loss, rx_lost=can0_loss) or
+        not _driving_bus_clean(ps.canState2, rx_lost=can2_loss)):
       self._reset()
       return False
 
@@ -108,7 +164,8 @@ class LateralPandaHealth:
     # loss, including 0 -> 1, must immediately withdraw any prior qualification.
     snapshot = (tuple(getattr(diagnostic, field) for field in QUIET_FIELDS) +
                 tuple(getattr(bus, field) for bus in (ps.canState0, ps.canState2) for field in ERROR_COUNTERS))
-    if (configuration != self._configuration or self._last_sample is None or
+    stalled = can2_loss and not self._buses_progressing
+    if (stalled or configuration != self._configuration or self._last_sample is None or
         sample_time < self._last_sample or sample_time - self._last_sample > MAX_SAMPLE_GAP or
         ps.uptime < self._last_uptime or snapshot != self._quiet_snapshot):
       self._reset()

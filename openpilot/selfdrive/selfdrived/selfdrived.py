@@ -544,7 +544,8 @@ class SelfdriveD:
     self._new_aol_fault_warnings = []
     now = self.sm.logMonoTime['modelV2'] * 1e-9 if REPLAY else time.monotonic()
     pandas = self.sm['pandaStates']
-    fresh = (self.car_state_valid and 0 <= now - self.car_state_mono_time <= .15 and self.sm.all_checks())
+    car_state_fresh = self.car_state_valid and 0 <= now - self.car_state_mono_time <= .15
+    fresh = car_state_fresh and self.sm.all_checks()
     for service, max_age in (('modelV2', .25), ('driverMonitoringState', .3), ('pandaStates', .3),
                              ('extrinsicsCalibration', .8), ('deviceMotion', .25), ('vehicleParameters', .3),
                              ('deviceState', 1.5)):
@@ -558,7 +559,9 @@ class SelfdriveD:
     panda_time = self.sm.logMonoTime['pandaStates'] * 1e-9
     panda_fresh = (self.sm.valid['pandaStates'] and 0 <= now - panda_time <= .3 and
                    (REPLAY or 0 <= now - self.sm.recv_time['pandaStates'] <= .3))
-    panda_healthy = self.lateral_panda_health.check(self.CP, pandas, panda_time, panda_fresh)
+    parked = (car_state_fresh and CS.canValid and not CS.canTimeout and CS.standstill and
+              CS.gearShifter == car.CarState.GearShifter.park)
+    panda_healthy = self.lateral_panda_health.check(self.CP, pandas, panda_time, panda_fresh, parked=parked)
     dm = self.sm['driverMonitoringState']
     paused = CS.brakePressed or CS.regenBraking or CS.parkingBrake or CS.gearShifter != car.CarState.GearShifter.drive
     ready = (self.initialized and fresh and CS.canValid and not CS.canTimeout and
