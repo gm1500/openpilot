@@ -50,6 +50,7 @@ struct MapCruiseState @0xaedffd8f31e7b55d {
   previewSpeed @7 :Float32; # valid upcoming posted/advisory speed, m/s, before control debounce
   previewValid @8 :Bool;
   previewAdvisory @9 :Bool;
+  driverSpeedOverride @10 :Bool; # driver adjusted SET for the current map limit
   enum State {
     off @0;
     armed @1;

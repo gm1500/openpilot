@@ -143,7 +143,7 @@ class TestSLCFallback(unittest.TestCase):
     self.tick(150)
     self.assertEqual(self.helper.v_cruise_kph, 99)
 
-  def test_manual_e2e_caps_map_even_when_slc_is_disabled_without_raising_lower_set(self):
+  def test_manual_e2e_map_cap_yields_to_driver_buttons_with_slc_disabled(self):
     self.toggle = False
     self.limit = 60
     self.manual = True
@@ -156,11 +156,53 @@ class TestSLCFallback(unittest.TestCase):
     self.assertEqual(self.helper.v_cruise_cluster_kph, 60)
     self.tick(button=ButtonType.accelCruise, pressed=True)
     self.tick(button=ButtonType.accelCruise)
-    self.assertEqual(self.helper.v_cruise_kph, 60)
+    self.tick(110)
+    self.assertEqual(self.helper.v_cruise_kph, 61)
+    self.assertEqual(self.helper.v_cruise_cluster_kph, 61)
     self.tick(button=ButtonType.decelCruise, pressed=True)
     self.tick(button=ButtonType.decelCruise)
     self.tick(110)
-    self.assertEqual(self.helper.v_cruise_kph, 59)
+    self.assertEqual(self.helper.v_cruise_kph, 60)
+
+  def test_held_plus_and_gas_set_override_across_mode_and_limit_changes(self):
+    self.limit = 110
+    self.tick()
+    self.tick(button=ButtonType.accelCruise, pressed=True)
+    self.tick(50)
+    self.tick(button=ButtonType.accelCruise)
+    self.assertEqual(self.helper.v_cruise_kph, 115)
+    self.manual = True
+    self.tick()
+    self.assertEqual(self.helper.v_cruise_kph, 115)
+    self.cs.gasPressed = True
+    self.cs.vEgo = 121 / 3.6
+    self.tick(button=ButtonType.decelCruise, pressed=True)
+    self.tick(button=ButtonType.decelCruise)
+    self.cs.gasPressed = False
+    self.limit = None
+    self.tick(150)
+    self.limit = 110
+    self.tick(210)
+    self.assertEqual(self.helper.v_cruise_kph, 121)
+    self.assertEqual(self.helper.map_cruise.target_kph, 110)
+    self.limit = 100
+    self.tick()
+    self.assertEqual(self.helper.v_cruise_kph, 100)
+
+  def test_explicit_resume_policy_keeps_manual_ceiling_through_new_limit(self):
+    self.settings = SLCSettings(resume_policy=1)
+    self.manual = True
+    self.limit = 110
+    self.tick()
+    self.tick(button=ButtonType.accelCruise, pressed=True)
+    self.tick(button=ButtonType.accelCruise)
+    self.limit = 100
+    self.tick(110)
+    self.assertEqual(self.helper.v_cruise_kph, 111)
+    self.tick(button=ButtonType.setCruise, pressed=True)
+    self.tick(button=ButtonType.setCruise)
+    self.assertEqual(self.helper.v_cruise_kph, 100)
+    self.assertFalse(self.helper.map_cruise.driver_speed_override)
 
   def test_manual_e2e_applies_slc_offset_as_cap_and_retains_it_through_gap(self):
     self.toggle = False
@@ -178,7 +220,7 @@ class TestSLCFallback(unittest.TestCase):
     self.tick()
     self.assertEqual(self.helper.v_cruise_kph, 55)
 
-  def test_manual_e2e_fresh_set_caps_higher_driving_speed_at_mapped_limit(self):
+  def test_manual_e2e_fresh_engagement_caps_speed_and_engaged_set_accepts_driving_speed(self):
     self.manual = True
     self.cs.vEgo = 80 / 3.6
     self.limit = 60
@@ -188,7 +230,27 @@ class TestSLCFallback(unittest.TestCase):
     self.cs.gasPressed = True
     self.tick(button=ButtonType.setCruise, pressed=True)
     self.tick(button=ButtonType.setCruise)
-    self.assertEqual(self.helper.v_cruise_kph, 60)
+    self.cs.gasPressed = False
+    self.tick(110)
+    self.assertEqual(self.helper.v_cruise_kph, 80)
+
+  def test_dedicated_set_without_slc_uses_ego_only_for_an_engaged_press(self):
+    self.toggle = False
+    self.enabled = False
+    self.cs.vEgo = 70 / 3.6
+    self.tick(button=ButtonType.setCruise, pressed=True)
+    self.helper.initialize_v_cruise(self.cs, 90)
+    self.enabled = True
+    self.tick(button=ButtonType.setCruise)
+    self.assertEqual(self.helper.v_cruise_kph, 90)
+    for ego, expected in ((75, 75), (155, 145), (5, 8)):
+      with self.subTest(ego=ego):
+        self.cs.vEgo = ego / 3.6
+        self.tick(button=ButtonType.setCruise, pressed=True)
+        self.tick(button=ButtonType.setCruise)
+        self.tick()
+        self.assertEqual(self.helper.v_cruise_kph, expected)
+        self.assertEqual(self.helper.v_cruise_cluster_kph, expected)
 
   def test_disabling_manual_e2e_leaves_manual_set_control_when_slc_is_off(self):
     self.toggle = False

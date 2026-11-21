@@ -106,6 +106,7 @@ class MapCruise:
     self.metric = True
     self._previous_metric = self.metric
     self._manual_override = False
+    self.driver_speed_override = False
     self.current_kph = 255.
     self.preview_active = False
     self.preview_speed_ms: float | None = None
@@ -149,6 +150,7 @@ class MapCruise:
     if enabled and not self.enabled:
       self.tracking = True
       self._manual_override = False
+      self.driver_speed_override = False
     self.enabled = enabled
     actual_speed = speed_ms
     speed_ms = self._anticipate(speed_ms, gps_time, now, preview, v_ego)
@@ -187,6 +189,7 @@ class MapCruise:
           self.tracking = permitted
           if permitted:
             self._manual_override = False
+            self.driver_speed_override = False
     self.automatic_e2e = self.enabled and automatic_e2e
     if not self.automatic_e2e:
       self.e2e_fallback = self.fallback_set_pending = False
@@ -200,9 +203,9 @@ class MapCruise:
         self.request_fallback()
     else:
       self._missing_since = None
-      if self.e2e_fallback and previous_target is None and self.target_kph is not None:
-        # A real recovery resumes SLC even if it is the same pre-outage limit.
-        # Buttons processed after this update can still override it explicitly.
+      if self.e2e_fallback and previous_target is None and self.target_kph is not None and not self.driver_speed_override:
+        # A recovery resumes SLC unless the driver overrode this mapped limit.
+        # An adjustment made with no known limit uses the configured resume policy.
         self.tracking = (self.settings.accepts(self.target_kph, self.current_kph) and
                          (not self._manual_override or self.settings.resume_policy == 0))
 
@@ -222,14 +225,17 @@ class MapCruise:
     if self.enabled:
       self.tracking = True
       self._manual_override = False
+      self.driver_speed_override = False
       self._previous_settings, self._previous_metric = self.settings, self.metric
       if self._candidate is not None:
         self.target_kph = self.settings.target(self._candidate, self.metric)
 
-  def pause(self):
+  def pause(self, *, driver_adjusted_speed: bool = False):
     """A manual selection wins over this limit's automatic application."""
     self.tracking = False
     self._manual_override = True
+    if driver_adjusted_speed and self.target_kph is not None:
+      self.driver_speed_override = True
     self.fallback_set_pending = False
 
   def state(self, engaged: bool) -> str:

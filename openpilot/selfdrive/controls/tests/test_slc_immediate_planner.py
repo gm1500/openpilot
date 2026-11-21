@@ -112,6 +112,22 @@ class TestImmediateSLCPlanner(unittest.TestCase):
     self.assertFalse(self.h.tick().slcE2eFallback)
     self.assertEqual(self.cruise.v_cruise_kph, 60.)
 
+    # Read a real RES/+ through card and consume its published override in E2E.
+    card.manual_e2e = sm['selfdriveState'].experimentalMode = True
+    with patch('openpilot.selfdrive.car.card.messaging.drain_sock_raw', return_value=[]), \
+         patch('openpilot.selfdrive.car.card.time.monotonic', return_value=self.h.now):
+      for pressed in (True, False):
+        self.cs.buttonEvents = [car.CarState.ButtonEvent(type=ButtonType.accelCruise, pressed=pressed)]
+        cs, radar = card.state_update()
+        card.state_publish(cs, radar)
+    sm['mapCruiseState'] = card.pm.messages['mapCruiseState']
+    self.assertTrue(sm['mapCruiseState'].driverSpeedOverride)
+    self.assertAlmostEqual(sm['mapCruiseState'].targetSpeed * 3.6, 60., places=4)
+    self.assertEqual(cs.vCruise, 61.)
+    with patch('openpilot.selfdrive.controls.lib.longitudinal_planner.get_cruise_accel', wraps=get_cruise_accel) as calculate:
+      self.h.tick()
+    self.assertAlmostEqual(calculate.call_args.args[0], 61. / 3.6)
+
   def test_first_recovery_frame_and_higher_limit_use_actual_target_without_ceiling(self):
     for target in (60., 80., 60.):
       self.cruise_step(target)

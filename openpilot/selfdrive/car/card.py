@@ -236,7 +236,7 @@ class Car:
     preview_speed, preview_advisory = selector.preview_speed_ms, selector.preview_advisory
     status = (selector.state(self.sm['carControl'].enabled and CS.cruiseState.available),
               selector.target_kph, selector.e2e_fallback, selector.automatic_e2e, CS.vCruise,
-              adjusting, preview_speed, preview_advisory)
+              adjusting, preview_speed, preview_advisory, selector.driver_speed_override)
     if self.sm.frame % 20 == 0 or status != self._last_map_status:
       self._last_map_status = status
       map_msg = messaging.new_message('mapCruiseState', valid=CS.canValid)
@@ -249,6 +249,7 @@ class Car:
       map_msg.mapCruiseState.previewValid = preview_speed is not None
       map_msg.mapCruiseState.previewSpeed = preview_speed or 0.
       map_msg.mapCruiseState.previewAdvisory = preview_advisory
+      map_msg.mapCruiseState.driverSpeedOverride = selector.driver_speed_override
       self.pm.send('mapCruiseState', map_msg)
 
     if RD is not None:

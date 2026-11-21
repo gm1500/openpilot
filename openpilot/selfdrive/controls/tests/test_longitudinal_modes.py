@@ -23,7 +23,7 @@ class Inputs(dict):
     self.services = services
     self.valid = dict.fromkeys(services, True)
     self.recv_time = dict.fromkeys(services, now)
-    self.logMonoTime = dict.fromkeys(services, int(now * 1e9))
+    self.logMonoTime = dict.fromkeys(services, int(now * 1e9) - 100)  # published just before receipt
 
   def all_checks(self):
     return all(v for s, v in self.valid.items() if s != 'mapCruiseState')
@@ -103,12 +103,15 @@ class TestLongitudinalModes(unittest.TestCase):
     self.sm['mapCruiseState'].e2eFallback = True
     self.assertAlmostEqual(self.tick().aTarget, -.5)  # automatic assist survives OFF
 
-  def test_manual_e2e_map_maximum_never_raises_lower_set(self):
+  def test_e2e_map_maximum_yields_to_driver_ceiling(self):
     self.sm['selfdriveState'].experimentalMode = True
     self.sm['mapCruiseState'].targetSpeed = 65. / 3.6  # 60 posted plus configured offset
-    for selected, expected in ((105., 65.), (50., 50.)):
-      with self.subTest(selected=selected):
-        self.sm['carState'].vCruise = selected
+    for manual, selected, car_set, expected in ((False, 105., 105., 65.), (False, 50., 50., 50.), (True, 105., 105., 105.),
+                                               (True, 50., 50., 50.), (True, 80., 105., 80.), (True, 105., 80., 80.)):
+      with self.subTest(manual=manual, selected=selected, car_set=car_set):
+        self.sm['mapCruiseState'].driverSpeedOverride = manual
+        self.sm['mapCruiseState'].setSpeed = selected / 3.6
+        self.sm['carState'].vCruise = car_set
         with patch('openpilot.selfdrive.controls.lib.longitudinal_planner.get_cruise_accel', wraps=get_cruise_accel) as calculate:
           self.tick()
         self.assertAlmostEqual(calculate.call_args.args[0], expected / 3.6, places=5)

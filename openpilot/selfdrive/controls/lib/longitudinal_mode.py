@@ -18,11 +18,13 @@ def full_e2e_requested(sm, now: float, replay: bool = False) -> bool:
 
 
 def e2e_map_speed_cap(sm, now: float, replay: bool = False) -> float | None:
-  """Use card's validated, offset-adjusted map target, including a lower preview."""
+  """Apply the validated map target until the driver selects a different SET."""
   if not _fresh(sm, 'mapCruiseState', now, MAP_MODE_MAX_AGE, replay):
     return None
   state = sm['mapCruiseState']
-  target = state.targetSpeed
+  # Either publication may arrive first. The selected SET also bounds a stale,
+  # higher carState packet when the driver lowers the ceiling.
+  target = state.setSpeed if state.driverSpeedOverride else state.targetSpeed
   if str(state.state) == 'unsupported' or not math.isfinite(target) or not 8 <= round(target * 3.6, 3) <= 145:
     return None
   return target
