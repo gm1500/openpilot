@@ -15,9 +15,10 @@ from opendbc.car.structs import car
 EventName = log.OnroadEvent.EventName
 IGNORED_SAFETY_MODES = (car.CarParams.SafetyModel.silent, car.CarParams.SafetyModel.noOutput)
 
+# Cancel changes cruise engagement only; AOL follows its own saved intent.
 # These events only prevent/disable cruise. All other entry, user-disable and
 # system-fault gates remain in effect for lateral-only operation.
-LONGITUDINAL_EVENTS = frozenset((EventName.pedalPressed, EventName.preEnableStandstill,
+LONGITUDINAL_EVENTS = frozenset((EventName.buttonCancel, EventName.pedalPressed, EventName.preEnableStandstill,
                                 EventName.pcmDisable, EventName.resumeBlocked, EventName.belowEngageSpeed))
 BLOCKING_TYPES = (ET.NO_ENTRY, ET.USER_DISABLE, ET.SOFT_DISABLE, ET.IMMEDIATE_DISABLE)
 
@@ -61,7 +62,7 @@ class AlwaysOnLateralState:
   _rearm_until: float = 0.
 
   def update(self, *, enabled: bool, onroad: bool, supported: bool, ready: bool,
-             firmware_allowed: bool, firmware_suspended: bool, cancel: bool, rearm: bool, now: float,
+             firmware_allowed: bool, firmware_suspended: bool, rearm: bool, now: float,
              paused: bool = False, speed_available: bool = True):
     previous_active = self.active
     self.supported = supported
@@ -79,7 +80,7 @@ class AlwaysOnLateralState:
       if (fresh_toggle or rearm) and math.isfinite(now):
         self.suspended = False
         self._rearm_until = now + .5
-      if cancel or (self._armed and (not ready or not supported)):
+      if self._armed and (not ready or not supported):
         self.suspended = True
       if firmware_suspended and now >= self._rearm_until:
         self.suspended = True

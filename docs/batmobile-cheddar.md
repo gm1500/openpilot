@@ -96,14 +96,15 @@ The Sierra/Silverado AOL steering floor is 10 km/h. Below it, AOL withdraws its
 request and the hands show grey with a bright outline unless paused or suspended,
 which retains the orange indication. Crossing back above the
 floor can resume AOL without a toggle, provided the other readiness checks pass
-and Cancel or a fault has not suspended it. This floor is separate from the
+and a fault has not suspended it. This floor is separate from the
 existing `minSteerSpeed = -1` override, which continues to hide the stock
 low-speed steering warning. Normal cruise steering behavior is unchanged.
 
 Holding the brake, regen braking, parking brake, and any gear other than Drive
 temporarily pause AOL. Brake release or return to Drive can resume it once the
-readiness checks pass. Cancel suspends it until SET/RESUME or a saved OFF-to-ON
-toggle. Fault suspension also requires explicit rearming. AOL-only steering
+readiness checks pass. Cancel only cancels cruise and leaves AOL in its current
+state. Fault suspension requires SET/RESUME or a saved OFF-to-ON toggle; Cancel
+cannot rearm it. AOL-only steering
 cannot initiate automatic lane changes. Normal lane-change assistance remains
 available with cruise engaged, and engaging cruise with an already-held signal
 still requires a fresh signal activation before a maneuver can begin.

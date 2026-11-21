@@ -207,7 +207,7 @@ def test_health_requalification_does_not_rearm_aol_after_new_fault(inputs):
   qualify(health, cp, ps)
   state = AlwaysOnLateralState()
   args = {'enabled': True, 'onroad': True, 'supported': True, 'firmware_allowed': True, 'firmware_suspended': False,
-          'cancel': False, 'rearm': False}
+          'rearm': False}
   state.update(**args, ready=health.check(cp, [ps], 102.1, True), now=102.1)
   assert state.active
   ps.canState1.totalErrorCnt += 1

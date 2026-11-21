@@ -19,7 +19,7 @@ EventName = log.OnroadEvent.EventName
 
 def step(state, **kwargs):
   inputs = {'enabled': True, 'onroad': True, 'supported': True, 'ready': True, 'firmware_allowed': True,
-            'firmware_suspended': False, 'cancel': False, 'rearm': False, 'now': 10.}
+            'firmware_suspended': False, 'rearm': False, 'now': 10.}
   state.update(**(inputs | kwargs))
   return state
 
@@ -40,9 +40,9 @@ def test_each_startup_gate_prevents_steering(gate):
   assert not state.active
 
 
-def test_cancel_latches_across_readiness_changes_until_explicit_rearm():
+def test_fault_latches_across_readiness_changes_until_explicit_rearm():
   state = step(AlwaysOnLateralState())
-  step(state, cancel=True)
+  step(state, ready=False)
   assert state.suspended and not state.active and not state.requested and state.just_stopped
   step(state, ready=False)
   step(state, now=20.)
@@ -53,11 +53,6 @@ def test_cancel_latches_across_readiness_changes_until_explicit_rearm():
   assert state.active and not state.suspended
 
 
-def test_cancel_wins_over_simultaneous_rearm():
-  state = step(AlwaysOnLateralState(), rearm=True, cancel=True)
-  assert state.suspended and not state.requested
-
-
 def test_brake_or_non_drive_pauses_without_cancelling_saved_intent():
   state = step(AlwaysOnLateralState())
   step(state, paused=True)
@@ -66,13 +61,6 @@ def test_brake_or_non_drive_pauses_without_cancelling_saved_intent():
   assert not state.suspended
   step(state, now=21.)
   assert state.active
-
-
-def test_cancel_during_brake_pause_does_not_resume_on_release():
-  state = step(AlwaysOnLateralState())
-  step(state, paused=True, cancel=True)
-  step(state, paused=False, now=20.)
-  assert state.suspended and not state.active
 
 
 def test_fault_during_temporary_pause_remains_latched_after_release():
@@ -109,7 +97,7 @@ def test_fault_loss_does_not_silently_resume(gate):
   assert state.active
 
 
-def test_firmware_cancel_or_fault_requires_driver_action():
+def test_firmware_fault_requires_driver_action():
   state = step(AlwaysOnLateralState())
   step(state, firmware_suspended=True, firmware_allowed=False, now=11.)
   assert state.suspended and not state.requested
@@ -129,7 +117,7 @@ def test_invalid_clock_never_requests_permission():
   assert not state.requested and not state.active
 
 
-@pytest.mark.parametrize('event', [EventName.pedalPressed, EventName.preEnableStandstill, EventName.pcmDisable,
+@pytest.mark.parametrize('event', [EventName.buttonCancel, EventName.pedalPressed, EventName.preEnableStandstill, EventName.pcmDisable,
                                    EventName.resumeBlocked, EventName.belowEngageSpeed])
 def test_longitudinal_disengagement_does_not_block_lateral(event):
   events = Events()
@@ -137,7 +125,7 @@ def test_longitudinal_disengagement_does_not_block_lateral(event):
   assert lateral_events_clear(events)
 
 
-@pytest.mark.parametrize('event', [EventName.buttonCancel, EventName.wrongGear, EventName.reverseGear,
+@pytest.mark.parametrize('event', [EventName.wrongGear, EventName.reverseGear,
                                    EventName.parkBrake, EventName.steerUnavailable, EventName.calibrationIncomplete,
                                    EventName.commIssue, EventName.controlsMismatch, EventName.tooDistracted,
                                    EventName.doorOpen, EventName.seatbeltNotLatched, EventName.wrongCarMode])
@@ -353,12 +341,11 @@ def test_selfdrived_speed_floor_is_temporary_and_recovers_without_rearming(monke
   assert sd.CP.minSteerSpeed == -1
 
 
-@pytest.mark.parametrize('block', ['cancel', 'fault'])
-def test_low_speed_does_not_clear_cancel_or_fault_suspension(block):
+def test_low_speed_does_not_clear_fault_suspension():
   state = step(AlwaysOnLateralState())
   step(state, speed_available=False)
   assert not state.requested and not state.suspended
-  step(state, speed_available=False, **({'cancel': True} if block == 'cancel' else {'ready': False}))
+  step(state, speed_available=False, ready=False)
   assert state.suspended
   step(state, speed_available=True, now=20.)
   assert not state.requested and not state.active and state.suspended
@@ -403,7 +390,7 @@ def driver_stop(CS, action):
 
 
 @pytest.mark.parametrize('action', ['cancel', 'cancel_release', 'brake', 'regen', 'parking'])
-def test_aol_only_driver_stop_is_quiet_and_retains_pause_or_cancel_semantics(monkeypatch, action):
+def test_aol_only_cancel_keeps_steering_and_brake_pauses_are_quiet(monkeypatch, action):
   sd, CS = alert_selfdrived(monkeypatch)
   alert_step(sd, CS)
   assert sd.always_on_lateral.active and not sd.enabled
@@ -411,8 +398,8 @@ def test_aol_only_driver_stop_is_quiet_and_retains_pause_or_cancel_semantics(mon
   for _ in range(25):
     alert = alert_step(sd, CS, event)
     assert alert.audible_alert == log.SelfdriveState.AudibleAlert.none
-    assert not sd.always_on_lateral.active
-    assert sd.always_on_lateral.suspended is action.startswith('cancel')
+    assert sd.always_on_lateral.active is action.startswith('cancel')
+    assert not sd.always_on_lateral.suspended
   assert sd.always_on_lateral_enabled
   assert f'{EVENT_NAME[event]}/{ET.USER_DISABLE}' not in sd.AM.alerts
   assert EVENTS[event][ET.USER_DISABLE].audible_alert == log.SelfdriveState.AudibleAlert.disengage
@@ -420,7 +407,7 @@ def test_aol_only_driver_stop_is_quiet_and_retains_pause_or_cancel_semantics(mon
   CS.buttonEvents = []
   CS.brakePressed = CS.regenBraking = CS.parkingBrake = False
   assert alert_step(sd, CS).audible_alert == log.SelfdriveState.AudibleAlert.none
-  assert sd.always_on_lateral.active is (not action.startswith('cancel'))
+  assert sd.always_on_lateral.active
 
 
 @pytest.mark.parametrize('action', ['cancel', 'brake', 'regen', 'parking'])
@@ -431,8 +418,77 @@ def test_normal_cruise_driver_disengagement_still_chimes(monkeypatch, action, ao
   event = driver_stop(CS, action)
   alert = alert_step(sd, CS, event)
   assert not sd.enabled
+  assert sd.always_on_lateral.active is (aol and action == 'cancel')
+  assert not sd.always_on_lateral.suspended
   assert alert.alert_type == f'{EVENT_NAME[event]}/{ET.USER_DISABLE}'
   assert alert.audible_alert == log.SelfdriveState.AudibleAlert.disengage
+
+
+@pytest.mark.parametrize('condition', ['active', 'off', 'brake', 'regen', 'parking', 'reverse', 'low_speed', 'fault'])
+def test_cancel_press_release_and_repeats_preserve_aol_state(monkeypatch, condition):
+  sd, CS = alert_selfdrived(monkeypatch, aol=condition != 'off')
+  alert_step(sd, CS)
+  if condition in ('brake', 'regen', 'parking'):
+    driver_stop(CS, condition)
+  elif condition == 'reverse':
+    CS.gearShifter = 'reverse'
+  elif condition == 'low_speed':
+    CS.vEgo = 9.99 * CV.KPH_TO_MS
+  elif condition == 'fault':
+    CS.steerFaultTemporary = True
+  alert_step(sd, CS)
+  alert_step(sd, CS)  # settle the one-frame just_stopped transition before Cancel
+  before = vars(sd.always_on_lateral).copy()
+  for action in ('cancel', 'cancel_release') * 3:
+    event = driver_stop(CS, action)
+    assert alert_step(sd, CS, event).audible_alert == log.SelfdriveState.AudibleAlert.none
+    assert vars(sd.always_on_lateral) == before
+    assert sd.always_on_lateral_enabled is (condition != 'off')
+    assert not sd.enabled
+
+  # Cancel neither latches a temporary pause nor rearms a genuine fault.
+  CS.buttonEvents = []
+  CS.brakePressed = CS.regenBraking = CS.parkingBrake = CS.steerFaultTemporary = False
+  CS.gearShifter, CS.vEgo = 'drive', 20.
+  alert_step(sd, CS)
+  assert sd.always_on_lateral.active is (condition not in ('off', 'fault'))
+  assert sd.always_on_lateral.suspended is (condition == 'fault')
+
+
+@pytest.mark.parametrize('fault_cleared', [False, True])
+def test_aol_off_on_toggle_rearms_only_when_ready(monkeypatch, fault_cleared):
+  sd, CS = alert_selfdrived(monkeypatch)
+  alert_step(sd, CS)
+  CS.steerFaultTemporary = True
+  alert_step(sd, CS)
+  assert sd.always_on_lateral.suspended
+  sd.always_on_lateral_enabled = False
+  alert_step(sd, CS)
+  assert not sd.always_on_lateral.active
+  CS.steerFaultTemporary = not fault_cleared
+  sd.always_on_lateral_enabled = True
+  alert_step(sd, CS)
+  assert sd.always_on_lateral.active is fault_cleared
+  assert sd.always_on_lateral.requested is fault_cleared
+  assert not sd.enabled
+
+
+def test_set_release_into_cancel_cannot_rearm_existing_aol_fault(monkeypatch):
+  sd, CS = alert_selfdrived(monkeypatch)
+  alert_step(sd, CS)
+  CS.steerFaultTemporary = True
+  alert_step(sd, CS)
+  assert sd.always_on_lateral.suspended
+  CS.steerFaultTemporary = False
+  CS.buttonEnable = True
+  CS.buttonEvents = [{'type': 'decelCruise', 'pressed': False}, {'type': 'cancel', 'pressed': True}]
+  alert_step(sd, CS, EventName.buttonEnable, EventName.buttonCancel)
+  assert sd.always_on_lateral.suspended and not sd.always_on_lateral.requested
+  assert not sd.enabled
+  # A subsequent deliberate SET/RESUME still rearms once the fault is clear.
+  CS.buttonEvents = [{'type': 'decelCruise', 'pressed': False}]
+  alert_step(sd, CS, EventName.buttonEnable)
+  assert sd.always_on_lateral.active and not sd.always_on_lateral.suspended
 
 
 @pytest.mark.parametrize('action', ['cancel', 'brake'])
@@ -540,10 +596,13 @@ def test_explicit_aol_release_clears_only_its_retained_fault_warning(monkeypatch
 
 
 @pytest.mark.parametrize('event', [EventName.steerSaturated, EventName.laneChangeBlocked])
-def test_aol_cancel_does_not_retain_nonblocking_warning_events(monkeypatch, event):
+def test_aol_cancel_keeps_normal_nonblocking_warning_events(monkeypatch, event):
   sd, CS = alert_selfdrived(monkeypatch)
   alert_step(sd, CS)
   cancel = driver_stop(CS, 'cancel')
   for _ in range(6):
-    assert alert_step(sd, CS, cancel, event).audible_alert == log.SelfdriveState.AudibleAlert.none
+    alert = alert_step(sd, CS, cancel, event)
+    assert sd.always_on_lateral.active
+    assert alert.alert_type == f'{EVENT_NAME[event]}/{ET.WARNING}'
+    assert alert.audible_alert == EVENTS[event][ET.WARNING].audible_alert
     assert not sd._retained_aol_fault_warnings

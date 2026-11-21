@@ -30,7 +30,8 @@ DESCRIPTIONS = {
                               "Off retains automatic no-map and braking assists. Tap the top-right E2E button to switch modes."),
   "AlwaysOnLateral": tr_noop("Enable AOL steering assistance on supported vehicles once the system is ready. " +
                              "Holding the brake or selecting Reverse pauses AOL until driving is ready again. " +
-                             "Cancel suspends AOL until SET, Resume, or switching AOL off and on. " +
+                             "Cancel only cancels cruise and leaves AOL unchanged. " +
+                             "After a fault clears, use SET, Resume, or switch AOL off and on to re-enable it. " +
                              "With cruise disengaged, AOL follows the lane without initiating lane changes. " +
                              "Hold the top-right E2E button to switch AOL on or off."),
   'RecordFront': tr_noop("Upload data from the cabin camera and help improve the driver monitoring algorithm."),

@@ -568,10 +568,12 @@ class SelfdriveD:
              panda_healthy and
              math.isfinite(self.sm['modelV2'].action.desiredCurvature) and lateral_events_clear(self.events, paused=paused))
     cancel = self.car_state_received and any(be.type == ButtonType.cancel for be in CS.buttonEvents)
-    rearm = self.car_state_received and CS.buttonEnable
+    # SET->CANCEL may also generate a SET release. Cancel must not rearm an
+    # existing AOL fault latch through that release edge.
+    rearm = self.car_state_received and CS.buttonEnable and not cancel
     self.always_on_lateral.update(enabled=self.always_on_lateral_enabled, onroad=onroad, supported=supported,
                                  ready=ready, firmware_allowed=firmware_allowed, firmware_suspended=firmware_suspended,
-                                 cancel=cancel, rearm=rearm, now=now, paused=paused,
+                                 rearm=rearm, now=now, paused=paused,
                                  speed_available=lateral_only_speed_available(self.CP, CS))
     if not self.always_on_lateral.suspended:
       for key in self._retained_aol_fault_warnings:

@@ -50,11 +50,12 @@ current map target including its configured offset, or a lower manual SET.
 | OFF | Original icon without hands, dark background | AOL disabled; ordinary cruise-linked steering remains available |
 | READY | White hands, dark background | Enabled, but not currently steering |
 | ON | Green hands, dark background | Fresh controller acknowledgment and actual lateral actuation |
-| PAUSED | Solid orange hands, dark background | Brake held, Reverse/other non-Drive gear, Cancel or fault suspension |
+| PAUSED | Solid orange hands, dark background | Brake held, Reverse/other non-Drive gear or fault suspension |
 | Waiting / unavailable | Grey hands with a bright light-grey outline, dark background | Below steering speed, waiting for fresh state, or unsupported safety configuration |
 
 Brake, regen, parking brake and non-Drive gear pause AOL temporarily. Cancel
-requires SET/RESUME or an OFF-to-ON toggle to re-enable. The wheel/experimental symbol
+only cancels cruise; AOL stays in its current state. A fault suspension requires
+SET/RESUME or an OFF-to-ON toggle to re-enable. The wheel/experimental symbol
 remains independent of the AOL status. The same button is included in both HUD
 layouts, and sleep/offroad transitions cancel pending touches.
 AOL-only steering does not initiate automatic lane changes.

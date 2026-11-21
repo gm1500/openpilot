@@ -1,5 +1,34 @@
 # Batmobile validation
 
+## Cancel preserves AOL state — 2026-11-21
+
+Cancel now disables cruise only. The host excludes `buttonCancel` from AOL
+readiness gates and GM safety preserves its independent lateral permission and
+fault latch. AOL remains active, off, temporarily paused or fault-suspended as
+appropriate. Pressing, holding and releasing Cancel cannot change that intent.
+A SET-release edge emitted while switching to Cancel cannot rearm a fault on
+either side. A subsequent SET/RESUME or AOL OFF-to-ON still rearms when ready.
+
+Brake/regen/gear pauses, the 10 km/h floor, driver monitoring and fault guards
+remain in effect. Cancel during a temporary pause does not prevent recovery
+when the pause ends. Normal cruise cancellation retains its disengagement
+sound; AOL-only Cancel remains quiet and other warnings remain audible.
+
+Host, cruise state-machine, alert, lane-change, speed/health and indicator
+regressions passed 342 tests and 21 subtests. Native GM safety passed 297 tests
+and 601 subtests, with 145 expected abstract/unsupported skips. The safety
+matrix includes cruise-to-AOL handoff without another heartbeat, independent
+steering permission, denied gas/brake commands after Cancel, existing fault
+latches and SET-to-Cancel transitions. Ruff and whitespace checks passed.
+
+This update changes GM safety in the opendbc submodule. The existing Panda
+source pin is unchanged because its build imports that safety source. The H7
+firmware built successfully with warnings treated as errors. Updating only
+Python is insufficient: the normal device build/signature-check process must
+install the matching firmware; a prebuilt installation needs a newly built
+matching image. No settings or parameters need initialization.
+No firmware was flashed to the vehicle during development.
+
 ## AOL audio and indicator refinement — 2026-11-20
 
 Cancel and brake/regen/parking-brake pauses during AOL-only steering suppress
