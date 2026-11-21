@@ -26,12 +26,6 @@ def test_preferences_reject_invalid_values():
   assert SLCSettings.read(NS(get=lambda key, **kw: 100)).offset_value == 30
 
 
-@pytest.mark.parametrize('stored,expected', [(None, 105), ('bad', 105), ('90', 90), ('0', 8), ('200', 145)])
-def test_no_map_e2e_ceiling_is_persisted_in_kph_and_bounded(stored, expected):
-  params = NS(get=lambda key, **kw: stored if key == 'SlcE2eMaxSpeedKph' else None)
-  assert SLCSettings.read(params).e2e_ceiling_kph == expected
-
-
 class Drive:
   def __init__(self, settings):
     self.helper = VCruiseHelper(car.CarParams(openpilotLongitudinalControl=True))

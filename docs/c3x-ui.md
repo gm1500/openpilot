@@ -35,8 +35,8 @@ visible but does not flash for a different adjustment; matching includes the
 configured speed offset. A fresh valid limit can
 apply on its first update; preview geometry, range and manual-override rules
 still apply. When no mapped limit is available, the sign shows the automatic end-to-end icon and
-OVERRIDE without a MAXIMUM or km/h label. The configurable initial no-map ceiling
-is 105 km/h by default. Map gaps while engaged retain the previous SET.
+OVERRIDE without a MAXIMUM or km/h label. A fresh engagement uses **Initial Max Speed**
+from Settings → Toggles, or the current speed if higher. Map gaps while engaged retain the previous SET.
 
 The top-right control restores a manual E2E toggle. Tap to switch between Chill
 and E2E; a 0.6-second hold toggles AOL and never also changes E2E. The fill ring

@@ -199,7 +199,7 @@ class MapCruise:
         self._missing_since = now
       if now - self._missing_since >= MAP_MISSING_TIME and not self.e2e_fallback:
         # A missing map may change the planning mode, never the driver's SET.
-        # Only an explicit SET may request the configured no-map ceiling.
+        # An explicit SET can reapply Initial Max Speed during the gap.
         self.request_fallback()
     else:
       self._missing_since = None

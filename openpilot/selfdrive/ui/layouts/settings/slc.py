@@ -46,25 +46,6 @@ class OffsetButtons(MultipleButtonAction):
       self.params.put('SlcOffsetValue', max(-30, min(30, current + (-5 if index == 0 else 5))), block=True)
 
 
-class E2eCeilingButtons(MultipleButtonAction):
-  """Store the automatic no-limit ceiling in km/h in either display system."""
-  def __init__(self, params):
-    self.params = params
-    super().__init__(['-', self.value_label, '+'], button_width=180)
-
-  def value_label(self):
-    kph = SLCSettings.read(self.params).e2e_ceiling_kph
-    return f'{kph:g} km/h' if self.params.get_bool('IsMetric') else f'{round(kph / 1.609344)} mph'
-
-  def is_button_selected(self, index):
-    return index == 1
-
-  def select_button(self, index):
-    if self.enabled and index in (0, 2):
-      kph = SLCSettings.read(self.params).e2e_ceiling_kph
-      self.params.put('SlcE2eMaxSpeedKph', max(8, min(145, kph + (-5 if index == 0 else 5))), block=True)
-
-
 class SLCLayout(Widget):
   def __init__(self):
     super().__init__()
@@ -90,9 +71,6 @@ class SLCLayout(Widget):
     self.items = [
       self.enable,
       self.advance,
-      ListItem('No-map speed ceiling', action_item=E2eCeilingButtons(self.params),
-        description='Initial cruise ceiling when engaging automatic end-to-end control without a valid mapped limit. ' +
-                    'Default 105 km/h; adjust from 8 to 145 km/h. Cruise buttons can adjust the ceiling after engagement.'),
       ListItem('New speed limit', action_item=SettingButtons(self.params, 'SlcChangePolicy', ['Automatic', 'Lower only', 'SET to accept']),
         description='Automatic applies qualified new limits. Lower only never raises the current target automatically. ' +
                     'SET to accept waits for an explicit map SET or re-engagement with SET. Ordinary +/- buttons remain manual.'),

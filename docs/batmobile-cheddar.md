@@ -69,13 +69,12 @@ release the assist. Qualified model stopping intent can also activate the
 retained stop target, with real-lead overlap checks and existing release rules.
 
 When enabled SLC has no usable mapped limit, its request automatically admits
-the native model acceleration and curve-speed result into planning. The initial
-no-map ceiling defaults to **105 km/h**, configurable from **8–145 km/h**.
-A fresh SET without a map selects the higher of current speed and that ceiling,
+the native model acceleration and curve-speed result into planning.
+A fresh SET without a map selects the higher of current speed and **Initial Max Speed** from Settings → Toggles,
 bounded by the normal cruise limits. A map outage while already engaged keeps
 the previous SET, and RESUME retains the previous selection. A later explicit
 SET during a gap waits for the planner's fresh fallback acknowledgment before
-applying its new ceiling; a gap alone cannot request that change.
+applying the same initial speed rule.
 
 The top-right button restores a persistent manual E2E selection. E2E ON admits
 the model action even with a valid mapped speed, capped by the offset-adjusted

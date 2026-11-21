@@ -76,7 +76,7 @@ class SoftwareLayout(Widget):
       self._download_btn,
       self._install_btn,
       self._branch_btn,
-      text_item("Map Data", "© OpenStreetMap contributors",
+      text_item("Map Data", "OpenStreetMap contributors",
                 description="Speed-limit data under the Open Database License (ODbL).\nopenstreetmap.org/copyright"),
       button_item(lambda: tr("Uninstall"), lambda: tr("UNINSTALL"), callback=self._on_uninstall),
     ], line_separator=True, spacing=0)

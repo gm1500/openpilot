@@ -13,6 +13,7 @@ def test_schedule_controls_persist_weekday_and_keep_manual_download_actions(monk
   monkeypatch.setattr(ui.gui_app, 'push_widget', dialogs.append)
   monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*20, 40))
   layout = ui.SLCLayout()
+  assert all(item.title != 'No-map speed ceiling' for item in layout.items)
   assert layout.enable.title == 'Speed Limit Control'
   assert layout.advance.title == 'Advanced speed limit changes'
   assert not layout.advance.action_item.toggle.get_state()
@@ -47,20 +48,3 @@ def test_schedule_controls_persist_weekday_and_keep_manual_download_actions(monk
   assert params.get('OfflineMapRequest')['action'] == 'update'
   assert params.get('OfflineMapRequest')['region'] == 'nation.CA'
   assert params.get('OfflineMapUpdateSchedule') == 1
-
-
-def test_no_map_ceiling_stores_kph_in_both_display_units(tmp_path, monkeypatch):
-  monkeypatch.setattr(ui.gui_app, 'font', lambda *args: rl.Font())
-  params = Params(str(tmp_path/'params'))
-  params.put_bool('IsMetric', True, block=True)
-  buttons = ui.E2eCeilingButtons(params)
-  assert buttons.value_label() == '105 km/h'
-  buttons.select_button(2)
-  assert params.get('SlcE2eMaxSpeedKph') == 110
-  params.put_bool('IsMetric', False, block=True)
-  assert buttons.value_label() == '68 mph'
-  buttons.select_button(0)
-  assert params.get('SlcE2eMaxSpeedKph') == 105
-  params.put('SlcE2eMaxSpeedKph', 145, block=True)
-  buttons.select_button(2)
-  assert params.get('SlcE2eMaxSpeedKph') == 145

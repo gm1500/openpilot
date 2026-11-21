@@ -47,7 +47,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"OfflineMapUpdateWeekday", {PERSISTENT, INT, "0"}},
     {"OfflineMapRequest", {PERSISTENT, JSON}},
     {"OfflineMapStatus", {CLEAR_ON_MANAGER_START | DONT_LOG, JSON}},
-    {"SlcE2eMaxSpeedKph", {PERSISTENT, INT, "105"}},
     {"ExperimentalMode", {PERSISTENT, BOOL, "0"}},
     {"AlwaysOnLateral", {PERSISTENT, BOOL, "1"}},
     {"AccessToken", {CLEAR_ON_MANAGER_START | DONT_LOG, STRING}},

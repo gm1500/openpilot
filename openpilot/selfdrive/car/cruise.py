@@ -35,6 +35,7 @@ class VCruiseHelper:
     self.v_cruise_kph = V_CRUISE_UNSET
     self.v_cruise_cluster_kph = V_CRUISE_UNSET
     self.v_cruise_kph_last = 0
+    self.initial_speed_kph = V_CRUISE_INITIAL
     self.button_timers = {ButtonType.decelCruise: 0, ButtonType.accelCruise: 0}
     self.button_change_states = {btn: {"standstill": False, "enabled": False} for btn in self.button_timers}
     self.map_cruise = MapCruise(CP)
@@ -69,7 +70,7 @@ class VCruiseHelper:
           map_applied = self._apply_map_speed() if map_enabled else False
           if (self.map_cruise.e2e_fallback and self.map_cruise.fallback_set_pending and
               self.map_cruise.target_kph is None and e2e_ready):
-            self.v_cruise_kph = self._no_map_set_speed(CS)
+            self.v_cruise_kph = self._initial_set_speed(CS)
             self.map_cruise.fallback_set_pending = False
         if enabled:
           self._cap_e2e_map_speed()
@@ -107,7 +108,7 @@ class VCruiseHelper:
                           enabled and CS.cruiseState.available and self.map_cruise.enabled,
                           intervention, map_applied and candidate == self.map_cruise.target_kph)
     if self.map_cruise.e2e_fallback:
-      self.map_pulse.cancel()  # no green feedback for the no-speed E2E ceiling
+      self.map_pulse.cancel()  # the green pulse tracks mapped speed adjustments
 
   def _update_v_cruise_non_pcm(self, CS, enabled, is_metric):
     # handle button presses. TODO: this should be in state_control, but a decelCruise press
@@ -195,29 +196,27 @@ class VCruiseHelper:
     if self.CP.pcmCruise:
       return
 
+    self.initial_speed_kph = initial_speed
     resume = any(b.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for b in CS.buttonEvents) and self.v_cruise_initialized
     if resume:
       self.v_cruise_kph = self.v_cruise_kph_last
     else:
-      self.v_cruise_kph = int(round(np.clip(max(CS.vEgo * CV.MS_TO_KPH, initial_speed), V_CRUISE_INITIAL, V_CRUISE_MAX)))
+      self.v_cruise_kph = self._initial_set_speed(CS)
 
     if self.map_cruise.enabled:
       if resume:
         self.map_cruise.pause()
       else:
         self._select_map_speed(CS)
-        # A fresh no-limit SET starts in E2E at its configured ceiling. A later
-        # map outage retains this SET; RESUME also keeps the previous selection.
+        # A fresh no-map engagement already has the stock initial SET.
         if self.map_cruise.e2e_fallback and self.map_cruise.target_kph is None:
-          self.v_cruise_kph = self._no_map_set_speed(CS)
           self.map_cruise.fallback_set_pending = False
 
     self._cap_e2e_map_speed()
     self.v_cruise_cluster_kph = self.v_cruise_kph
 
-  def _no_map_set_speed(self, CS):
-    return round(float(np.clip(max(CS.vEgo * CV.MS_TO_KPH, self.map_cruise.settings.e2e_ceiling_kph),
-                               V_CRUISE_MIN, V_CRUISE_MAX)))
+  def _initial_set_speed(self, CS) -> int:
+    return int(round(np.clip(max(CS.vEgo * CV.MS_TO_KPH, self.initial_speed_kph), V_CRUISE_INITIAL, V_CRUISE_MAX)))
 
   def _cap_e2e_map_speed(self):
     if self.manual_e2e and not self.map_cruise.driver_speed_override and self.map_cruise.target_kph is not None and self.v_cruise_initialized:
@@ -250,6 +249,6 @@ class VCruiseHelper:
         self.map_pulse.start(target)
       self.map_cruise.finish_recovery(self.v_cruise_kph)
     else:
-      # Explicit SET bypasses missing-data debounce; a changed ceiling waits for
-      # the planner's fresh E2E acknowledgement in update_v_cruise.
+      # Explicit SET bypasses missing-data debounce. Apply Initial Max Speed
+      # after the planner acknowledges E2E in update_v_cruise.
       self.map_cruise.request_fallback(apply_ceiling=True)

@@ -14,11 +14,12 @@ The comma 3X settings panel provides:
 | After manual override | Resume at the next changed limit; SET only |
 | Offset type | km/h or mph, following the device unit setting; Percent |
 | Speed offset | −/+ buttons, steps of 5, range −30 to +30; default zero |
-| No-limit E2E maximum speed | Initial no-map E2E cruise setting, default 105 km/h; stored independently of speed-limit offsets |
 | Map area | North America (Canada, U.S., Mexico); individual country |
 | Offline maps | Download, Update, Delete, Cancel; progress, storage and download date |
 | Automatic map updates | Manual (default); Daily; Weekly |
 | Weekly update day | Monday through Sunday; shown when Weekly is selected |
+
+When you engage with SET without a mapped limit, SLC uses **Initial Max Speed** from Settings → Toggles, or your current speed if it is higher.
 
 Offsets affect the cruise target, not the displayed posted limit. Targets keep the existing 8–145 km/h bounds and only operate on cars supporting the existing SLC integration. Ordinary cruise +/− buttons retain manual control. Fresh valid current-road limits apply on the first update, with no extra two-second warning or qualification delay. Publisher, GPS, heading and road-match validity checks remain required. SET explicitly accepts a fresh map limit; the existing current-speed floor on explicit SET is unchanged.
 

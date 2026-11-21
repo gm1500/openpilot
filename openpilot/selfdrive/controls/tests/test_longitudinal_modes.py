@@ -7,7 +7,6 @@ from opendbc.car.structs import car
 from openpilot.cereal import log, messaging
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.car.map_cruise import fallback_e2e_ready
-from openpilot.selfdrive.car.slc_settings import SLCSettings
 from openpilot.selfdrive.controls.lib.longitudinal_mode import slc_e2e_fallback, full_e2e_requested, e2e_map_speed_cap
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner, get_cruise_accel
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_T_FOLLOW
@@ -285,16 +284,15 @@ class TestLongitudinalModes(unittest.TestCase):
   def test_no_limit_initial_set_and_later_missing_map_ack_recovery(self):
     cruise = VCruiseHelper(self.cp)
     cs = self.sm['carState']
-    settings = SLCSettings(e2e_ceiling_kph=100)
     cruise.update_v_cruise(cs, False, True, map_enabled=True, automatic_e2e=True,
-                           now=self.now, slc_settings=settings)
-    cruise.initialize_v_cruise(cs, 40)
+                           now=self.now)
+    cruise.initialize_v_cruise(cs, 100)
     self.assertEqual(cruise.v_cruise_kph, 100)
 
     def update_cruise(limit, ready=False):
       cruise.update_v_cruise(cs, True, True, map_enabled=True, automatic_e2e=True,
                             map_speed=limit, map_gps_time=self.now, now=self.now,
-                            e2e_ready=ready, slc_settings=settings)
+                            e2e_ready=ready)
       cs.vCruise = cruise.v_cruise_kph
       selector, status = cruise.map_cruise, self.sm['mapCruiseState']
       status.state = selector.state(True)

@@ -56,44 +56,43 @@ class TestSLCFallback(unittest.TestCase):
     self.assertFalse(self.helper.map_cruise.e2e_fallback)
     self.assertEqual(self.helper.map_cruise.state(True), 'active')
 
-  def test_initial_set_without_map_enters_e2e_at_configured_ceiling(self):
+  def test_initial_set_without_map_enters_e2e_at_stock_initial_speed(self):
     self.limit = None
     self.tick()
     self.helper.initialize_v_cruise(self.cs, 40)
     self.assertTrue(self.helper.map_cruise.e2e_fallback)
-    self.assertEqual(self.helper.v_cruise_kph, 105)
+    self.assertEqual(self.helper.v_cruise_kph, 40)
     self.tick(100)
-    self.assertEqual(self.helper.v_cruise_kph, 105)
+    self.assertEqual(self.helper.v_cruise_kph, 40)
     self.ready = True
     self.tick()
-    self.assertEqual(self.helper.v_cruise_kph, 105)
+    self.assertEqual(self.helper.v_cruise_kph, 40)
 
-  def test_custom_e2e_ceiling_applies_once_and_preserves_manual_control(self):
-    self.settings = SLCSettings(e2e_ceiling_kph=90)
+  def test_explicit_set_without_map_applies_stock_initial_speed_once(self):
+    self.helper.initialize_v_cruise(self.cs, 90)
     self.unknown()
-    self.assertEqual(self.helper.v_cruise_kph, 50)
-    self.ready = True
-    self.tick()
     self.assertEqual(self.helper.v_cruise_kph, 50)
     self.tick(button=ButtonType.setCruise, pressed=True)
     self.tick(button=ButtonType.setCruise)
+    self.assertEqual(self.helper.v_cruise_kph, 50)
+    self.ready = True
+    self.tick()
     self.assertEqual(self.helper.v_cruise_kph, 90)
     self.tick(button=ButtonType.decelCruise, pressed=True)
     self.tick(button=ButtonType.decelCruise)
     self.tick(250)
     self.assertEqual(self.helper.v_cruise_kph, 89)
-    self.helper.initialize_v_cruise(self.cs, 40)
-    self.assertEqual(self.helper.v_cruise_kph, 90)
+    self.helper.initialize_v_cruise(self.cs, 85)
+    self.assertEqual(self.helper.v_cruise_kph, 85)
 
-  def test_fresh_no_map_set_uses_ceiling_or_higher_current_speed(self):
-    for speed, ceiling, expected in ((40, 105, 105), (115, 105, 115), (150, 105, 145), (40, 30, 40)):
-      with self.subTest(speed=speed, ceiling=ceiling):
+  def test_fresh_no_map_set_uses_stock_initial_speed_or_higher_current_speed(self):
+    for speed, initial_speed, expected in ((40, 105, 105), (115, 105, 115), (150, 105, 145), (10, 30, 40)):
+      with self.subTest(speed=speed, initial_speed=initial_speed):
         self.setUp()
-        self.settings = SLCSettings(e2e_ceiling_kph=ceiling)
         self.cs.vEgo = speed / 3.6
         self.limit = None
         self.tick()
-        self.helper.initialize_v_cruise(self.cs, 40)
+        self.helper.initialize_v_cruise(self.cs, initial_speed)
         self.assertEqual(self.helper.v_cruise_kph, expected)
         self.ready = True
         self.tick(120)
@@ -110,11 +109,11 @@ class TestSLCFallback(unittest.TestCase):
     self.tick()
     self.assertEqual(self.helper.v_cruise_kph, 115)
 
-  def test_repeated_map_gaps_retain_previous_set_above_and_below_ceiling(self):
-    for mapped, ceiling in ((100, 105), (120, 105), (100, 90)):
-      with self.subTest(mapped=mapped, ceiling=ceiling):
+  def test_repeated_map_gaps_retain_previous_set_above_and_below_stock_initial_speed(self):
+    for mapped, initial_speed in ((100, 105), (120, 105), (100, 90)):
+      with self.subTest(mapped=mapped, initial_speed=initial_speed):
         self.setUp()
-        self.settings = SLCSettings(e2e_ceiling_kph=ceiling)
+        self.helper.initialize_v_cruise(self.cs, initial_speed)
         self.limit = mapped
         self.ready = True
         self.tick()
@@ -322,7 +321,7 @@ class TestSLCFallback(unittest.TestCase):
 
   def test_first_valid_sixty_replaces_105_and_never_reenters_fallback_while_fresh(self):
     self.unknown()
-    self.helper.initialize_v_cruise(self.cs, 40)
+    self.helper.initialize_v_cruise(self.cs, 105)
     self.ready = True
     self.tick()
     self.assertEqual(self.helper.v_cruise_kph, 105)

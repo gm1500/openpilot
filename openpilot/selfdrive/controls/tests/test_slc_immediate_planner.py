@@ -34,7 +34,7 @@ class TestImmediateSLCPlanner(unittest.TestCase):
     self.settings = SLCSettings()
     self.cruise = VCruiseHelper(self.h.cp)
     self.cruise.update_v_cruise(self.cs, False, True, map_enabled=True, automatic_e2e=True, now=self.h.now)
-    self.cruise.initialize_v_cruise(self.cs, 40)
+    self.cruise.initialize_v_cruise(self.cs, 105)
     self.assertEqual(self.cruise.v_cruise_kph, 105.)
     self.h.sm['mapCruiseState'].e2eFallback = True
     self.h.sm['mapCruiseState'].state = 'waiting'
@@ -55,7 +55,7 @@ class TestImmediateSLCPlanner(unittest.TestCase):
     cruise = VCruiseHelper(self.h.cp)
     cruise.update_v_cruise(self.cs, False, True, map_enabled=True, automatic_e2e=True,
                           map_speed=60. / 3.6, map_gps_time=self.h.now, now=self.h.now)
-    cruise.initialize_v_cruise(self.cs, 40)
+    cruise.initialize_v_cruise(self.cs, 105)
     self.assertEqual(cruise.v_cruise_kph, 60.)
     self.assertFalse(cruise.map_cruise.e2e_fallback)
 
