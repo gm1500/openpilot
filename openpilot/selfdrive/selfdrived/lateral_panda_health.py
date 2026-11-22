@@ -8,9 +8,10 @@ steering. Never extend this exception to another fault, board or safety setup.
 
 Only fresh, distinct Panda samples can establish two seconds of quiet CAN1 and
 clean driving buses. The recorded CAN0 startup receive loss is also cumulative:
-exactly one paired error/loss may qualify. CAN2 FIFO overruns may qualify
-only if observed while parked before GM mode and both driving buses continue
-receiving. A changed counter or unhealthy sample discards qualification.
+exactly one paired error/loss may qualify. CAN2 FIFO overruns, including those
+accompanied by that CAN0 pair, may qualify only if observed while parked before
+GM mode and both driving buses continue receiving. A changed counter or
+unhealthy sample discards qualification.
 SelfdriveD's armed-AOL fault latch requires explicit driver rearming after
 readiness is lost.
 """
@@ -65,6 +66,7 @@ class LateralPandaHealth:
     # None means we have not seen a Panda yet. Zero permanently rules out the
     # CAN2 allowance for this host instance, including a restart already in GM.
     self._startup_can2_loss: int | None = None
+    self._startup_can0_loss = 0
     self._startup_harness = None
     self._startup_time = 0.
     self._startup_uptime = 0
@@ -89,6 +91,7 @@ class LateralPandaHealth:
         self._startup_can2_loss = 0
         return
       self._startup_can2_loss = loss
+      self._startup_can0_loss = int(ps.canState0.totalErrorCnt == ps.canState0.totalRxLostCnt == 1)
       self._startup_harness = ps.harnessStatus.raw
     elif (not 0 <= sample_time - self._startup_time <= MAX_SAMPLE_GAP or
           not 0 <= ps.uptime - self._startup_uptime <= 1 or
@@ -100,7 +103,8 @@ class LateralPandaHealth:
         not (ps.ignitionCan or ps.ignitionLine) or not _integrity_clear(ps) or
         (elm and (self._seen_gm or ps.safetyParam != 1)) or
         (not elm and (ps.safetyModel != car.CarParams.SafetyModel.gm or ps.safetyParam != GM_AOL_PARAM)) or
-        not _driving_bus_clean(ps.canState0) or not _driving_bus_clean(ps.canState2, rx_lost=self._startup_can2_loss)):
+        not _driving_bus_clean(ps.canState0, total_errors=self._startup_can0_loss, rx_lost=self._startup_can0_loss) or
+        not _driving_bus_clean(ps.canState2, rx_lost=self._startup_can2_loss)):
       self._startup_can2_loss = 0
       return
     if sample_time != self._startup_time:
@@ -148,7 +152,9 @@ class LateralPandaHealth:
 
     diagnostic = ps.canState1
     can2_loss = (self._startup_can2_loss or 0) if self._parked_in_elm else 0
-    can0_loss = int(not can2_loss and ps.canState0.totalErrorCnt == ps.canState0.totalRxLostCnt == 1)
+    # For CAN2 startup evidence, retain exactly the CAN0 counters witnessed at
+    # the same handoff. A new CAN0 loss must not become a historical allowance.
+    can0_loss = self._startup_can0_loss if can2_loss else int(ps.canState0.totalErrorCnt == ps.canState0.totalRxLostCnt == 1)
     if (diagnostic.busOff or diagnostic.totalRxCnt or diagnostic.totalFwdCnt or
         any(getattr(diagnostic, field) != 0 for field in IRQ_FIELDS) or
         not _driving_bus_clean(ps.canState0, total_errors=can0_loss, rx_lost=can0_loss) or
@@ -180,3 +186,4 @@ class LateralPandaHealth:
     self._last_sample = sample_time
     self._last_uptime = ps.uptime
     return self._qualified
+

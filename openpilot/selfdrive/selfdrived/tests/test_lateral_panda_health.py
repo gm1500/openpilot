@@ -283,10 +283,11 @@ def test_health_requalification_does_not_rearm_aol_after_new_fault(inputs, fault
   assert state.active
 
 
-def observe_elm(health, cp, ps, loss, *, parked=True):
+def observe_elm(health, cp, ps, loss, *, parked=True, can0_loss=0):
   ps.safetyModel, ps.safetyParam = 'elm327', 1
   ps.ignitionCan = True
   ps.canState2.totalRxLostCnt = loss
+  ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = can0_loss
   assert not health.check(cp, [ps], 99.8, True)
   assert not health.check(cp, [ps], 99.9, True, parked=parked)
   ps.safetyModel, ps.safetyParam = 'gm', GM_AOL_PARAM
@@ -302,28 +303,31 @@ def check_with_rx(health, cp, ps, start=100., *, progressing=(True, True)):
 
 
 @pytest.mark.parametrize('loss', [1, 2])
-def test_can2_fifo_loss_from_parked_startup_qualifies_with_live_traffic(inputs, loss):
+@pytest.mark.parametrize('can0_loss', [0, 1])
+def test_can2_fifo_loss_from_parked_startup_qualifies_with_live_traffic(inputs, loss, can0_loss):
   cp, ps = inputs
   health = LateralPandaHealth()
-  observe_elm(health, cp, ps, loss)
+  observe_elm(health, cp, ps, loss, can0_loss=can0_loss)
   assert check_with_rx(health, cp, ps) == [False] * 20 + [True, True]
 
 
 @pytest.mark.parametrize('start_loss,later_loss', [(0, 1), (1, 2), (2, 1), (2, 3), (3, 3)])
-def test_other_or_changed_fifo_loss_never_qualifies(inputs, start_loss, later_loss):
+@pytest.mark.parametrize('can0_loss', [0, 1])
+def test_other_or_changed_fifo_loss_never_qualifies(inputs, start_loss, later_loss, can0_loss):
   cp, ps = inputs
   health = LateralPandaHealth()
-  observe_elm(health, cp, ps, start_loss)
+  observe_elm(health, cp, ps, start_loss, can0_loss=can0_loss)
   ps.canState2.totalRxLostCnt = later_loss
   assert not any(check_with_rx(health, cp, ps))
 
 
 @pytest.mark.parametrize('change', ['fresh_host', 'missed_park', 'stale', 'reboot', 'harness', 'gap', 'elm_again',
                                     'can0_loss', 'can2_error', 'another_loss'])
-def test_can2_qualification_requires_continuous_startup_history(inputs, change):
+@pytest.mark.parametrize('can0_loss', [0, 1])
+def test_can2_qualification_requires_continuous_startup_history(inputs, change, can0_loss):
   cp, ps = inputs
   health = LateralPandaHealth()
-  observe_elm(health, cp, ps, 1, parked=change != 'missed_park')
+  observe_elm(health, cp, ps, 1, parked=change != 'missed_park', can0_loss=can0_loss)
   if change == 'fresh_host':
     health = LateralPandaHealth()
   elif change == 'stale':
@@ -338,7 +342,7 @@ def test_can2_qualification_requires_continuous_startup_history(inputs, change):
     assert not health.check(cp, [ps], 99.98, True, parked=True)
     ps.safetyModel, ps.safetyParam = 'gm', GM_AOL_PARAM
   elif change == 'can0_loss':
-    ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = 1
+    ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = can0_loss + 1
   elif change == 'can2_error':
     ps.canState2.totalErrorCnt = 1
   elif change == 'another_loss':
@@ -352,21 +356,24 @@ def test_can2_qualification_requires_continuous_startup_history(inputs, change):
 
 
 @pytest.mark.parametrize('progressing', [(False, True), (True, False)])
-def test_can2_historical_loss_requires_new_rx_on_both_driving_buses(inputs, progressing):
+@pytest.mark.parametrize('can0_loss', [0, 1])
+def test_can2_historical_loss_requires_new_rx_on_both_driving_buses(inputs, progressing, can0_loss):
   cp, ps = inputs
   health = LateralPandaHealth()
-  observe_elm(health, cp, ps, 2)
+  observe_elm(health, cp, ps, 2, can0_loss=can0_loss)
   assert check_with_rx(health, cp, ps)[-1]
   assert not any(check_with_rx(health, cp, ps, start=102.2, progressing=progressing))
 
 
 @pytest.mark.parametrize('change', ['no_initial_fault', 'extra_fault', 'transport_error', 'disappears', 'rx_rewind'])
-def test_startup_witness_requires_same_fault_and_continuous_panda(inputs, change):
+@pytest.mark.parametrize('can0_loss', [0, 1])
+def test_startup_witness_requires_same_fault_and_continuous_panda(inputs, change, can0_loss):
   cp, ps = inputs
   health = LateralPandaHealth()
   ps.ignitionCan = True
   ps.safetyModel, ps.safetyParam = 'elm327', 1
   ps.canState2.totalRxLostCnt = 1
+  ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = can0_loss
   if change == 'no_initial_fault':
     ps.faults = []
   elif change == 'extra_fault':
@@ -384,3 +391,51 @@ def test_startup_witness_requires_same_fault_and_continuous_panda(inputs, change
     ps.canState0.totalRxCnt -= 500
   ps.safetyModel, ps.safetyParam = 'gm', GM_AOL_PARAM
   assert not any(check_with_rx(health, cp, ps))
+
+
+@pytest.mark.parametrize('qualified', [False, True])
+@pytest.mark.parametrize('total_errors,rx_lost', [(0, 0), (1, 0), (0, 1), (2, 1), (1, 2), (2, 2)])
+def test_mixed_startup_losses_require_unchanged_can0_pair(inputs, qualified, total_errors, rx_lost):
+  cp, ps = inputs
+  health = LateralPandaHealth()
+  observe_elm(health, cp, ps, 2, can0_loss=1)
+  if qualified:
+    assert check_with_rx(health, cp, ps)[-1]
+  ps.canState0.totalErrorCnt, ps.canState0.totalRxLostCnt = total_errors, rx_lost
+  start = 102.2 if qualified else 100.
+  assert not any(check_with_rx(health, cp, ps, start=start))
+  # Restoring an old count cannot recreate the discarded startup evidence.
+  ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = 1
+  assert not any(check_with_rx(health, cp, ps, start=start + 2.2))
+
+
+@pytest.mark.parametrize('total_errors,rx_lost', [(0, 0), (1, 0), (0, 1), (2, 1), (1, 2), (2, 2)])
+def test_can0_pair_must_be_present_in_first_can2_startup_witness(inputs, total_errors, rx_lost):
+  cp, ps = inputs
+  health = LateralPandaHealth()
+  ps.safetyModel, ps.safetyParam = 'elm327', 1
+  ps.ignitionCan = True
+  ps.canState2.totalRxLostCnt = 2
+  ps.canState0.totalErrorCnt, ps.canState0.totalRxLostCnt = total_errors, rx_lost
+  assert not health.check(cp, [ps], 99.8, True)
+  ps.canState0.totalErrorCnt = ps.canState0.totalRxLostCnt = 1
+  assert not health.check(cp, [ps], 99.9, True, parked=True)
+  ps.safetyModel, ps.safetyParam = 'gm', GM_AOL_PARAM
+  assert not any(check_with_rx(health, cp, ps))
+
+
+@pytest.mark.parametrize('field,value', [('busOff', True), ('errorWarning', True), ('errorPassive', True),
+                                        ('receiveErrorCnt', 1), ('transmitErrorCnt', 1), ('totalTxLostCnt', 1),
+                                        ('canCoreResetCnt', 1), ('busOffCnt', 1), ('lastError', 'stuffError'),
+                                        ('lastStoredError', 'bit0Error'), ('lastDataError', 'ackError'),
+                                        ('lastDataStoredError', 'crcError'), ('irq0CallRate', 16000),
+                                        ('irq1CallRate', 16000), ('irq2CallRate', 16000)])
+@pytest.mark.parametrize('bus_index', [0, 2])
+def test_mixed_startup_losses_do_not_exempt_live_driving_bus_errors(inputs, field, value, bus_index):
+  cp, ps = inputs
+  health = LateralPandaHealth()
+  observe_elm(health, cp, ps, 2, can0_loss=1)
+  assert check_with_rx(health, cp, ps)[-1]
+  setattr(getattr(ps, f'canState{bus_index}'), field, value)
+  assert not any(check_with_rx(health, cp, ps, start=102.2))
+
