@@ -569,7 +569,7 @@ class SelfdriveD:
              self.sm['extrinsicsCalibration'].calStatus == log.ExtrinsicsCalibration.Status.calibrated and
              not dm.lockout and not dm.alwaysOnLockout and dm.alertLevel != AlertLevel.three and not dm.noResponseForceDecel and
              panda_healthy and
-             math.isfinite(self.sm['modelV2'].action.desiredCurvature) and lateral_events_clear(self.events, paused=paused))
+             math.isfinite(self.sm['modelV2'].action.desiredCurvature) and lateral_events_clear(self.events, paused=paused, parked=parked))
     cancel = self.car_state_received and any(be.type == ButtonType.cancel for be in CS.buttonEvents)
     # SET->CANCEL may also generate a SET release. Cancel must not rearm an
     # existing AOL fault latch through that release edge.

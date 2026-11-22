@@ -263,6 +263,109 @@ def test_selfdrived_brakes_and_gears_pause_then_resume(monkeypatch, pause):
   assert sd.always_on_lateral.active
 
 
+def test_selfdrived_stationary_park_door_pause_resumes_without_cruise(monkeypatch):
+  sd, CS = ready_selfdrived(monkeypatch)
+  sd.update_always_on_lateral(CS)
+  CS.gearShifter, CS.standstill, CS.vEgo, CS.doorOpen = 'park', True, 0., True
+  sd.events.add(EventName.wrongGear)
+  sd.events.add(EventName.doorOpen)
+  sd.update_always_on_lateral(CS)
+  assert sd.always_on_lateral.paused and not sd.always_on_lateral.requested and not sd.always_on_lateral.suspended
+  CS.doorOpen = False
+  sd.events.clear()
+  sd.events.add(EventName.wrongGear)
+  sd.update_always_on_lateral(CS)
+  assert sd.always_on_lateral.paused and not sd.always_on_lateral.suspended
+  CS.gearShifter, CS.standstill, CS.vEgo = 'drive', False, 20.
+  sd.events.clear()
+  sd.update_always_on_lateral(CS)
+  assert sd.always_on_lateral.active and sd.always_on_lateral.requested
+  assert not sd.enabled and not CS.buttonEnable
+
+
+@pytest.mark.parametrize('condition', ['drive', 'drive_brake', 'drive_parking_brake', 'reverse', 'neutral',
+                                     'moving', 'stale', 'invalid', 'can_invalid', 'can_timeout'])
+def test_selfdrived_park_door_exception_requires_verified_stationary_park(monkeypatch, condition):
+  sd, CS = ready_selfdrived(monkeypatch)
+  sd.update_always_on_lateral(CS)
+  CS.gearShifter, CS.standstill, CS.vEgo, CS.doorOpen = 'park', True, 0., True
+  if condition in ('drive', 'reverse', 'neutral'):
+    CS.gearShifter = condition
+  elif condition in ('drive_brake', 'drive_parking_brake'):
+    CS.gearShifter = 'drive'
+    CS.brakePressed, CS.parkingBrake = condition == 'drive_brake', condition == 'drive_parking_brake'
+  elif condition == 'moving':
+    CS.standstill, CS.vEgo = False, 2.
+  elif condition == 'stale':
+    sd.car_state_mono_time = 98.
+  elif condition == 'invalid':
+    sd.car_state_valid = False
+  elif condition == 'can_invalid':
+    CS.canValid = False
+  elif condition == 'can_timeout':
+    CS.canTimeout = True
+  sd.events.add(EventName.doorOpen)
+  sd.update_always_on_lateral(CS)
+  assert sd.always_on_lateral.suspended and not sd.always_on_lateral.requested
+
+
+@pytest.mark.parametrize('fault', ['comm_issue', 'seatbelt', 'steering', 'firmware'])
+def test_selfdrived_park_door_does_not_exempt_simultaneous_fault(monkeypatch, fault):
+  sd, CS = ready_selfdrived(monkeypatch)
+  sd.update_always_on_lateral(CS)
+  sd.always_on_lateral._rearm_until = 0.  # evaluate an established AOL session
+  CS.gearShifter, CS.standstill, CS.vEgo, CS.doorOpen = 'park', True, 0., True
+  sd.events.add(EventName.wrongGear)
+  sd.events.add(EventName.doorOpen)
+  if fault == 'firmware':
+    sd.sm['pandaStates'][0].lateralSuspended = True
+  elif fault == 'steering':
+    CS.steerFaultTemporary = True
+    sd.events.add(EventName.steerTempUnavailableSilent)
+  else:
+    sd.events.add(EventName.commIssue if fault == 'comm_issue' else EventName.seatbeltNotLatched)
+  sd.update_always_on_lateral(CS)
+  assert sd.always_on_lateral.suspended and not sd.always_on_lateral.requested
+  CS.gearShifter, CS.standstill, CS.vEgo, CS.doorOpen, CS.steerFaultTemporary = 'drive', False, 20., False, False
+  sd.sm['pandaStates'][0].lateralSuspended = False
+  sd.events.clear()
+  sd.update_always_on_lateral(CS)
+  assert sd.always_on_lateral.suspended and not sd.always_on_lateral.requested
+
+
+def test_selfdrived_open_door_cannot_resume_when_leaving_park(monkeypatch):
+  sd, CS = ready_selfdrived(monkeypatch)
+  sd.update_always_on_lateral(CS)
+  CS.gearShifter, CS.standstill, CS.vEgo, CS.doorOpen = 'park', True, 0., True
+  sd.events.add(EventName.doorOpen)
+  sd.update_always_on_lateral(CS)
+  assert not sd.always_on_lateral.suspended
+  CS.gearShifter, CS.standstill, CS.vEgo = 'drive', False, 20.
+  sd.update_always_on_lateral(CS)
+  assert sd.always_on_lateral.suspended and not sd.always_on_lateral.requested
+  CS.doorOpen = False
+  sd.events.clear()
+  sd.update_always_on_lateral(CS)
+  assert sd.always_on_lateral.suspended and not sd.always_on_lateral.active
+
+
+def test_selfdrived_existing_fault_survives_park_door_cycle(monkeypatch):
+  sd, CS = ready_selfdrived(monkeypatch)
+  sd.update_always_on_lateral(CS)
+  sd.events.add(EventName.commIssue)
+  sd.update_always_on_lateral(CS)
+  assert sd.always_on_lateral.suspended
+  CS.gearShifter, CS.standstill, CS.vEgo, CS.doorOpen = 'park', True, 0., True
+  sd.events.clear()
+  sd.events.add(EventName.doorOpen)
+  sd.update_always_on_lateral(CS)
+  assert sd.always_on_lateral.suspended
+  CS.gearShifter, CS.standstill, CS.vEgo, CS.doorOpen = 'drive', False, 20., False
+  sd.events.clear()
+  sd.update_always_on_lateral(CS)
+  assert sd.always_on_lateral.suspended and not sd.always_on_lateral.requested
+
+
 @pytest.mark.parametrize('fault', ['driver_lockout', 'driver_alert', 'calibration', 'can', 'steering', 'heartbeat', 'relay'])
 def test_selfdrived_faults_never_activate_lateral_only(monkeypatch, fault):
   sd, CS = ready_selfdrived(monkeypatch)

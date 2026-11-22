@@ -23,8 +23,12 @@ LONGITUDINAL_EVENTS = frozenset((EventName.buttonCancel, EventName.pedalPressed,
 BLOCKING_TYPES = (ET.NO_ENTRY, ET.USER_DISABLE, ET.SOFT_DISABLE, ET.IMMEDIATE_DISABLE)
 
 
-def lateral_events_clear(events, paused: bool = False) -> bool:
+def lateral_events_clear(events, paused: bool = False, parked: bool = False) -> bool:
   ignored = LONGITUDINAL_EVENTS | ({EventName.wrongGear, EventName.reverseGear, EventName.parkBrake} if paused else set())
+  # A door opening during verified stationary Park is a normal pause. Other
+  # readiness failures still latch, and Drive still requires the door closed.
+  if paused and parked:
+    ignored |= {EventName.doorOpen}
   return not any(name not in ignored and any(kind in EVENTS.get(name, {}) for kind in BLOCKING_TYPES)
                  for name in events.names)
 
