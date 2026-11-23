@@ -9,13 +9,16 @@ import tarfile
 import time
 import uuid
 
+import capnp
 import requests
 
+from opendbc.car.structs import car
 from openpilot.cereal import messaging, log
 from openpilot.common.params import Params
 from openpilot.selfdrive.mapd.map_schedule import schedule_period
 from openpilot.selfdrive.mapd.offline_maps import (SCHEMA, MAX_TILE_BYTES, atomic_json, load_json,
                                                    map_root, region_groups, region_name, tile_name)
+from openpilot.system.sentry.location import parked_location, vehicle_identity
 
 URL = 'https://map-data.pfeifer.dev/offline'
 MAX_ARCHIVE = 512 * 1024 * 1024
@@ -179,6 +182,18 @@ def fetch_archive(store, group, check, progress, session=requests):
   return path
 
 
+def parked_group(params, wall):
+  checkpoint = params.get('MapParkedPosition')
+  if not checkpoint or not (cp_data := params.get('CarParamsPersistent')):
+    return None
+  try:
+    with car.CarParams.from_bytes(cp_data) as CP:
+      location = parked_location(checkpoint, vehicle_identity(CP), wall)
+  except (capnp.KjException, ValueError, TypeError):
+    return None
+  return tile_name(location['latitude'], location['longitude'])[0] if location is not None else None
+
+
 class MapDownloads:
   """One resumable job shared by manual requests and scheduled refreshes."""
   def __init__(self, store, params):
@@ -198,7 +213,8 @@ class MapDownloads:
     installed = self.store.manifest['groups']
     done = [g for g in groups if g in installed and
             (not update or period is not None and installed[g].get('downloaded_at', 0) >= period)]
-    self.job = {'region': region, 'groups': groups, 'done': done, 'automatic': period is not None}
+    self.job = {'region': region, 'groups': groups, 'done': done, 'automatic': period is not None,
+                'refresh_all': update or not done}
     # Keep the last successful update while refreshing. Existing maps stay
     # usable, including when an update is paused, cancelled or interrupted.
     self.store.manifest['regions'].setdefault(region, {'name': region_name(region), 'groups': groups, 'complete': False})
@@ -231,13 +247,28 @@ class MapDownloads:
       atomic_json(self.attempt_path, self.attempts)
     self.clear()
 
+  def next_group(self, wall):
+    done = set(self.job['done'])
+    pending = [g for g in self.job['groups'] if g not in done]
+    if len(pending) > 1:
+      local = parked_group(self.params, wall)
+      if local in pending:
+        return local
+    return pending[0] if pending else None
+
   def complete_group(self, group):
     self.job['done'].append(group)
     self.job.pop('retry_at', None)
     self.save()
 
   def finish(self, wall):
-    self.store.manifest['regions'][self.job['region']].update(complete=True, updated_at=wall)
+    updated_at = wall
+    # Download may have reused older archives. Legacy manual jobs did not record
+    # whether they refreshed every group, so use their installed dates as well.
+    if not self.job.get('refresh_all', self.job.get('automatic', False)):
+      installed = self.store.manifest['groups']
+      updated_at = min(wall, min(installed.get(g, {}).get('downloaded_at', 0) for g in self.job['groups']))
+    self.store.manifest['regions'][self.job['region']].update(complete=True, updated_at=updated_at)
     self.store.save()
     self.clear()
 
@@ -335,13 +366,12 @@ def main():
         time.sleep(1)
         continue
       check(True)
-      job = downloads.job
-      pending = [g for g in job['groups'] if g not in job['done']]
-      if not pending:
-        downloads.finish(time.time())  # noqa: TID251
+      wall = time.time()  # noqa: TID251
+      group = downloads.next_group(wall)
+      if group is None:
+        downloads.finish(wall)
         status('Download complete')
         continue
-      group = pending[0]
       status('Downloading')
       archive = fetch_archive(store, group, check, progress)
       status('Checking maps')

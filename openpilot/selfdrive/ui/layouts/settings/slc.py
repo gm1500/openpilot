@@ -100,7 +100,7 @@ class SLCLayout(Widget):
       text_item('Map storage', lambda: f'{self.status.get("installed_bytes", 0) / 1024**3:.2f} GB',
         'Keeps at least 5 GB and 10% of storage free for recordings. Interrupted downloads retain completed map groups.'),
       text_item('Last update', self.date_label,
-        'This is the last completed download date, not the age of every road in the source database. Update refreshes the selected area.'),
+        'A full refresh shows its completion date. If Download reuses local archives, the date reflects the oldest archive.'),
       text_item('Map data', 'OpenStreetMap contributors',
         'Open Database License: openstreetmap.org/copyright. Regional packages provided by map-data.pfeifer.dev.'),
     ]
@@ -160,6 +160,8 @@ class SLCLayout(Widget):
     stamp = info.get('updated_at')
     if stamp:
       return datetime.fromtimestamp(stamp).strftime('%Y-%m-%d')
+    if info.get('complete'):
+      return 'Unknown date'
     return 'Partial download' if info else 'Not downloaded'
 
   def _update_state(self):

@@ -3,11 +3,13 @@ from unittest.mock import Mock
 
 import pytest
 
+from opendbc.car.structs import car
 from openpilot.common.params import Params
 from openpilot.selfdrive.mapd import map_download as download
 from openpilot.selfdrive.mapd.map_schedule import schedule_period
 from openpilot.selfdrive.mapd.offline_maps import atomic_json, load_json
 from openpilot.selfdrive.mapd.tests.test_offline_maps import NetworkSM
+from openpilot.system.sentry.location import vehicle_identity
 
 
 def stamp(value):
@@ -85,6 +87,44 @@ def test_recent_manual_update_satisfies_schedule_and_shared_groups_are_reused(ma
   manager.schedule(now+1)
   assert manager.job['region'] == 'nation.US'
   assert manager.job['done'] == ['0_2']
+
+
+@pytest.mark.parametrize('legacy_job', [False, True])
+def test_resumed_download_does_not_mark_reused_groups_updated(manager, legacy_job):
+  now = stamp('2026-10-21T12:00:00-06:00')
+  old = manager.store.manifest['groups']['0_0']['downloaded_at']
+  manager.store.manifest['groups']['0_2']['downloaded_at'] = now
+  manager.start('nation.CA')
+  if legacy_job:
+    manager.job.pop('refresh_all')
+    manager.save()
+  restarted = download.MapDownloads(manager.store, manager.params)
+  assert restarted.next_group(now) is None
+  restarted.finish(now)
+  assert manager.store.manifest['regions']['nation.CA']['updated_at'] == old
+  restarted.schedule(now)
+  assert restarted.job['region'] == 'nation.CA' and restarted.job['done'] == ['0_2']
+
+
+@pytest.mark.parametrize('update', [False, True])
+def test_download_prioritizes_parked_group_after_restart(manager, update):
+  now = stamp('2026-10-21T12:00:00-06:00')
+  if not update:
+    manager.store.manifest['groups'].clear()  # First installation.
+  manager.start('nation.CA', update=update)
+  restarted = download.MapDownloads(manager.store, manager.params)
+  assert restarted.next_group(now) == '0_0'  # No saved location.
+  cp = car.CarParams.new_message(carFingerprint='test car', carVin='example')
+  manager.params.put('CarParamsPersistent', cp.to_bytes(), block=True)
+  checkpoint = {'version': 1, 'latitude': .25, 'longitude': 2.25, 'accuracy': 10., 'savedAt': now, 'vehicle': vehicle_identity(cp)}
+  for changes in ({'savedAt': now-86401}, {'vehicle': 'another car'}, {'longitude': 4.25}):
+    manager.params.put('MapParkedPosition', checkpoint | changes, block=True)
+    assert restarted.next_group(now) == '0_0'
+  manager.params.put('MapParkedPosition', checkpoint, block=True)
+  assert restarted.next_group(now) == '0_2'
+  restarted.complete_group('0_2')
+  assert restarted.next_group(now) == '0_0'
+  assert restarted.job['groups'] == ['0_0', '0_2']
 
 
 def test_cancel_survives_restart_without_requeue_until_next_period(manager):
