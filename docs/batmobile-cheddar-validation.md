@@ -1,5 +1,39 @@
 # Batmobile validation
 
+## Upstream test branch — 2026-11-23
+
+`batmobile-upstream-test` branches from `cab06d156ebefad9d7027831434344b801d9fccb`
+and merges upstream master through `af90646a4a02a93ab48d34a3fc017a9414ac79b9`.
+The three incoming commits remove the obsolete Qualcomm GPU priority override,
+revert model-predicted future lead trajectories to tracked-lead extrapolation,
+and update the large driving model to Fairy Tale. The small driving model used
+by the current C3X without Chestnut/eGPU is unchanged.
+
+The longitudinal merge retains the virtual stop target, its separate MPC
+constraint, hold/release behavior, and planner handoff. Lead processing and
+extrapolation match upstream exactly. Both tracked leads still constrain MPC;
+the published `hasLead` flag follows upstream's primary-slot-only semantics.
+The updated regression test verifies second-slot braking and that future model
+lead arrays cannot replace the tracked lead trajectory. GM tuning, submodule
+pins, AOL, SLC, Sentry, lane policy, and desire logic retain their Batmobile
+versions.
+
+Validation on the merged source:
+
+- Native MPC, msgq and Params built through repository SCons.
+- 197 targeted regression tests and 109 subtests passed, covering stop-target
+  constraints and release, planner modes, SLC handoff, cruise recovery, slowing,
+  stop horizon, lane policy, and lane-change/AOL gating.
+- All 23 upstream longitudinal maneuver tests passed, for 220 unique tests in
+  total. The test runner disabled only the Unix-socket logging handler blocked
+  by the host environment; stderr logging, planner logic and the native solver
+  were unchanged.
+- Ruff, shell syntax and whitespace checks passed.
+
+No vehicle installation or driving validation was performed. These checks do
+not establish that the Qualcomm priority change resolves the recorded timing
+stalls or red takeover alerts, or validate the large model on eGPU hardware.
+
 ## AOL historical receive-loss qualification — 2026-11-21
 
 The next drive ran clean `9017c364` with AOL enabled, but the host never requested

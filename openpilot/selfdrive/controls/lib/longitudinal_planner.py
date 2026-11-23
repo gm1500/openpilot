@@ -131,8 +131,7 @@ class LongitudinalPlanner:
     else:
       self.mpc.set_cur_state(v_ego, sm['carState'].aEgo)
     self.mpc.update(sm['radarState'], personality=personality,
-                    stop_distance=self.stop_target.distance if self.stop_target.active else None,
-                    model_leads=sm['modelV2'].leadsV3)
+                    stop_distance=self.stop_target.distance if self.stop_target.active else None)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
@@ -196,7 +195,7 @@ class LongitudinalPlanner:
     longitudinalPlan.accels = self.a_desired_trajectory.tolist()
     longitudinalPlan.jerks = self.j_desired_trajectory.tolist()
 
-    longitudinalPlan.hasLead = sm['radarState'].leadOne.present or sm['radarState'].leadTwo.present
+    longitudinalPlan.hasLead = sm['radarState'].leadOne.present
     longitudinalPlan.longitudinalPlanSource = self.mpc.source
     longitudinalPlan.fcw = self.fcw
 

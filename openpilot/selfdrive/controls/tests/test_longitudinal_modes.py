@@ -177,24 +177,38 @@ class TestLongitudinalModes(unittest.TestCase):
     self.assertEqual(stop.call_args.kwargs['e2e_accel'], -.5)
     self.assertEqual(assist.call_args.kwargs['e2e_accel'], -.5)
 
-  def test_chill_uses_second_lead_forecast_and_falls_back_when_incomplete(self):
+  def test_chill_uses_second_tracked_lead_without_future_model_trajectory(self):
+    no_lead_accel = self.tick().aTarget
+    no_lead_obstacle = self.planner.mpc.params[:, 2].copy()
     lead = self.sm['radarState'].leadTwo
     lead.present, lead.modelProb, lead.dRel, lead.vLead = True, .99, 30., 10.
-    self.assertTrue(self.tick().hasLead)
-    radar_only_obstacle = self.planner.mpc.params[-1, 2]
+    self.planner = LongitudinalPlanner(self.cp, init_v=20.)
+    plan = self.tick()
+    # Upstream hasLead describes the primary slot; both slots still constrain MPC.
+    self.assertFalse(plan.hasLead)
+    self.assertEqual(str(plan.longitudinalPlanSource), 'lead1')
+    self.assertLess(plan.aTarget, no_lead_accel)
+    self.assertLess(self.planner.mpc.params[0, 2], no_lead_obstacle[0])
+    tracked_obstacle = self.planner.mpc.params[:, 2].copy()
+    tracked_accels, tracked_target = list(plan.accels), plan.aTarget
 
-    # The model predicts 10 m of travel and a 10 m/s drop from the tracked state.
+    # Future model forecasts, including malformed ones, cannot replace tracked motion.
     forecast = self.sm['modelV2'].init('leadsV3', 2)[1]
     forecast.x = [40., 50., 50., 50., 50., 50.]
-    forecast.v = [11., 1., 1., 1., 1., 1.]
-    self.assertFalse(self.tick().slcE2eFallback)
-    self.assertAlmostEqual(self.planner.mpc.params[-1, 2], 40.)
-    self.assertGreater(radar_only_obstacle, 40.)
+    for velocities in ([11., 1., 1., 1., 1., 1.], [11.], [11., float('nan'), 1., 1., 1., 1.]):
+      with self.subTest(velocities=velocities):
+        forecast.v = velocities
+        self.planner = LongitudinalPlanner(self.cp, init_v=20.)
+        plan = self.tick()
+        self.assertFalse(plan.slcE2eFallback)
+        self.assertFalse(plan.hasLead)
+        np.testing.assert_allclose(self.planner.mpc.params[:, 2], tracked_obstacle)
+        np.testing.assert_allclose(plan.accels, tracked_accels)
+        self.assertAlmostEqual(plan.aTarget, tracked_target)
 
-    for velocities in ([11.], [11., float('nan'), 1., 1., 1., 1.]):
-      forecast.v = velocities
-      self.tick()
-      self.assertAlmostEqual(self.planner.mpc.params[-1, 2], radar_only_obstacle)
+    primary = self.sm['radarState'].leadOne
+    primary.present, primary.modelProb, primary.dRel, primary.vLead = True, .99, 30., 10.
+    self.assertTrue(self.tick().hasLead)
 
   def test_stale_invalid_or_disabled_mode_request_cannot_acknowledge_a_ceiling_raise(self):
     state = self.sm['mapCruiseState']
