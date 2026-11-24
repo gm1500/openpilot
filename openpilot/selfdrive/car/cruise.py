@@ -3,6 +3,8 @@ import numpy as np
 
 from opendbc.car.structs import car
 from openpilot.common.constants import CV
+from openpilot.selfdrive.car.map_cruise import MapCruise, MapCruisePulse
+from openpilot.selfdrive.car.slc_settings import SLCSettings
 
 
 # WARNING: this value was determined based on the model's training distribution,
@@ -33,22 +35,47 @@ class VCruiseHelper:
     self.v_cruise_kph = V_CRUISE_UNSET
     self.v_cruise_cluster_kph = V_CRUISE_UNSET
     self.v_cruise_kph_last = 0
+    self.initial_speed_kph = V_CRUISE_INITIAL
     self.button_timers = {ButtonType.decelCruise: 0, ButtonType.accelCruise: 0}
     self.button_change_states = {btn: {"standstill": False, "enabled": False} for btn in self.button_timers}
+    self.map_cruise = MapCruise(CP)
+    self.map_pulse = MapCruisePulse()
+    self._map_set_held = False
+    self._dedicated_set_pressed_while_enabled = False
+    self.manual_e2e = False
 
   @property
   def v_cruise_initialized(self):
     return self.v_cruise_kph != V_CRUISE_UNSET
 
-  def update_v_cruise(self, CS, enabled, is_metric):
+  def update_v_cruise(self, CS, enabled, is_metric, *, map_enabled=False, map_speed=None, map_gps_time=0., now=0.,
+                      automatic_e2e=False, manual_e2e=False, e2e_ready=False, slc_settings=None, map_preview=None, map_way_id=0):
     self.v_cruise_kph_last = self.v_cruise_kph
+    self.manual_e2e = manual_e2e and self.map_cruise.supported
+    self.map_cruise.settings = slc_settings if slc_settings is not None else SLCSettings()
+    self.map_cruise.metric = is_metric
+    self.map_cruise.current_kph = self.v_cruise_kph
+    self.map_cruise.update(map_enabled or self.manual_e2e, map_speed, map_gps_time, now, automatic_e2e,
+                           preview=map_preview, way_id=map_way_id, v_ego=CS.vEgo)
+    map_applied = False
 
     if CS.cruiseState.available:
       if not self.CP.pcmCruise:
         # if stock cruise is completely disabled, then we can use our own set speed logic
         self._update_v_cruise_non_pcm(CS, enabled, is_metric)
-        self.v_cruise_cluster_kph = self.v_cruise_kph
         self.update_button_timers(CS, enabled)
+        if enabled and not any(self.button_timers.values()) and not (CS.gasPressed or CS.brakePressed):
+          # Automatic SLC can select a target. Manual E2E alone must never
+          # raise a lower existing SET when a map target becomes available.
+          map_applied = self._apply_map_speed() if map_enabled else False
+          if (self.map_cruise.e2e_fallback and self.map_cruise.fallback_set_pending and
+              self.map_cruise.target_kph is None and e2e_ready):
+            self.v_cruise_kph = self._initial_set_speed(CS)
+            self.map_cruise.fallback_set_pending = False
+        if enabled:
+          self._cap_e2e_map_speed()
+        self.map_cruise.finish_recovery(self.v_cruise_kph)
+        self.v_cruise_cluster_kph = self.v_cruise_kph
       else:
         self.v_cruise_kph = CS.cruiseState.speed * CV.MS_TO_KPH
         self.v_cruise_cluster_kph = CS.cruiseState.speedCluster * CV.MS_TO_KPH
@@ -62,21 +89,52 @@ class VCruiseHelper:
       self.v_cruise_kph = V_CRUISE_UNSET
       self.v_cruise_cluster_kph = V_CRUISE_UNSET
 
+    # Feedback tracks the actual cruise target. An upcoming preview can be
+    # displayed separately, but must not replace the current adjustment pulse.
+    candidate = self.map_cruise.target_kph if self.map_cruise.tracking else None
+    # Finishing the SET that engaged cruise is not a subsequent manual override.
+    # This exemption only affects feedback; ordinary +/- and hold behavior stays above.
+    held_override = any(timer and not (button == ButtonType.decelCruise and self._map_set_held)
+                        for button, timer in self.button_timers.items())
+    map_selected = self.map_cruise.enabled and self.map_cruise.tracking and self.map_cruise.target_kph == self.v_cruise_kph
+    button_override = any(
+      b.type in (ButtonType.accelCruise, ButtonType.decelCruise, ButtonType.setCruise, ButtonType.resumeCruise, ButtonType.cancel)
+      and not (not b.pressed and ((b.type == ButtonType.decelCruise and self._map_set_held) or
+                                 (b.type == ButtonType.setCruise and map_selected))) for b in CS.buttonEvents)
+    intervention = CS.gasPressed or CS.brakePressed or held_override or button_override
+    if not enabled or any(b.type == ButtonType.decelCruise for b in CS.buttonEvents):
+      self._map_set_held = False
+    self.map_pulse.update(candidate, self.v_cruise_kph, CS.vEgo * CV.MS_TO_KPH, now,
+                          enabled and CS.cruiseState.available and self.map_cruise.enabled,
+                          intervention, map_applied and candidate == self.map_cruise.target_kph)
+    if self.map_cruise.e2e_fallback:
+      self.map_pulse.cancel()  # the green pulse tracks mapped speed adjustments
+
   def _update_v_cruise_non_pcm(self, CS, enabled, is_metric):
     # handle button presses. TODO: this should be in state_control, but a decelCruise press
     # would have the effect of both enabling and changing speed is checked after the state transition
     if not enabled:
+      self._dedicated_set_pressed_while_enabled = False
       return
 
+    if self.map_cruise.supported:
+      for b in CS.buttonEvents:
+        if self.map_cruise.enabled and b.type in (ButtonType.resumeCruise, ButtonType.cancel):
+          self.map_cruise.pause()
+        elif b.type == ButtonType.setCruise:
+          if not b.pressed:
+            self._select_map_speed(CS, driver_selection=self._dedicated_set_pressed_while_enabled)
+          self._dedicated_set_pressed_while_enabled = b.pressed
+
     long_press = False
+    end_long_press = False
     button_type = None
 
     v_cruise_delta = 1. if is_metric else IMPERIAL_INCREMENT
 
     for b in CS.buttonEvents:
       if b.type.raw in self.button_timers and not b.pressed:
-        if self.button_timers[b.type.raw] > CRUISE_LONG_PRESS:
-          return  # end long press
+        end_long_press = self.button_timers[b.type.raw] > CRUISE_LONG_PRESS
         button_type = b.type.raw
         break
     else:
@@ -97,6 +155,13 @@ class VCruiseHelper:
     # Don't adjust speed if we've enabled since the button was depressed (some ports enable on rising edge)
     if not self.button_change_states[button_type]["enabled"]:
       return
+
+    if self.map_cruise.enabled:
+      # Once engaged, SET/- and RES/+ are ordinary speed adjustments. Map
+      # selection belongs to engagement or a separate, dedicated SET event.
+      self.map_cruise.pause(driver_adjusted_speed=True)
+    if end_long_press:
+      return  # the completed hold wins over a concurrent map change without another increment
 
     v_cruise_delta = v_cruise_delta * (5 if long_press else 1)
     if long_press and self.v_cruise_kph % v_cruise_delta != 0:  # partial interval
@@ -123,13 +188,67 @@ class VCruiseHelper:
         self.button_change_states[b.type.raw] = {"standstill": CS.cruiseState.standstill, "enabled": enabled}
 
   def initialize_v_cruise(self, CS, initial_speed: int) -> None:
+    self.map_pulse.cancel()
+    self.map_cruise.driver_speed_override = False
+    self._dedicated_set_pressed_while_enabled = False
+    self._map_set_held = bool(self.button_timers[ButtonType.decelCruise])
     # initializing is handled by the PCM
     if self.CP.pcmCruise:
       return
 
-    if any(b.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for b in CS.buttonEvents) and self.v_cruise_initialized:
+    self.initial_speed_kph = initial_speed
+    resume = any(b.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for b in CS.buttonEvents) and self.v_cruise_initialized
+    if resume:
       self.v_cruise_kph = self.v_cruise_kph_last
     else:
-      self.v_cruise_kph = int(round(np.clip(max(CS.vEgo * CV.MS_TO_KPH, initial_speed), V_CRUISE_INITIAL, V_CRUISE_MAX)))
+      self.v_cruise_kph = self._initial_set_speed(CS)
 
+    if self.map_cruise.enabled:
+      if resume:
+        self.map_cruise.pause()
+      else:
+        self._select_map_speed(CS)
+        # A fresh no-map engagement already has the stock initial SET.
+        if self.map_cruise.e2e_fallback and self.map_cruise.target_kph is None:
+          self.map_cruise.fallback_set_pending = False
+
+    self._cap_e2e_map_speed()
     self.v_cruise_cluster_kph = self.v_cruise_kph
+
+  def _initial_set_speed(self, CS) -> int:
+    return int(round(np.clip(max(CS.vEgo * CV.MS_TO_KPH, self.initial_speed_kph), V_CRUISE_INITIAL, V_CRUISE_MAX)))
+
+  def _cap_e2e_map_speed(self):
+    if self.manual_e2e and not self.map_cruise.driver_speed_override and self.map_cruise.target_kph is not None and self.v_cruise_initialized:
+      self.v_cruise_kph = min(self.v_cruise_kph, self.map_cruise.target_kph)
+
+  def _apply_map_speed(self):
+    if self.map_cruise.enabled and self.map_cruise.tracking and self.map_cruise.target_kph is not None and self.v_cruise_initialized:
+      changed = abs(self.v_cruise_kph - self.map_cruise.target_kph) > 0.01
+      self.v_cruise_kph = self.map_cruise.target_kph
+      return changed
+    return False
+
+  def _select_map_speed(self, CS, *, driver_selection: bool = False):
+    """Use driving speed for a dedicated SET, with a floor from active map control."""
+    driving_speed = round(float(np.clip(CS.vEgo * CV.MS_TO_KPH, V_CRUISE_MIN, V_CRUISE_MAX)))
+    if not self.map_cruise.enabled:
+      if driver_selection:
+        self.v_cruise_kph = driving_speed
+      return
+    self.map_cruise.select_current()
+    target = self.map_cruise.target_kph
+    if target is not None:
+      self.v_cruise_kph = max(target, driving_speed)
+      # Like a manual selection, a higher driving speed must not be immediately
+      # undone by the same map limit after the pedal is released.
+      self.map_cruise.tracking = self.v_cruise_kph == target
+      if driver_selection and not self.map_cruise.tracking:
+        self.map_cruise.pause(driver_adjusted_speed=True)
+      if self.map_cruise.tracking and not (CS.gasPressed or CS.brakePressed):
+        self.map_pulse.start(target)
+      self.map_cruise.finish_recovery(self.v_cruise_kph)
+    else:
+      # Explicit SET bypasses missing-data debounce. Apply Initial Max Speed
+      # after the planner acknowledges E2E in update_v_cruise.
+      self.map_cruise.request_fallback(apply_ceiling=True)
