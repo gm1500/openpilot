@@ -11,9 +11,11 @@ from collections.abc import Iterator
 
 from openpilot.cereal import log
 import openpilot.cereal.messaging as messaging
+from openpilot.system.sentry.storage import is_sentry_file, live_sentry_lock, remove_legacy_upload_authorization
 from openpilot.common.api import Api
 from openpilot.common.utils import get_upload_stream
 from openpilot.common.params import Params
+from openpilot.common.upload_priority import MapAwareReader, UploadDeferred, POLL_INTERVAL, map_download_active, wait_for_map_download
 from openpilot.common.realtime import set_core_affinity
 from openpilot.common.hardware.hw import Paths
 from openpilot.system.loggerd.xattr_cache import getxattr, setxattr
@@ -22,6 +24,7 @@ from openpilot.common.swaglog import cloudlog
 NetworkType = log.DeviceState.NetworkType
 UPLOAD_ATTR_NAME = 'user.upload'
 UPLOAD_ATTR_VALUE = b'1'
+SENTRY_DENIED_RETRY_SECONDS = 300.0
 
 MAX_UPLOAD_SIZES = {
   "qlog": 25*1e6,  # can't be too restrictive here since we use qlogs to find
@@ -63,6 +66,8 @@ def listdir_by_creation(d: str) -> list[str]:
 def clear_locks(root: str) -> None:
   for logdir in os.listdir(root):
     path = os.path.join(root, logdir)
+    if live_sentry_lock(path):
+      continue
     try:
       for fname in os.listdir(path):
         if fname.endswith(".lock"):
@@ -73,6 +78,7 @@ def clear_locks(root: str) -> None:
 
 class Uploader:
   def __init__(self, dongle_id: str, root: str):
+    remove_legacy_upload_authorization()
     self.dongle_id = dongle_id
     self.api = Api(dongle_id)
     self.root = root
@@ -84,8 +90,11 @@ class Uploader:
 
     self.immediate_folders = ["crash/", "boot/"]
     self.immediate_priority = {"qlog": 0, "qlog.zst": 0, "qcamera.ts": 1}
+    self.sentry_failed: dict[str, float] = {}
+    self.sentry_denied_until: dict[str, float] = {}
 
   def list_upload_files(self, metered: bool) -> Iterator[tuple[str, str, str]]:
+    offroad = self.params.get_bool("IsOffroad")
     r = self.params.get("AthenadRecentlyViewedRoutes")
     requested_routes = [] if r is None else [route for route in r.split(",") if route]
 
@@ -97,6 +106,8 @@ class Uploader:
         continue
 
       if any(name.endswith(".lock") for name in names):
+        continue
+      if not offroad and '.sentry' in names:
         continue
 
       for name in sorted(names, key=lambda n: self.immediate_priority.get(n, 1000)):
@@ -126,6 +137,14 @@ class Uploader:
 
   def next_file_to_upload(self, metered: bool) -> tuple[str, str, str] | None:
     upload_files = list(self.list_upload_files(metered))
+    # A denied or repeatedly failing Sentry file must not monopolize its
+    # priority tier. Try untouched files first, then retry failures oldest
+    # first. The main loop still applies the normal network backoff.
+    self.sentry_failed = {fn: failed_at for fn, failed_at in self.sentry_failed.items() if os.path.isfile(fn)}
+    now = time.monotonic()
+    self.sentry_denied_until = {fn: until for fn, until in self.sentry_denied_until.items() if until > now and os.path.isfile(fn)}
+    upload_files = [candidate for candidate in upload_files if candidate[2] not in self.sentry_denied_until]
+    upload_files.sort(key=lambda candidate: self.sentry_failed.get(candidate[2], 0.))
 
     for name, key, fn in upload_files:
       if any(f in fn for f in self.immediate_folders):
@@ -135,17 +154,28 @@ class Uploader:
       if name in self.immediate_priority:
         return name, key, fn
 
+    # Full Sentry logs and HEVC videos stay local for manual Connect requests,
+    # handled by Athena. Only the ordinary qlog/preview policy applies here.
     return None
 
   def do_upload(self, key: str, fn: str):
+    sentry = is_sentry_file(fn)
+
+    def check():
+      if sentry and not self.params.get_bool("IsOffroad"):
+        raise UploadDeferred
+
+    wait_for_map_download(check)
     url_resp = self.api.get("v1.4/" + self.dongle_id + "/upload_url/", timeout=10, path=key, access_token=self.api.get_token())
-    if url_resp.status_code == 412:
+    if url_resp.status_code == 412 or (sentry and url_resp.status_code != 200):
+      if sentry:
+        cloudlog.event("sentry.upload_url_failed", key=key, status_code=url_resp.status_code)
       return url_resp
 
     url_resp_json = json.loads(url_resp.text)
-    url = url_resp_json['url']
-    headers = url_resp_json['headers']
-    cloudlog.debug("upload_url v1.4 %s %s", url, str(headers))
+    url, headers = url_resp_json['url'], url_resp_json['headers']
+    if not sentry:
+      cloudlog.debug("upload_url v1.4 %s %s", url, str(headers))
 
     if fake_upload:
       return FakeResponse()
@@ -154,13 +184,15 @@ class Uploader:
     try:
       compress = key.endswith('.zst') and not fn.endswith('.zst')
       stream, _ = get_upload_stream(fn, compress)
-      response = requests.put(url, data=stream, headers=headers, timeout=10)
+      response = requests.put(url, data=MapAwareReader(stream, check), headers=headers, timeout=10)
+      if sentry and response.status_code not in (200, 201):
+        cloudlog.event("sentry.upload_put_failed", key=key, status_code=response.status_code)
       return response
     finally:
       if stream:
         stream.close()
 
-  def upload(self, name: str, key: str, fn: str, network_type: int, metered: bool) -> bool:
+  def upload(self, name: str, key: str, fn: str, network_type: int, metered: bool) -> bool | None:
     try:
       sz = os.path.getsize(fn)
     except OSError:
@@ -182,10 +214,17 @@ class Uploader:
       last_exc = None
       try:
         stat = self.do_upload(key, fn)
+      except UploadDeferred:
+        # Driving started during a parked transfer. Leave it pending and let
+        # regular driving files use this worker instead of waiting for offroad.
+        return None
       except Exception as e:
         last_exc = (e, traceback.format_exc())
 
-      if stat is not None and stat.status_code in (200, 201, 401, 403, 412):
+      # A refused Sentry upload is still pending, not successfully backed up.
+      # Keep the local file eligible for retry through the normal backoff.
+      accepted = (200, 201) if is_sentry_file(fn) else (200, 201, 401, 403, 412)
+      if stat is not None and stat.status_code in accepted:
         self.last_filename = fn
         dt = time.monotonic() - start_time
         if stat.status_code == 412:
@@ -198,7 +237,14 @@ class Uploader:
         success = True
       else:
         success = False
-        cloudlog.event("upload_failed", stat=stat, exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
+        if is_sentry_file(fn) and stat is not None and stat.status_code in (401, 403, 412):
+          # Successful new footage resets the main loop's global backoff. Keep
+          # a separate cooldown so denied old files don't restart every minute.
+          self.sentry_denied_until[fn] = time.monotonic() + SENTRY_DENIED_RETRY_SECONDS
+          cloudlog.event("sentry.upload_retry_deferred", key=key, status_code=stat.status_code,
+                         retry_seconds=SENTRY_DENIED_RETRY_SECONDS)
+        cloudlog.event("upload_failed", stat=stat, status_code=stat.status_code if stat is not None else None,
+                       exc=last_exc, key=key, fn=fn, sz=sz, network_type=network_type, metered=metered)
 
     if success:
       # tag file as uploaded
@@ -221,7 +267,13 @@ class Uploader:
     if key.endswith(('qlog', 'rlog')) or (key.startswith('boot/') and not key.endswith('.zst')):
       key += ".zst"
 
-    return self.upload(name, key, fn, network_type, metered)
+    success = self.upload(name, key, fn, network_type, metered)
+    if success:
+      self.sentry_failed.pop(fn, None)
+      self.sentry_denied_until.pop(fn, None)
+    elif success is False and is_sentry_file(fn):
+      self.sentry_failed[fn] = time.monotonic()
+    return success
 
 
 def main(exit_event: threading.Event | None = None) -> None:
@@ -247,6 +299,9 @@ def main(exit_event: threading.Event | None = None) -> None:
 
   backoff = 0.1
   while not exit_event.is_set():
+    if map_download_active():
+      exit_event.wait(POLL_INTERVAL)
+      continue
     sm.update(0)
     offroad = params.get_bool("IsOffroad")
     network_type = sm['deviceState'].networkType if not force_wifi else NetworkType.wifi
