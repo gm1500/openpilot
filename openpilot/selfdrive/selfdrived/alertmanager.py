@@ -50,13 +50,14 @@ class AlertManager:
       entry.end_frame = max(frame + 1, min_end_frame)
       entry.added_frame = frame
 
-  def process_alerts(self, frame: int, clear_event_types: set):
+  def process_alerts(self, frame: int, clear_event_types: set, *, keep_alert_types: set[str] | None = None):
     ae = AlertEntry()
     for v in self.alerts.values():
       if not v.alert:
         continue
 
-      if v.alert.event_type in clear_event_types:
+      # A scoped exemption preserves the existing expiry; it never renews an alert.
+      if v.alert.event_type in clear_event_types and (keep_alert_types is None or v.alert.alert_type not in keep_alert_types):
         v.end_frame = -1
 
       # sort by priority first and then by start_frame

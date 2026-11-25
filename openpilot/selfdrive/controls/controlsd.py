@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 from numbers import Number
 
 from openpilot.cereal import log
@@ -12,6 +13,7 @@ from openpilot.common.swaglog import cloudlog
 
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.vehicle_model import VehicleModel
+from openpilot.selfdrive.car.lateral_only import lateral_only_speed_available
 from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
@@ -97,7 +99,16 @@ class Controls:
 
     # Check which actuators can be enabled
     standstill = abs(CS.vEgo) <= max(self.CP.minSteerSpeed, 0.3) or CS.standstill
-    CC.latActive = self.sm['selfdriveState'].active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
+    ss = self.sm['selfdriveState']
+    now = time.monotonic()
+    lateral_only = (ss.alwaysOnLateralSupported and ss.alwaysOnLateralRequested and ss.alwaysOnLateralActive and
+                    not ss.alwaysOnLateralSuspended and self.sm.valid['selfdriveState'] and self.sm.valid['carState'] and
+                    not CS.brakePressed and not CS.regenBraking and not CS.parkingBrake and
+                    CS.gearShifter == car.CarState.GearShifter.drive and lateral_only_speed_available(self.CP, CS) and
+                    0 <= now - self.sm.logMonoTime['selfdriveState'] * 1e-9 <= .25 and
+                    0 <= now - self.sm.recv_time['selfdriveState'] <= .25 and
+                    0 <= now - self.sm.logMonoTime['carState'] * 1e-9 <= .15)
+    CC.latActive = (ss.active or lateral_only) and not CS.steerFaultTemporary and not CS.steerFaultPermanent and \
                    (not standstill or self.CP.steerAtStandstill)
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and self.CP.openpilotLongitudinalControl
 
@@ -165,7 +176,7 @@ class Controls:
     hudControl = CC.hudControl
     hudControl.setSpeed = float(CS.vCruiseCluster * CV.KPH_TO_MS)
     hudControl.speedVisible = CC.enabled
-    hudControl.lanesVisible = CC.enabled
+    hudControl.lanesVisible = CC.enabled or CC.latActive
     hudControl.leadVisible = self.sm['longitudinalPlan'].hasLead
     hudControl.leadDistanceBars = self.sm['selfdriveState'].personality.raw + 1
     hudControl.visualAlert = self.sm['selfdriveState'].alertHudVisual
@@ -176,7 +187,7 @@ class Controls:
       hudControl.leftLaneDepart = self.sm['driverAssistance'].leftLaneDeparture
       hudControl.rightLaneDepart = self.sm['driverAssistance'].rightLaneDeparture
 
-    if self.sm['selfdriveState'].active:
+    if CC.latActive:
       CO = self.sm['carOutput']
       if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
         self.steer_limited_by_safety = abs(CC.actuators.steeringAngleDeg - CO.actuatorsOutput.steeringAngleDeg) > \

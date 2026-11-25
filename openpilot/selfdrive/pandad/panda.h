@@ -71,7 +71,7 @@ public:
   std::optional<std::vector<uint8_t>> get_firmware_version();
   bool up_to_date();
   void set_power_saving(bool power_saving);
-  void send_heartbeat(bool engaged);
+  void send_heartbeat(bool engaged, bool lateral_requested=false, bool lateral_enabled=false, bool lateral_fault=false);
   void set_can_fd_auto(uint16_t bus, bool enabled);
   void can_send(const capnp::List<cereal::CanData>::Reader &can_data_list);
   bool can_receive(std::vector<can_frame>& out_vec);
