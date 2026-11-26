@@ -467,3 +467,141 @@ def test_mixed_startup_losses_do_not_exempt_live_driving_bus_errors(inputs, fiel
   setattr(getattr(ps, f'canState{bus_index}'), field, value)
   assert not any(check_with_rx(health, cp, ps, start=102.2))
 
+
+@pytest.fixture
+def retained_history(inputs):
+  cp, ps = inputs
+  # Route BD: these totals and stored codes were present in ELM, before the
+  # first valid Park observation, and unchanged during the recorded drive.
+  ps.canState0.totalErrorCnt, ps.canState0.totalRxLostCnt = 2, 1
+  ps.canState0.lastStoredError = 'formError'
+  ps.canState2.totalErrorCnt, ps.canState2.totalRxLostCnt = 1, 2
+  return cp, ps
+
+
+def observe_retained_history(health, cp, ps, *, parked=True):
+  ps.safetyModel, ps.safetyParam = 'elm327', 1
+  ps.ignitionCan = True
+  assert not health.check(cp, [ps], 99.8, True)
+  assert not health.check(cp, [ps], 99.9, True, parked=parked)
+  ps.safetyModel, ps.safetyParam = 'gm', GM_AOL_PARAM
+
+
+def test_bd_retained_error_history_qualifies_with_clean_current_status(retained_history):
+  cp, ps = retained_history
+  health = LateralPandaHealth()
+  observe_retained_history(health, cp, ps)
+  assert check_with_rx(health, cp, ps) == [False] * 20 + [True, True]
+  # The history is preserved; qualification does not clear or rewrite it.
+  assert (ps.canState0.totalErrorCnt, ps.canState0.totalRxLostCnt) == (2, 1)
+  assert ps.canState0.lastStoredError == 'formError'
+  assert (ps.canState2.totalErrorCnt, ps.canState2.totalRxLostCnt) == (1, 2)
+
+
+@pytest.mark.parametrize('bus_index', [0, 2])
+@pytest.mark.parametrize('field,value', [('lastError', 'formError'), ('lastDataError', 'crcError'),
+                                        ('receiveErrorCnt', 1), ('transmitErrorCnt', 1),
+                                        ('busOff', True), ('errorWarning', True), ('errorPassive', True),
+                                        ('totalTxLostCnt', 1), ('busOffCnt', 1), ('canCoreResetCnt', 1),
+                                        ('irq0CallRate', 16000), ('irq1CallRate', 16000), ('irq2CallRate', 16000)])
+def test_retained_history_never_exempts_live_error_at_startup(retained_history, bus_index, field, value):
+  cp, ps = retained_history
+  health = LateralPandaHealth()
+  setattr(getattr(ps, f'canState{bus_index}'), field, value)
+  observe_retained_history(health, cp, ps)
+  assert not any(check_with_rx(health, cp, ps))
+
+
+@pytest.mark.parametrize('qualified', [False, True])
+@pytest.mark.parametrize('bus_index', [0, 2])
+@pytest.mark.parametrize('field,value', [('totalErrorCnt', 9), ('totalRxLostCnt', 9),
+                                        ('lastStoredError', 'ackError'), ('lastDataStoredError', 'crcError')])
+def test_retained_history_change_is_not_rebaselined(retained_history, qualified, bus_index, field, value):
+  cp, ps = retained_history
+  health = LateralPandaHealth()
+  observe_retained_history(health, cp, ps)
+  if qualified:
+    assert check_with_rx(health, cp, ps)[-1]
+  bus = getattr(ps, f'canState{bus_index}')
+  previous = getattr(bus, field)
+  setattr(bus, field, value)
+  start = 102.2 if qualified else 100.
+  assert not any(check_with_rx(health, cp, ps, start=start))
+  setattr(bus, field, previous)
+  assert not any(check_with_rx(health, cp, ps, start=start + 2.2))
+
+
+@pytest.mark.parametrize('change', ['direct_gm', 'missed_park', 'host_restart', 'stale', 'gap', 'panda_restart',
+                                    'extra_fault', 'transport_error', 'history_reset'])
+def test_retained_history_needs_continuous_parked_startup_witness(retained_history, change):
+  cp, ps = retained_history
+  health = LateralPandaHealth()
+  if change == 'direct_gm':
+    assert not any(check_with_rx(health, cp, ps))
+    return
+  observe_retained_history(health, cp, ps, parked=change != 'missed_park')
+  if change == 'host_restart':
+    health = LateralPandaHealth()
+  elif change == 'stale':
+    assert not health.check(cp, [ps], 100., False)
+  elif change == 'panda_restart':
+    ps.uptime = 1
+  elif change == 'extra_fault':
+    ps.faults = ['interruptRateCan2', 'relayMalfunction']
+  elif change == 'transport_error':
+    ps.spiErrorCount = 1
+  elif change == 'history_reset':
+    assert check_with_rx(health, cp, ps)[-1]
+    # A reset to canonical legacy values must not bypass a lost witness.
+    for bus in (ps.canState0, ps.canState2):
+      bus.totalErrorCnt = bus.totalRxLostCnt = 0
+      bus.lastStoredError = bus.lastDataStoredError = 'noError'
+    assert not any(check_with_rx(health, cp, ps, start=102.2))
+    return
+  assert not any(check_with_rx(health, cp, ps, start=100.5 if change == 'gap' else 100.))
+
+
+@pytest.mark.parametrize('bus_index', [0, 2])
+@pytest.mark.parametrize('errors,lost,stored', [(1, 0, 'formError'), (8, 13, 'noError'), (100, 55, 'crcError')])
+def test_retained_history_uses_witnessed_values_not_exact_count_allowlist(inputs, bus_index, errors, lost, stored):
+  cp, ps = inputs
+  bus = getattr(ps, f'canState{bus_index}')
+  bus.totalErrorCnt, bus.totalRxLostCnt, bus.lastStoredError = errors, lost, stored
+  health = LateralPandaHealth()
+  observe_retained_history(health, cp, ps)
+  assert check_with_rx(health, cp, ps) == [False] * 20 + [True, True]
+
+
+@pytest.mark.parametrize('progressing', [(False, True), (True, False)])
+def test_bd_retained_history_requires_live_rx_on_both_buses(retained_history, progressing):
+  cp, ps = retained_history
+  health = LateralPandaHealth()
+  observe_retained_history(health, cp, ps)
+  assert not any(check_with_rx(health, cp, ps, progressing=progressing))
+
+
+def test_unknown_extended_history_cannot_reset_into_legacy_allowance(retained_history):
+  cp, ps = retained_history
+  health = LateralPandaHealth()
+  assert not any(check_with_rx(health, cp, ps))  # first observation already in GM
+  for bus in (ps.canState0, ps.canState2):
+    bus.totalErrorCnt = bus.totalRxLostCnt = 0
+    bus.lastStoredError = bus.lastDataStoredError = 'noError'
+  assert not any(check_with_rx(health, cp, ps, start=102.2))
+
+
+def test_changed_retained_error_history_cannot_be_bypassed_by_driver_rearm(retained_history):
+  cp, ps = retained_history
+  health = LateralPandaHealth()
+  observe_retained_history(health, cp, ps)
+  assert check_with_rx(health, cp, ps)[-1]
+  state = AlwaysOnLateralState()
+  args = {'enabled': True, 'onroad': True, 'supported': True, 'firmware_allowed': True,
+          'firmware_suspended': False, 'rearm': False}
+  state.update(**args, ready=health.check(cp, [ps], 102.1, True), now=102.1)
+  assert state.active
+  ps.canState0.lastStoredError = 'ackError'
+  for i, ready in enumerate(check_with_rx(health, cp, ps, start=102.2)):
+    state.update(**(args | {'rearm': i == 21}), ready=ready, now=102.2 + i / 10)
+    assert state.suspended and not state.requested and not state.active
+
