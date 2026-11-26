@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from opendbc.car.structs import car
 from openpilot.selfdrive.car.cruise import VCruiseHelper, ButtonType, IMPERIAL_INCREMENT
-from openpilot.selfdrive.car.map_cruise import read_map_speed, read_map_display, lead_limits_speed
+from openpilot.selfdrive.car.map_cruise import read_map_speed, read_map_display, real_lead_present
 
 
 class TestMapCruise(unittest.TestCase):
@@ -765,7 +765,7 @@ class TestMapCruise(unittest.TestCase):
     self.assertIsNone(read_map_speed(sm, 104.)[0])  # held display alone is insufficient
 
 
-class TestMapPulseLeadLimit(unittest.TestCase):
+class TestMapPulseLeadPresence(unittest.TestCase):
   def setUp(self):
     class SM(dict):
       pass
@@ -776,38 +776,32 @@ class TestMapPulseLeadLimit(unittest.TestCase):
     self.sm.recv_time = dict.fromkeys(self.sm, 100.)
     self.sm.logMonoTime = dict.fromkeys(self.sm, int(100e9))
 
-  def test_only_selected_real_lead_suppresses_pulse(self):
+  def test_either_real_lead_suppresses_pulse_independently_of_plan_source(self):
     plan, radar = self.sm['longitudinalPlan'], self.sm['radarState']
-    self.assertFalse(lead_limits_speed(self.sm, 10, 100.))  # lead exists, but cruise governs
-    plan.longitudinalPlanSource = 'lead0'
-    self.assertTrue(lead_limits_speed(self.sm, 10, 100.))
-    radar.leadOne.present = False
-    self.assertFalse(lead_limits_speed(self.sm, 10, 100.))  # MPC's synthetic no-lead obstacle
-    plan.longitudinalPlanSource = 'lead1'
-    self.assertFalse(lead_limits_speed(self.sm, 10, 100.))
-    radar.leadTwo.present = True
-    self.assertTrue(lead_limits_speed(self.sm, 10, 100.))
-    plan.longitudinalPlanSource = 'e2e'
-    radar.leadOne.present = True
-    self.assertFalse(lead_limits_speed(self.sm, 10, 100.))  # full experimental mode is not lead assistance
+    for source in ('cruise', 'lead0', 'lead1', 'e2e'):
+      plan.longitudinalPlanSource = source
+      for lead_one, lead_two in ((True, False), (False, True), (True, True), (False, False)):
+        radar.leadOne.present, radar.leadTwo.present = lead_one, lead_two
+        with self.subTest(source=source, lead_one=lead_one, lead_two=lead_two):
+          self.assertEqual(real_lead_present(self.sm, 10, 100.), lead_one or lead_two)
+    # A synthetic model stop is not a real lead, even when E2E assist is active.
     plan.e2eAssistActive = True
-    self.assertTrue(lead_limits_speed(self.sm, 10, 100.))
-    radar.leadOne.present = False
-    self.assertFalse(lead_limits_speed(self.sm, 10, 100.))  # lead-loss handoff
-    plan.longitudinalPlanSource = 'cruise'
-    self.assertFalse(lead_limits_speed(self.sm, 10, 100.))  # remaining adjustment may pulse again
+    self.assertFalse(real_lead_present(self.sm, 10, 100.))
 
-  def test_stale_invalid_or_previous_drive_plan_cannot_suppress_pulse(self):
-    self.sm['longitudinalPlan'].longitudinalPlanSource = 'lead0'
-    self.assertFalse(lead_limits_speed(self.sm, 10, 100.31))
-    self.assertFalse(lead_limits_speed(self.sm, 10, 99.9))
-    for service in self.sm:
-      for name, value in (('valid', False), ('recv_frame', 9), ('recv_time', 99.), ('logMonoTime', int(99e9))):
-        data = getattr(self.sm, name)
-        old = data[service]
-        data[service] = value
-        self.assertFalse(lead_limits_speed(self.sm, 10, 100.), (service, name))
-        data[service] = old
+  def test_stale_invalid_or_previous_drive_radar_cannot_suppress_pulse(self):
+    self.assertFalse(real_lead_present(self.sm, 10, 100.31))
+    self.assertFalse(real_lead_present(self.sm, 10, 99.9))
+    for name, value in (('valid', False), ('recv_frame', 9), ('recv_time', 99.), ('logMonoTime', int(99e9))):
+      data = getattr(self.sm, name)
+      old = data['radarState']
+      data['radarState'] = value
+      self.assertFalse(real_lead_present(self.sm, 10, 100.), name)
+      data['radarState'] = old
+
+  def test_plan_health_does_not_override_fresh_lead_presence(self):
+    for name, value in (('valid', False), ('recv_frame', 9), ('recv_time', 99.), ('logMonoTime', int(99e9))):
+      getattr(self.sm, name)['longitudinalPlan'] = value
+    self.assertTrue(real_lead_present(self.sm, 10, 100.))
 
 
 if __name__ == '__main__':

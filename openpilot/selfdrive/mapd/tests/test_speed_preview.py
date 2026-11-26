@@ -55,7 +55,7 @@ def test_packed_oblique_merge_is_preview_only_and_not_a_right_angle_turn():
   assert preview(packed((ramp, receiving)), offline=True) is None
 
 
-@pytest.mark.parametrize('issue', ['nearby', 'fork', 'reverse', 'turn', 'two_way', 'unknown', 'advisory', 'conditional'])
+@pytest.mark.parametrize('issue', ['nearby', 'fork', 'reverse', 'turn', 'two_way', 'unknown', 'conditional'])
 def test_packed_ramp_rejects_inferred_forks_and_restrictions(issue):
   ramp, receiving = pair(speed=None)
   ramp = replace(ramp, tags={**ramp.tags, 'highway': 'primary_link'})
@@ -73,9 +73,35 @@ def test_packed_ramp_rejects_inferred_forks_and_restrictions(issue):
   elif issue == 'unknown':
     receiving = replace(receiving, tags={'highway': 'primary', 'oneway': 'yes'})
   else:
-    tag = 'maxspeed:advisory' if issue == 'advisory' else 'maxspeed:conditional'
-    ramp = replace(ramp, tags={**ramp.tags, tag: '40' if issue == 'advisory' else '40 @ wet'})
+    ramp = replace(ramp, tags={**ramp.tags, 'maxspeed:conditional': '40 @ wet'})
   assert preview(packed([ramp, receiving, *extra]), offline=True) is None
+
+
+@pytest.mark.parametrize('offline', [False, True])
+@pytest.mark.parametrize('boundary', [80., 600.])
+def test_advisory_only_ramp_previews_legal_limit_without_qualifying_early_raise(offline, boundary):
+  ramp = polyline([(0, -100), (0, boundary)], None, 1, highway='motorway_link', oneway='yes')
+  ramp = replace(ramp, tags={**ramp.tags, 'maxspeed:advisory': '40'})
+  receiving = polyline([(0, boundary), (0, 1200)], '100', 2, highway='motorway', oneway='yes')
+  roads = packed((ramp, receiving)) if offline else (ramp, receiving)
+  target = preview(roads, straight_prediction(), offline=offline)
+  assert target.speed == pytest.approx(100 / 3.6)
+  assert target.distance == pytest.approx(boundary)
+  assert not target.advisory and not target.merge
+
+
+@pytest.mark.parametrize('issue', ['non_ramp', 'legal_limit', 'unresolved_legal'])
+def test_advisory_preview_exception_does_not_bypass_other_restrictions(issue):
+  ramp, receiving = pair(speed=None, next_speed='100', highway='motorway_link')
+  ramp = replace(ramp, tags={**ramp.tags, 'maxspeed:advisory': '40'})
+  receiving = replace(receiving, tags={**receiving.tags, 'highway': 'motorway'})
+  if issue == 'non_ramp':
+    ramp = replace(ramp, tags={**ramp.tags, 'highway': 'primary'})
+  elif issue == 'legal_limit':
+    ramp = replace(ramp, tags={**ramp.tags, 'maxspeed': '60'})
+  else:
+    ramp = replace(ramp, tags={**ramp.tags, 'maxspeed:conditional': '40 @ wet'})
+  assert preview((ramp, receiving), straight_prediction()) is None
 
 
 def fork_path(right=True, heading_error=3.):

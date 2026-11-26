@@ -9,6 +9,31 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 MAX_MODEL_AGE = .3
 TARGET_FILTER_TIME = .2
 MAX_STOP_DISTANCE = 150.
+STOP_WITHDRAWAL_TIME = 2.
+STOP_WITHDRAWAL_BRAKE = -.2
+STOP_WITHDRAWAL_SPEED = 1.5
+STOP_WITHDRAWAL_DISTANCE = 3.
+
+
+def supports_recent_stop(model, v_ego, distance):
+  """Require a sustained near-stop at the held position, not braking alone."""
+  acceleration = getattr(getattr(model, 'action', None), 'desiredAcceleration', math.nan)
+  if not math.isfinite(acceleration) or acceleration > STOP_WITHDRAWAL_BRAKE:
+    return False
+  times = ModelConstants.T_IDXS
+  speeds = [math.hypot(x, y) for x, y in zip(model.velocity.x, model.velocity.y, strict=True)]
+  arc = [0.]
+  for i in range(1, len(times)):
+    arc.append(arc[-1] + math.hypot(model.position.x[i] - model.position.x[i - 1],
+                                  model.position.y[i] - model.position.y[i - 1]))
+  speed_limit = min(STOP_WITHDRAWAL_SPEED, .35 * speeds[0])
+  tolerance = max(STOP_WITHDRAWAL_DISTANCE, .5 * max(0., v_ego))
+  for i in range(1, len(times) - 1):
+    end = next((j for j in range(i + 1, len(times)) if times[j] - times[i] >= .75), None)
+    if (end is not None and max(speeds[i:end + 1]) <= speed_limit and
+        distance - tolerance <= arc[i] and arc[end] <= distance + tolerance):
+      return True
+  return False
 
 
 def departing(model, v_ego, e2e_accel, e2e_stop):
@@ -37,6 +62,7 @@ class E2EStopTarget:
     self.distance = self.model_distance = -1.
     self.filtered_distance = -1.
     self.timestamp = self.update_time = self.speed = None
+    self.last_stop_observation = None
 
   def update(self, *, eligible, model, now, model_time, v_ego, e2e_accel, e2e_stop, lead_stop_distance=None, lead_distance=None):
     if (not eligible or not all(math.isfinite(x) for x in (now, model_time, v_ego, e2e_accel)) or
@@ -80,15 +106,26 @@ class E2EStopTarget:
     if self.active:
       self.distance = max(0., self.distance - travel)
       self.filtered_distance = max(0., self.filtered_distance - travel)
+    if (self.active and stop_distance < 0. and not e2e_stop and self.last_stop_observation is not None and
+        now - self.last_stop_observation > STOP_WITHDRAWAL_TIME):
+      # Repeated, still-fresh continuation frames cannot extend the deadline.
+      self._clear_target()
+      return
     if model_time != self.timestamp:
-      # A fresh withdrawal releases the position immediately. No grace period
-      # may keep a phantom stopped obstacle after the model requests departure.
-      self.requested = (stop_distance >= 0. or e2e_stop or approach) and not departing(model, speed, e2e_accel, e2e_stop)
+      # A small near-zero trajectory change must not abruptly discard braking
+      # for an already observed stop. Continue only with fresh braking and a
+      # sustained near-stop at that same location. The deadline is anchored to
+      # the last actual stop observation; continuation never renews itself.
+      continued = (stop_distance < 0. and not e2e_stop and self.active and self.last_stop_observation is not None and
+                   0 <= now - self.last_stop_observation <= STOP_WITHDRAWAL_TIME and intent.slowing and
+                   supports_recent_stop(model, speed, self.distance + speed * (now - model_time)))
+      self.requested = (stop_distance >= 0. or e2e_stop or approach or continued) and not departing(model, speed, e2e_accel, e2e_stop)
       if not self.requested:
         self._clear_target()  # retain the current horizon observation
         return
       self.model_distance = stop_distance if stop_distance >= 0. else endpoint
       if not covered and 0 <= stop_distance <= MAX_STOP_DISTANCE:
+        self.last_stop_observation = model_time
         # Compensate for travel since the observation without adding an offset.
         observed = max(0., stop_distance - speed * (now - model_time))
         if not self.active:
