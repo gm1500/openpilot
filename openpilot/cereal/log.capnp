@@ -569,11 +569,12 @@ struct PandaState @0xa7649e2575e4591e {
 
   # these fields are not used by openpilot, but they're
   # reserved for forks building alternate experiences.
-  controlsAllowedRESERVED1 @38 :Bool;
-  controlsAllowedRESERVED2 @39 :Bool;
+  lateralAllowed @38 :Bool;
+  lateralSupported @39 :Bool;
 
   nmiReset @40 :Bool;
   hardfaultReset @41 :Bool;
+  lateralSuspended @42 :Bool;
 
   enum FaultStatus {
     none @0;
@@ -827,7 +828,13 @@ struct SelfdriveState {
   alertHudVisual @12 :Car.CarControl.HUDControl.VisualAlert;
 
   # configurable driving settings
+  experimentalMode @10 :Bool; # manual E2E selection or automatic SLC E2E fallback
   personality @11 :LongitudinalPersonality;
+  alwaysOnLateralSupported @14 :Bool;
+  alwaysOnLateralRequested @15 :Bool; # fresh host readiness request; not cruise engagement
+  alwaysOnLateralActive @16 :Bool; # request acknowledged by the independent Panda lateral gate
+  alwaysOnLateralSuspended @17 :Bool; # brake/gear pause or Cancel/fault latch
+  alwaysOnLateralFaulted @18 :Bool; # latched host fault/Cancel; distinct from a benign brake/gear pause
 
   enum AudibleAlert {
     none @0;
@@ -871,7 +878,6 @@ struct SelfdriveState {
 
   deprecated :group {
     alertSound @8 :Car.CarControl.HUDControl.AudibleAlert;
-    experimentalMode @10 :Bool;
   }
 }
 
@@ -1076,6 +1082,7 @@ struct ModelDataV2 {
   laneLineStds @13 :List(Float32);
   roadEdges @10 :List(XYZTData);
   roadEdgeStds @14 :List(Float32);
+  lanePolicy @28 :Custom.LanePolicyState;
 
   # predicted lead cars
   leadsV3 @18 :List(LeadDataV3);
@@ -1246,6 +1253,15 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
   shouldStop @37: Bool;
   allowThrottle @38: Bool;
   allowBrake @39: Bool;
+  legacyConditionalExperimentalDEPRECATED @41 :Void;
+  legacyModelStopDEPRECATED @42 :Void;
+  e2eStopActive @43 :Bool;
+  e2eStopDistance @44 :Float32;
+  stopTarget @45 :Custom.StopTargetState;
+  legacyAccelBoostDEPRECATED @46 :Void;
+  e2eAssistActive @47 :Bool;
+  slcE2eFallback @48 :Bool; # planner acknowledgment of automatic no-limit E2E
+
 
 
   solverExecutionTime @35 :Float32;
@@ -1256,6 +1272,8 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
     lead1 @2;
     lead2 @3;
     e2e @4;
+    modelStopDEPRECATED @5;
+    stopTarget @6;
   }
 
 
@@ -2644,11 +2662,11 @@ struct Event {
     # DO change the name of the field and struct
     # DON'T change the ID (e.g. @107)
     # DON'T change which struct it points to
-    customReserved0 @107 :Custom.CustomReserved0;
-    customReserved1 @108 :Custom.CustomReserved1;
-    customReserved2 @109 :Custom.CustomReserved2;
-    customReserved3 @110 :Custom.CustomReserved3;
-    customReserved4 @111 :Custom.CustomReserved4;
+    mapSpeedLimit @107 :Custom.MapSpeedLimit;
+    mapCruiseState @108 :Custom.MapCruiseState;
+    mapTrafficControl @109 :Custom.MapTrafficControl;
+    sentryState @110 :Custom.SentryState;
+    sentryRecorderState @111 :Custom.SentryRecorderState;
     customReserved5 @112 :Custom.CustomReserved5;
     customReserved6 @113 :Custom.CustomReserved6;
     customReserved7 @114 :Custom.CustomReserved7;
