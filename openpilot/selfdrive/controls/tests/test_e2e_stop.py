@@ -14,6 +14,17 @@ def model(speed=15., brake=1.5):
   return NS(velocity=NS(x=velocities, y=[0.] * len(times)), position=NS(x=positions, y=[0.] * len(times)))
 
 
+def slow_pass_model(distance=8., acceleration=-1.):
+  """Slow nearly to a stop around distance, then predict a later departure."""
+  times = ModelConstants.T_IDXS
+  velocities = [4. - (3.2 / 3) * t if t <= 3. else .8 if t <= 5. else .8 + .8 * (t - 5.) for t in times]
+  positions = [4. * t - .5 * (3.2 / 3) * t**2 if t <= 3. else
+               7.2 + .8 * (t - 3.) if t <= 5. else 8.8 + .8 * (t - 5.) + .4 * (t - 5.)**2 for t in times]
+  return NS(velocity=NS(x=velocities, y=[0.] * len(times)),
+            position=NS(x=[p * distance / 8. for p in positions], y=[0.] * len(times)),
+            action=NS(desiredAcceleration=acceleration))
+
+
 class TestE2EStopTarget(unittest.TestCase):
   def setUp(self):
     self.target = E2EStopTarget()
@@ -176,6 +187,69 @@ class TestE2EStopTarget(unittest.TestCase):
     self.assertFalse(t.active)
     self.assertFalse(t.holding)
     self.assertEqual(t.distance, -1.)
+
+  def test_near_stop_with_later_departure_retains_only_a_previously_qualified_target(self):
+    prediction = slow_pass_model()
+    self.assertFalse(self.step(model=prediction, v_ego=4.).active)
+    self.assertTrue(self.step(model=model(speed=4., brake=1.), v_ego=4.).active)
+    before, observed_at = self.target.distance, self.target.last_stop_observation
+    t = self.step(model=prediction, v_ego=4.)
+    self.assertTrue(t.requested)
+    self.assertTrue(t.active)
+    self.assertFalse(t.holding)
+    self.assertAlmostEqual(t.distance, before - .2)
+    self.assertEqual(t.last_stop_observation, observed_at)
+    self.assertLess(t.model_distance, 0.)  # continuation did not invent a new observation
+
+  def test_continuation_does_not_renew_its_deadline(self):
+    self.step(model=model(speed=4., brake=1.), v_ego=4.)
+    observed_at = self.target.last_stop_observation
+    # Keep the predicted slowdown aligned with the approaching held location.
+    for _ in range(39):
+      t = self.step(model=slow_pass_model(distance=max(.5, self.target.distance - .2)), v_ego=4.)
+      self.assertTrue(t.active)
+      self.assertEqual(t.last_stop_observation, observed_at)
+    self.now += .051
+    t = self.step(model=slow_pass_model(distance=.5), v_ego=4.)
+    self.assertFalse(t.requested)
+    self.assertFalse(t.active)
+    self.assertIsNone(t.last_stop_observation)
+    self.assertFalse(self.step(model=slow_pass_model(distance=.5), v_ego=4.).active)
+
+  def test_repeated_continuation_frame_cannot_outlive_deadline(self):
+    self.step(model=model(speed=4., brake=1.), v_ego=4.)
+    for _ in range(39):
+      prediction = slow_pass_model(distance=max(.5, self.target.distance - .2))
+      self.assertTrue(self.step(model=prediction, v_ego=4.).active)
+    stamp = self.target.timestamp
+    self.now += .051
+    self.assertFalse(self.step(model=prediction, model_time=stamp, v_ego=4.).active)
+
+  def test_continuation_requires_braking_and_near_stop_at_held_position(self):
+    moving = model(speed=4., brake=0.)
+    moving.action = NS(desiredAcceleration=-1.)
+    isolated_dip = slow_pass_model()
+    isolated_dip.velocity.x = [4.] * len(ModelConstants.T_IDXS)
+    isolated_dip.velocity.x[20] = .8
+    for prediction in (slow_pass_model(acceleration=.1), slow_pass_model(acceleration=-.1),
+                       slow_pass_model(acceleration=math.nan), slow_pass_model(distance=20.), moving, isolated_dip):
+      with self.subTest(prediction=prediction):
+        self.target.reset()
+        self.step(model=model(speed=4., brake=1.), v_ego=4.)
+        t = self.step(model=prediction, v_ego=4.)
+        self.assertFalse(t.requested)
+        self.assertFalse(t.active)
+
+  def test_continuation_preserves_lead_override_and_freshness_guards(self):
+    for override in ({'eligible': False}, {'lead_distance': 5.}, {'lead_stop_distance': 5.},
+                     {'model_time': 0.}, {'now': self.now + 1.}):
+      with self.subTest(override=override):
+        self.target.reset()
+        self.step(model=model(speed=4., brake=1.), v_ego=4.)
+        self.assertTrue(self.step(model=slow_pass_model(), v_ego=4.).active)
+        t = self.step(model=slow_pass_model(), v_ego=4., **override)
+        self.assertFalse(t.active)
+        self.assertFalse(t.holding)
 
   def test_departure_releases_even_with_a_stationary_trajectory_prefix(self):
     self.step(model=model(speed=0.), v_ego=0., e2e_stop=True)
