@@ -75,18 +75,15 @@ def read_map_display(sm, now: float) -> float | None:
   return speed if speed is not None and 8 <= round(speed * CV.MS_TO_KPH, 3) <= 145 else None
 
 
-def lead_limits_speed(sm, started_frame: int, now: float) -> bool:
-  """Hide adjustment feedback only when a fresh plan selects a real lead."""
-  for service in ('longitudinalPlan', 'radarState'):
-    if (not sm.valid[service] or sm.recv_frame[service] < started_frame or
-        not 0 <= now - sm.logMonoTime[service] * 1e-9 <= 0.3 or
-        not 0 <= now - sm.recv_time[service] <= 0.3):
-      return False
-  plan, radar = sm['longitudinalPlan'], sm['radarState']
-  source = str(plan.longitudinalPlanSource)
-  if source == 'lead1':
-    return radar.leadTwo.present
-  return radar.leadOne.present and (source == 'lead0' or (source == 'e2e' and plan.e2eAssistActive))
+def real_lead_present(sm, started_frame: int, now: float) -> bool:
+  """Hide adjustment feedback whenever fresh radar data contains a real lead."""
+  service = 'radarState'
+  if (not sm.valid[service] or sm.recv_frame[service] < started_frame or
+      not 0 <= now - sm.logMonoTime[service] * 1e-9 <= 0.3 or
+      not 0 <= now - sm.recv_time[service] <= 0.3):
+    return False
+  radar = sm[service]
+  return radar.leadOne.present or radar.leadTwo.present
 
 
 class MapCruise:

@@ -71,6 +71,22 @@ def test_higher_limit_waits_for_entry_then_applies_immediately():
   assert d.target == 110
 
 
+def test_upcoming_legal_limit_display_keeps_current_ramp_advisory_target():
+  d = Drive()
+  d.speed = 40.  # read_map_speed supplies the current advisory when legal speed is absent
+  d.preview = MapPreview(100 / 3.6, 80., 2, advisory=False, merge=False)
+  d.tick()
+  assert d.target == 40
+  assert d.helper.map_cruise.preview_speed_ms == pytest.approx(100 / 3.6)
+  assert not d.helper.map_cruise.preview_active
+  d.preview = replace(d.preview, distance=1.)
+  d.tick()
+  assert d.target == 40
+  d.speed, d.way, d.preview = 100., 2, None
+  d.tick()
+  assert d.target == 100
+
+
 @pytest.mark.parametrize('issue', ['off', 'invalid_way', 'stale', 'reversed', 'missing'])
 def test_unusable_preview_does_not_apply_an_early_lower_limit(issue):
   d = Drive()

@@ -171,17 +171,19 @@ class SpeedPreviewer:
         match.distance > 12 or match.heading_error is None or match.heading_error > 12 or
         fix.motion_bearing is not None and abs((match.bearing - fix.motion_bearing + 180) % 360 - 180) > 12):
       return None
-    # A legal/advisory restriction on the ramp remains in force. Do not replace
-    # an unresolved conditional limit with an apparently unrestricted successor.
-    current, _ = preview_speed(match.road, match.forward, tracker._local_time)
-    if match.advisory_speed is not None or (current is None and
+    # An advisory-only ramp can show its upcoming legal limit while the current
+    # advisory remains the cruise target. It cannot qualify for an early raise
+    # below: that still requires an unrestricted, model-confirmed merge.
+    current, current_advisory = preview_speed(match.road, match.forward, tracker._local_time)
+    advisory_ramp = current_advisory and match.road.tags.get('highway', '').endswith('_link')
+    if (match.advisory_speed is not None and not advisory_ramp) or (current is None and
         (not match.road.tags.get('highway', '').endswith('_link') or
          any(k == 'maxspeed' or k.startswith('maxspeed:') for k in match.road.tags))):
       return None
     self._prepare(tracker)
-    # Untagged ramp pieces can span several hundred metres. Searching farther
+    # Ramp pieces can span several hundred metres. Searching farther
     # does not apply a target farther away: cruise has its own bounded trigger.
-    maximum = 1000. if current is None else 300.
+    maximum = 1000. if current is None or advisory_ramp else 300.
     receiving = {}
     routes = []
     origin = fix

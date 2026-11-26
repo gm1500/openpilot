@@ -11,7 +11,7 @@ from openpilot.common.realtime import drop_realtime
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.lib.prime_state import PrimeState
 from openpilot.selfdrive.ui.lib.notifications import Notifications
-from openpilot.selfdrive.car.map_cruise import map_cruise_supported, read_map_display, lead_limits_speed, MAP_MESSAGE_MAX_AGE
+from openpilot.selfdrive.car.map_cruise import map_cruise_supported, read_map_display, real_lead_present, MAP_MESSAGE_MAX_AGE
 from openpilot.selfdrive.car.slc_settings import SLCSettings
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.hardware import HARDWARE, PC
@@ -228,7 +228,7 @@ class UIState:
                                  cs.cruiseState.available and not (cs.standstill or cs.gasPressed or cs.brakePressed) and
                                  8 <= adjusting_kph <= 145 and 8 <= cs.vCruise <= 145 and
                                  displayed_target is not None and abs(displayed_target - adjusting_kph) < .01 and
-                                 not lead_limits_speed(self.sm, self.started_frame, now))
+                                 not real_lead_present(self.sm, self.started_frame, now))
     self._update_status()
     self._update_chestnut_state()
     device.update()

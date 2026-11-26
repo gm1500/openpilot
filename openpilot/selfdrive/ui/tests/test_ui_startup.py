@@ -160,6 +160,16 @@ def run_startup_smoke():
     map_state.adjustingSpeed = 70 / 3.6
     ui_state.update()
     assert ui_state.map_cruise_pulsing
+    # Any detected lead hides the pulse, including when cruise still governs.
+    msgs['longitudinalPlan'].longitudinalPlan.longitudinalPlanSource = 'cruise'
+    radar = msgs['radarState'].radarState
+    for lead in (radar.leadOne, radar.leadTwo):
+      lead.present = True
+      ui_state.update()
+      assert not ui_state.map_cruise_pulsing
+      lead.present = False
+    ui_state.update()
+    assert ui_state.map_cruise_pulsing
     ui_state.params.put_bool('IsMetric', False, block=True)
     ui_state.update_params()
     ui_state.update()
