@@ -4,6 +4,7 @@ import threading
 from openpilot.common.params import Params
 from openpilot.common.hardware import HARDWARE
 from openpilot.common.swaglog import cloudlog
+from openpilot.system.sentry.config import read_runtime, setting
 
 CAR_VOLTAGE_LOW_PASS_K = 0.011 # LPF gain for 45s tau (dt/tau / (dt/tau + 1))
 
@@ -110,7 +111,32 @@ class PowerMonitoring:
     now = time.monotonic()
     should_shutdown = False
     offroad_time = (now - offroad_timestamp)
-    low_voltage_shutdown = (self.car_voltage_mV < (VBATT_PAUSE_CHARGING * 1e3) and
+    # The configured battery cutoff applies throughout offroad operation while
+    # Sentry is enabled, including cooling, skipped parking and a lost lease.
+    # Only a live controller lease owns the parked time and energy budget.
+    sentry_enabled = setting(self.params, 'SentryEnabled')
+    cutoff_voltage = setting(self.params, 'SentryCutoffVoltage') if sentry_enabled else VBATT_PAUSE_CHARGING
+    sentry_runtime = read_runtime(now)
+    sentry = sentry_runtime.get('session', False) and sentry_enabled
+    if sentry and in_car and not ignition:
+      phase = sentry_runtime.get('phase')
+      if (self.params.get_bool('ForcePowerDown') or phase == 'Battery cutoff' or
+          offroad_time > 60 and self.car_voltage_mV < cutoff_voltage*1000):
+        return True
+      parking_since = sentry_runtime.get('parkingStartedAt', offroad_timestamp)
+      expired = (sentry_runtime.get('parkingLimitReached', False) or phase == 'Parking budget reached' or
+                 now-parking_since >= setting(self.params, 'SentryMaxHours')*3600)
+      if expired:
+        if setting(self.params, 'SentryShutdownOnTimeLimit'):
+          return True
+      elif phase == 'Cooling down':
+        if setting(self.params, 'SentryShutdownOnOverheat'):
+          return True
+      else:
+        return False
+      # An unchecked shutdown switch ends/pauses capture under ordinary offroad
+      # time and energy limits, retaining the selected battery cutoff.
+    low_voltage_shutdown = (self.car_voltage_mV < (cutoff_voltage * 1e3) and
                             offroad_time > VOLTAGE_SHUTDOWN_MIN_OFFROAD_TIME_S)
     should_shutdown |= offroad_time > MAX_TIME_OFFROAD_S
     should_shutdown |= low_voltage_shutdown
