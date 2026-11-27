@@ -19,7 +19,19 @@ struct CustomReserved1 @0xaedffd8f31e7b55d {
 struct CustomReserved2 @0xf35cc4560bbf6ec2 {
 }
 
-
+struct StopTargetState {
+  active @0 :Bool;
+  distance @1 :Float32; # remaining ego travel to the tracked target, -1 when inactive
+  holding @2 :Bool;
+  horizonCandidate @3 :Bool;
+  horizonStable @4 :Bool; # retired diagnostic; reserved for old logs
+  horizonDistance @5 :Float32; # unshifted candidate stop travel, -1 when absent
+  horizonRemaining @6 :Float32; # seconds of compact trajectory after endpoint onset
+  horizonStableTime @7 :Float32; # retired diagnostic; reserved for old logs
+  horizonSpread @8 :Float32; # retired diagnostic; reserved for old logs
+  approaching @9 :Bool; # E2E approach enabled; no stationary virtual obstacle
+  approachDistance @10 :Float32; # age-compensated endpoint preview, not a committed stop
+}
 
 struct CustomReserved3 @0xda96579883444c35 {
 }

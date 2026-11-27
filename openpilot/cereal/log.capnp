@@ -1247,6 +1247,14 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
   shouldStop @37: Bool;
   allowThrottle @38: Bool;
   allowBrake @39: Bool;
+  legacyConditionalExperimentalDEPRECATED @41 :Void;
+  legacyModelStopDEPRECATED @42 :Void;
+  e2eStopActive @43 :Bool;
+  e2eStopDistance @44 :Float32;
+  stopTarget @45 :Custom.StopTargetState;
+  legacyAccelBoostDEPRECATED @46 :Void;
+  e2eAssistActive @47 :Bool;
+
 
 
   solverExecutionTime @35 :Float32;
@@ -1257,6 +1265,8 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
     lead1 @2;
     lead2 @3;
     e2e @4;
+    modelStopDEPRECATED @5;
+    stopTarget @6;
   }
 
 
