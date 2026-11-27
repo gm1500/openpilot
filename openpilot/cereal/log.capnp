@@ -569,11 +569,12 @@ struct PandaState @0xa7649e2575e4591e {
 
   # these fields are not used by openpilot, but they're
   # reserved for forks building alternate experiences.
-  controlsAllowedRESERVED1 @38 :Bool;
-  controlsAllowedRESERVED2 @39 :Bool;
+  lateralAllowed @38 :Bool;
+  lateralSupported @39 :Bool;
 
   nmiReset @40 :Bool;
   hardfaultReset @41 :Bool;
+  lateralSuspended @42 :Bool;
 
   enum FaultStatus {
     none @0;
@@ -829,6 +830,11 @@ struct SelfdriveState {
   # configurable driving settings
   experimentalMode @10 :Bool; # manual E2E selection or automatic SLC E2E fallback
   personality @11 :LongitudinalPersonality;
+  alwaysOnLateralSupported @14 :Bool;
+  alwaysOnLateralRequested @15 :Bool; # fresh host readiness request; not cruise engagement
+  alwaysOnLateralActive @16 :Bool; # request acknowledged by the independent Panda lateral gate
+  alwaysOnLateralSuspended @17 :Bool; # brake/gear pause or Cancel/fault latch
+  alwaysOnLateralFaulted @18 :Bool; # latched host fault/Cancel; distinct from a benign brake/gear pause
 
   enum AudibleAlert {
     none @0;

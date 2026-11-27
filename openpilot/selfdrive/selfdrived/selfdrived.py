@@ -2,6 +2,7 @@
 import os
 import time
 import threading
+import math
 
 import openpilot.cereal.messaging as messaging
 
@@ -12,15 +13,20 @@ from msgq.visionipc import VisionIpcClient
 
 
 from openpilot.common.params import Params
+from openpilot.selfdrive.controls.lib.longitudinal_mode import slc_e2e_fallback
+from openpilot.selfdrive.car.map_cruise import map_cruise_supported
+from openpilot.selfdrive.car.lateral_only import lateral_only_speed_available
 from openpilot.common.realtime import config_realtime_process, Priority, Ratekeeper, DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_events import CarEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
-from openpilot.selfdrive.selfdrived.events import Events, ET
+from openpilot.selfdrive.selfdrived.events import Events, ET, EVENTS
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
+from openpilot.selfdrive.selfdrived.always_on_lateral import AlwaysOnLateralState, BLOCKING_TYPES, lateral_events_clear, lateral_safety_supported
+from openpilot.selfdrive.selfdrived.lateral_panda_health import LateralPandaHealth
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 
 from openpilot.common.version import get_build_metadata
@@ -82,7 +88,7 @@ class SelfdriveD:
     # TODO: de-couple selfdrived with card/conflate on carState without introducing controls mismatches
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
 
-    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan']
+    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan', 'mapCruiseState']
     if SIMULATION:
       ignore += ['cabinCameraState', 'managerState']
     if REPLAY:
@@ -92,7 +98,7 @@ class SelfdriveD:
                                    'carOutput', 'driverMonitoringState', 'longitudinalPlan', 'deviceMotion', 'lateralDelay',
                                    'managerState', 'vehicleParameters', 'radarState', 'lateralTorqueParameters',
                                    'controlsState', 'carControl', 'driverAssistance', 'alertDebug', 'userBookmark',
-                                   'lateralManeuverPlan'] + \
+                                   'lateralManeuverPlan', 'mapCruiseState'] + \
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
                                   ignore_alive=ignore, ignore_avg_freq=ignore,
                                   ignore_valid=ignore, frequency=int(1/DT_CTRL))
@@ -101,6 +107,8 @@ class SelfdriveD:
     self.is_metric = self.params.get_bool("IsMetric")
     self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
     self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
+    self.manual_e2e = self.params.get_bool("ExperimentalMode")
+    self.always_on_lateral_enabled = bool(self.params.get("AlwaysOnLateral", return_default=True))
     openpilot_enabled = self.params.get_bool("OpenpilotEnabledToggle")
 
     car_recognized = self.CP.brand != 'mock'
@@ -130,6 +138,14 @@ class SelfdriveD:
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
     self.state_machine = StateMachine()
+    self.always_on_lateral = AlwaysOnLateralState()
+    self._quiet_aol_disengagements: set[str] = set()
+    self._new_aol_fault_warnings: list[int] = []
+    self._retained_aol_fault_warnings: set[str] = set()
+    self.lateral_panda_health = LateralPandaHealth()
+    self.car_state_mono_time = 0.
+    self.car_state_received = False
+    self.car_state_valid = False
     self.rk = Ratekeeper(100, print_delay_threshold=None)
 
     # Determine startup event
@@ -355,6 +371,7 @@ class SelfdriveD:
       self.events.add(EventName.bigModelFailed)
 
     not_running = {p.name for p in self.sm['managerState'].processes if not p.running and p.shouldBeRunning}
+    not_running.discard('mapd')  # Missing maps fall back to model speed; they must not disengage control.
     if self.sm.recv_frame['managerState'] and len(not_running):
       if not_running != self.not_running_prev:
         cloudlog.event("process_not_running", not_running=not_running, error=True)
@@ -472,6 +489,10 @@ class SelfdriveD:
   def data_sample(self):
     _car_state = messaging.recv_one(self.car_state_sock)
     CS = _car_state.carState if _car_state else self.CS_prev
+    self.car_state_received = _car_state is not None
+    if _car_state is not None:
+      self.car_state_mono_time = _car_state.logMonoTime * 1e-9
+      self.car_state_valid = _car_state.valid
 
     self.sm.update(0)
 
@@ -516,6 +537,73 @@ class SelfdriveD:
 
     return CS
 
+  def update_always_on_lateral(self, CS, *, cruise_was_enabled: bool | None = None):
+    if cruise_was_enabled is None:
+      cruise_was_enabled = self.enabled
+    self._quiet_aol_disengagements = set()
+    self._new_aol_fault_warnings = []
+    now = self.sm.logMonoTime['modelV2'] * 1e-9 if REPLAY else time.monotonic()
+    pandas = self.sm['pandaStates']
+    car_state_fresh = self.car_state_valid and 0 <= now - self.car_state_mono_time <= .15
+    fresh = car_state_fresh and self.sm.all_checks()
+    for service, max_age in (('modelV2', .25), ('driverMonitoringState', .3), ('pandaStates', .3),
+                             ('extrinsicsCalibration', .8), ('deviceMotion', .25), ('vehicleParameters', .3),
+                             ('deviceState', 1.5)):
+      fresh &= (self.sm.valid[service] and 0 <= now - self.sm.logMonoTime[service] * 1e-9 <= max_age and
+                (REPLAY or 0 <= now - self.sm.recv_time[service] <= max_age))
+    supported = self.sm.valid['pandaStates'] and lateral_safety_supported(self.CP, pandas)
+    onroad = self.sm['deviceState'].started and any(ps.ignitionLine or ps.ignitionCan for ps in pandas)
+    active_pandas = [ps for ps in pandas if ps.safetyModel not in IGNORED_SAFETY_MODES]
+    firmware_allowed = bool(active_pandas) and all(ps.lateralAllowed for ps in active_pandas)
+    firmware_suspended = any(ps.lateralSuspended for ps in active_pandas)
+    panda_time = self.sm.logMonoTime['pandaStates'] * 1e-9
+    panda_fresh = (self.sm.valid['pandaStates'] and 0 <= now - panda_time <= .3 and
+                   (REPLAY or 0 <= now - self.sm.recv_time['pandaStates'] <= .3))
+    parked = (car_state_fresh and CS.canValid and not CS.canTimeout and CS.standstill and
+              CS.gearShifter == car.CarState.GearShifter.park)
+    panda_healthy = self.lateral_panda_health.check(self.CP, pandas, panda_time, panda_fresh, parked=parked)
+    dm = self.sm['driverMonitoringState']
+    paused = CS.brakePressed or CS.regenBraking or CS.parkingBrake or CS.gearShifter != car.CarState.GearShifter.drive
+    ready = (self.initialized and fresh and CS.canValid and not CS.canTimeout and
+             not CS.steerFaultTemporary and not CS.steerFaultPermanent and not CS.steeringDisengage and
+             self.sm['extrinsicsCalibration'].calStatus == log.ExtrinsicsCalibration.Status.calibrated and
+             not dm.lockout and not dm.alwaysOnLockout and dm.alertLevel != AlertLevel.three and not dm.noResponseForceDecel and
+             panda_healthy and
+             math.isfinite(self.sm['modelV2'].action.desiredCurvature) and lateral_events_clear(self.events, paused=paused, parked=parked))
+    cancel = self.car_state_received and any(be.type == ButtonType.cancel for be in CS.buttonEvents)
+    # SET->CANCEL may also generate a SET release. Cancel must not rearm an
+    # existing AOL fault latch through that release edge.
+    rearm = self.car_state_received and CS.buttonEnable and not cancel
+    self.always_on_lateral.update(enabled=self.always_on_lateral_enabled, onroad=onroad, supported=supported,
+                                 ready=ready, firmware_allowed=firmware_allowed, firmware_suspended=firmware_suspended,
+                                 rearm=rearm, now=now, paused=paused,
+                                 speed_available=lateral_only_speed_available(self.CP, CS))
+    if not self.always_on_lateral.suspended:
+      for key in self._retained_aol_fault_warnings:
+        self.AM.alerts[key].end_frame = -1
+      self._retained_aol_fault_warnings.clear()
+    # Lateral-only assistance needs the same driver warnings even though cruise
+    # stays disabled. A lateral shutdown also surfaces its existing fault alert.
+    if self.always_on_lateral.requested or self.always_on_lateral.active:
+      if ET.WARNING not in self.state_machine.current_alert_types:
+        self.state_machine.current_alert_types.append(ET.WARNING)
+    if self.always_on_lateral.just_stopped:
+      self.state_machine.current_alert_types += [ET.USER_DISABLE, ET.SOFT_DISABLE, ET.IMMEDIATE_DISABLE]
+      if not cruise_was_enabled and not self.enabled:
+        # A deliberate AOL-only pause/cancel needs no cruise-disengage chime.
+        # Keep other user-disable events and every simultaneous fault audible.
+        if cancel:
+          self._quiet_aol_disengagements.add(f"buttonCancel/{ET.USER_DISABLE}")
+        if CS.brakePressed or CS.regenBraking:
+          self._quiet_aol_disengagements.add(f"pedalPressed/{ET.USER_DISABLE}")
+        if CS.parkingBrake:
+          self._quiet_aol_disengagements.add(f"parkBrake/{ET.USER_DISABLE}")
+        # Warning-only faults need to survive the transition to suspended AOL,
+        # including a one-frame fault that soundd's slower update could miss.
+        self._new_aol_fault_warnings = [name for name in self.events.names if ET.WARNING in EVENTS.get(name, {}) and
+                                       (any(kind in EVENTS[name] for kind in BLOCKING_TYPES) or
+                                        name == EventName.steerTempUnavailableSilent and CS.steerFaultTemporary)]
+
   def update_alerts(self, CS):
     clear_event_types = set()
     if ET.WARNING not in self.state_machine.current_alert_types:
@@ -524,10 +612,25 @@ class SelfdriveD:
       clear_event_types.add(ET.NO_ENTRY)
 
     pers = LONGITUDINAL_PERSONALITY_MAP[self.personality]
-    alerts = self.events.create_alerts(self.state_machine.current_alert_types, [self.CP, CS, self.sm, self.is_metric,
-                                                                                self.state_machine.soft_disable_timer, pers])
+    callback_args = [self.CP, CS, self.sm, self.is_metric, self.state_machine.soft_disable_timer, pers]
+    alerts = self.events.create_alerts(self.state_machine.current_alert_types, callback_args)
+    if self._new_aol_fault_warnings:
+      fault_events = Events()
+      for name in self._new_aol_fault_warnings:
+        fault_events.add(name)
+      warnings = fault_events.create_alerts([ET.WARNING], callback_args)
+      alerts += warnings
+      self._retained_aol_fault_warnings.update(alert.alert_type for alert in warnings)
+    # Filter only these new chimes. EVENTS alerts are shared objects, and an
+    # existing normal-cruise or fault alert must retain its sound and duration.
+    alerts = [alert for alert in alerts if alert.alert_type not in self._quiet_aol_disengagements or
+              alert.audible_alert != log.SelfdriveState.AudibleAlert.disengage]
     self.AM.add_many(self.sm.frame, alerts)
-    self.AM.process_alerts(self.sm.frame, clear_event_types)
+    # Keep only these AOL-origin fault warnings for their existing duration.
+    # They are added once, never extended by a persistent fault while suspended.
+    self.AM.process_alerts(self.sm.frame, clear_event_types, keep_alert_types=self._retained_aol_fault_warnings)
+    self._retained_aol_fault_warnings = {key for key in self._retained_aol_fault_warnings
+                                        if self.AM.alerts[key].active(self.sm.frame)}
 
   def publish_selfdriveState(self, CS):
     # selfdriveState
@@ -539,6 +642,13 @@ class SelfdriveD:
     ss.state = self.state_machine.state
     ss.engageable = not self.events.contains(ET.NO_ENTRY)
     ss.personality = self.personality
+    mode_now = self.sm.logMonoTime['modelV2'] * 1e-9 if REPLAY else time.monotonic()
+    ss.experimentalMode = map_cruise_supported(self.CP) and (self.manual_e2e or slc_e2e_fallback(self.sm, mode_now, replay=REPLAY))
+    ss.alwaysOnLateralSupported = self.always_on_lateral.supported
+    ss.alwaysOnLateralRequested = self.always_on_lateral.requested
+    ss.alwaysOnLateralActive = self.always_on_lateral.active
+    ss.alwaysOnLateralSuspended = self.always_on_lateral.suspended or self.always_on_lateral.paused
+    ss.alwaysOnLateralFaulted = self.always_on_lateral.suspended
 
     ss.alertText1 = self.AM.current_alert.alert_text_1
     ss.alertText2 = self.AM.current_alert.alert_text_2
@@ -561,8 +671,10 @@ class SelfdriveD:
   def step(self):
     CS = self.data_sample()
     self.update_events(CS)
+    cruise_was_enabled = self.enabled
     if not self.CP.passive and self.initialized:
       self.enabled, self.active = self.state_machine.update(self.events)
+    self.update_always_on_lateral(CS, cruise_was_enabled=cruise_was_enabled)
     self.update_alerts(CS)
 
     self.publish_selfdriveState(CS)
@@ -574,6 +686,8 @@ class SelfdriveD:
       self.is_metric = self.params.get_bool("IsMetric")
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
+      self.manual_e2e = self.params.get_bool("ExperimentalMode")
+      self.always_on_lateral_enabled = bool(self.params.get("AlwaysOnLateral", return_default=True))
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
       time.sleep(0.1)
 

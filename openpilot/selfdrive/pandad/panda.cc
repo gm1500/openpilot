@@ -115,8 +115,11 @@ void Panda::set_power_saving(bool power_saving) {
 }
 
 
-void Panda::send_heartbeat(bool engaged) {
-  handle->control_write(0xf3, engaged, 0);
+void Panda::send_heartbeat(bool engaged, bool lateral_requested, bool lateral_enabled, bool lateral_fault) {
+  // The original engagement bit retains its longitudinal meaning. Lateral-only
+  // readiness and explicit saved intent use a separate, firmware-gated channel.
+  uint16_t lateral_flags = (lateral_requested ? 1U : 0U) | (lateral_enabled ? 2U : 0U) | (lateral_fault ? 4U : 0U);
+  handle->control_write(0xf3, engaged, lateral_flags);
 }
 
 
