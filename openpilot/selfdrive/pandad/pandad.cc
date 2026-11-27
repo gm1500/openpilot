@@ -102,6 +102,9 @@ void fill_panda_state(cereal::PandaState::Builder &ps, cereal::PandaState::Panda
   ps.setIgnitionLine((health.flags_pkt & HEALTH_FLAG_IGNITION_LINE) != 0U);
   ps.setIgnitionCan((health.flags_pkt & HEALTH_FLAG_IGNITION_CAN) != 0U);
   ps.setControlsAllowed((health.flags_pkt & HEALTH_FLAG_CONTROLS_ALLOWED) != 0U);
+  ps.setLateralAllowed((health.flags_pkt & HEALTH_FLAG_LATERAL_ALLOWED) != 0U);
+  ps.setLateralSupported((health.flags_pkt & HEALTH_FLAG_LATERAL_SUPPORTED) != 0U);
+  ps.setLateralSuspended((health.flags_pkt & HEALTH_FLAG_LATERAL_SUSPENDED) != 0U);
   ps.setTxBufferOverflow(health.tx_buffer_overflow_pkt);
   ps.setRxBufferOverflow(health.rx_buffer_overflow_pkt);
   ps.setPandaType(hw_type);
@@ -244,14 +247,17 @@ void send_peripheral_state(Panda *panda, PubMaster *pm) {
   pm->send("peripheralState", msg);
 }
 
-void process_panda_state(Panda *panda, PubMaster *pm, bool engaged, bool is_onroad, bool spoofing_started) {
+void process_panda_state(Panda *panda, PubMaster *pm, bool engaged, bool is_onroad, bool spoofing_started,
+                         bool lateral_requested, bool lateral_enabled, bool lateral_fault) {
   auto ignition_opt = send_panda_states(pm, panda, is_onroad, spoofing_started);
   if (!ignition_opt) {
     LOGE("Failed to get ignition_opt");
     return;
   }
 
-  panda->send_heartbeat(engaged);
+  const bool lateral_onroad = is_onroad && *ignition_opt;
+  panda->send_heartbeat(engaged, lateral_onroad && lateral_requested, lateral_onroad && lateral_enabled,
+                       lateral_onroad && lateral_enabled && lateral_fault);
 }
 
 void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control, bool is_onroad) {
@@ -336,6 +342,7 @@ void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control, 
 }
 
 void pandad_run(Panda *panda) {
+  Params params;
   const bool no_fan_control = getenv("NO_FAN_CONTROL") != nullptr;
   const bool spoofing_started = getenv("STARTED") != nullptr;
   const bool fake_send = getenv("FAKESEND") != nullptr;
@@ -366,7 +373,22 @@ void pandad_run(Panda *panda) {
       if (sm.updated("deviceState")) {
         is_onroad = sm["deviceState"].getDeviceState().getStarted();
       }
-      process_panda_state(panda, &pm, engaged, is_onroad, spoofing_started);
+      const auto ss_event = sm["selfdriveState"];
+      const uint64_t now = nanos_since_boot();
+      const bool fresh_selfdrive = sm.allAliveAndValid({"selfdriveState"}) &&
+        now >= ss_event.getLogMonoTime() && now - ss_event.getLogMonoTime() <= 250000000ULL &&
+        now >= sm.rcv_time("selfdriveState") && now - sm.rcv_time("selfdriveState") <= 250000000ULL;
+      const auto ss = ss_event.getSelfdriveState();
+      const bool lateral_requested = fresh_selfdrive && ss.getAlwaysOnLateralSupported() &&
+        ss.getAlwaysOnLateralRequested() && !ss.getAlwaysOnLateralSuspended();
+      // Do not turn a stale host message into a false OFF->ON preference edge:
+      // that edge is reserved for explicit driver rearming after Cancel/fault.
+      const std::string lateral_pref = params.get("AlwaysOnLateral");
+      const bool lateral_enabled = lateral_pref.empty() || lateral_pref == "1";
+      // Preserve a real fault across a selfdrived restart. Merely withdrawing
+      // readiness would keep renewing the firmware lease and lose the host latch.
+      const bool lateral_fault = !fresh_selfdrive || ss.getAlwaysOnLateralFaulted();
+      process_panda_state(panda, &pm, engaged, is_onroad, spoofing_started, lateral_requested, lateral_enabled, lateral_fault);
       panda_safety.configureSafetyMode(is_onroad);
     }
 
