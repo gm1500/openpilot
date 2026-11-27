@@ -19,6 +19,8 @@ struct CustomReserved1 @0xaedffd8f31e7b55d {
 struct CustomReserved2 @0xf35cc4560bbf6ec2 {
 }
 
+
+
 struct CustomReserved3 @0xda96579883444c35 {
 }
 
@@ -68,4 +70,16 @@ struct CustomReserved18 @0xc86a3d38d13eb3ef {
 }
 
 struct CustomReserved19 @0xa4f1eb3323f5f582 {
+}
+
+struct LanePolicyState {
+  valid @0 :Bool;
+  enabled @1 :Bool;
+  active @2 :Bool;
+  leftSource @3 :BoundarySource;
+  rightSource @4 :BoundarySource;
+  enum BoundarySource {
+    none @0;
+    painted @1;
+  }
 }
