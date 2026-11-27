@@ -11,6 +11,8 @@ from openpilot.common.realtime import drop_realtime
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.lib.prime_state import PrimeState
 from openpilot.selfdrive.ui.lib.notifications import Notifications
+from openpilot.selfdrive.car.map_cruise import map_cruise_supported, read_map_display, real_lead_present, MAP_MESSAGE_MAX_AGE
+from openpilot.selfdrive.car.slc_settings import SLCSettings
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.hardware import HARDWARE, PC
 from openpilot.common.hardware.usb import cable_connected, get_usb_state, is_chestnut_usb_id, usb_host_connected
@@ -70,6 +72,7 @@ class UIState:
         "radarState",
         "deviceState",
         "pandaStates",
+        "peripheralState",
         "carParams",
         "driverMonitoringState",
         "carState",
@@ -82,16 +85,26 @@ class UIState:
         "gpsLocationExternal",
         "gpsLocation",
         "navInstruction",
+        "mapSpeedLimit",
+        "mapCruiseState",
         "carOutput",
         "carControl",
         "vehicleParameters",
         "testJoystick",
-        "rawAudioData",
       ]
     )
 
     self.prime_state = PrimeState()
     self.notifications = Notifications()
+    self.speed_limit: float | None = None  # OSM m/s
+    self.speed_limit_is_advisory = False
+    self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
+    self.slc_settings = SLCSettings.read(self.params)
+    self.map_cruise_state = "waiting"
+    self.map_cruise_pulsing = False
+    self.map_cruise_e2e = False
+    self.speed_limit_preview = None
+    self.speed_limit_preview_advisory = False
 
     # UI Status tracking
     self.status: UIStatus = UIStatus.DISENGAGED
@@ -105,11 +118,12 @@ class UIState:
     self.initial_cruise_speed: int = self.params.get("InitialCruiseSpeedKph", return_default=True)
     self.is_release = self.params.get_bool("IsReleaseBranch")
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
+    self.experimental_mode: bool = self.params.get_bool("ExperimentalMode")
     self.navigation_enabled: bool = self.params.get_bool("NavigationEnabled")
     self.nav_destination_set: bool = self.params.get("NavDestination") is not None
-    self.lane_policy_enabled = get_lane_policy_enabled(self.params)
-    self.lane_policy_active = self.params.get_bool("LanePolicyActive")
-    self.lane_policy_blending = self.params.get_bool("LanePolicyBlending")
+    self.lane_policy_enabled: bool = get_lane_policy_enabled(self.params)
+    self.lane_policy_active: bool = self.params.get_bool("LanePolicyActive")
+    self.lane_policy_blending: bool = self.params.get_bool("LanePolicyBlending")
     self.chestnut_present: bool = False
     self.chestnut_compiled: bool = chestnut_compiled()
     self.chestnut_active: bool | None = None
@@ -147,6 +161,7 @@ class UIState:
   def add_on_body_changed_callbacks(self, callback: Callable[[], None]):
     self._on_body_changed_callbacks.append(callback)
 
+
   @property
   def engaged(self) -> bool:
     return self.started and self.sm["selfdriveState"].enabled
@@ -156,6 +171,11 @@ class UIState:
 
   def is_offroad(self) -> bool:
     return not self.started
+
+  @property
+  def started_frame(self) -> int:
+    """Current drive boundary for freshness checks shared by onroad widgets."""
+    return self._started_frame
 
   def received_since_started(self, service: str) -> bool:
     return self.sm.recv_frame[service] > self._started_frame
@@ -169,6 +189,37 @@ class UIState:
 
     self.sm.update(0)
     self._update_state()
+    now = time.monotonic()
+    self.speed_limit = read_map_display(self.sm, now)
+    if not self.started or self.sm.recv_frame['mapSpeedLimit'] < self.started_frame:
+      self.speed_limit = None
+    self.speed_limit_is_advisory = self.speed_limit is not None and self.sm['mapSpeedLimit'].speedLimit == 0
+    self.map_cruise_e2e = False
+    self.speed_limit_preview = None
+    self.speed_limit_preview_advisory = False
+    self.map_cruise_state = "waiting"
+    self.map_cruise_pulsing = False
+    if (self.started and self.sm.valid['mapCruiseState'] and self.sm.recv_frame['mapCruiseState'] >= self.started_frame and
+        0 <= now - self.sm.logMonoTime['mapCruiseState'] * 1e-9 <= MAP_MESSAGE_MAX_AGE and
+        0 <= now - self.sm.recv_time['mapCruiseState'] <= MAP_MESSAGE_MAX_AGE):
+      map_state = self.sm['mapCruiseState']
+      self.map_cruise_state = str(map_state.state)
+      self.map_cruise_e2e = bool(self.map_cruise_enabled and self.map_cruise_supported and map_state.e2eFallback)
+      if map_state.previewValid and 8 <= map_state.previewSpeed * 3.6 <= 145:
+        self.speed_limit_preview = map_state.previewSpeed
+        self.speed_limit_preview_advisory = map_state.previewAdvisory
+      adjusting_kph = round(self.sm['mapCruiseState'].adjustingSpeed * 3.6, 3)
+      cs = self.sm['carState']
+      displayed_speed = self.speed_limit_preview if self.speed_limit_preview is not None else self.speed_limit
+      displayed_target = self.slc_settings.target(displayed_speed * 3.6, self.is_metric) if displayed_speed is not None else None
+      # Completion/cancellation is latched in card, not inferred from speed
+      # mismatch, so a later speed drift cannot restart a finished pulse.
+      self.map_cruise_pulsing = (self.map_cruise_enabled and self.map_cruise_supported and self.engaged and
+                                 (self.speed_limit_preview is not None or not map_state.e2eFallback and self.speed_limit is not None) and
+                                 cs.cruiseState.available and not (cs.standstill or cs.gasPressed or cs.brakePressed) and
+                                 8 <= adjusting_kph <= 145 and 8 <= cs.vCruise <= 145 and
+                                 displayed_target is not None and abs(displayed_target - adjusting_kph) < .01 and
+                                 not real_lead_present(self.sm, self.started_frame, now))
     self._update_status()
     self._update_chestnut_state()
     device.update()
@@ -261,10 +312,25 @@ class UIState:
     else:
       self.chestnut_state = ChestnutState.ACTIVE
 
+  @property
+  def map_cruise_supported(self) -> bool:
+    return map_cruise_supported(self.CP)
+
+  def set_map_cruise_enabled(self, enabled: bool) -> None:
+    self.params.put_bool("MapCruiseEnabled", enabled)
+    self.map_cruise_enabled = enabled
+    self.map_cruise_state = "waiting" if enabled else "off"
+    self.map_cruise_pulsing = False
+    self.map_cruise_e2e = False
+
   def set_lane_policy_enabled(self, enabled: bool) -> None:
     """Persist the HUD selector and update its in-memory state immediately."""
     self.params.put_bool("LanePolicyEnabled", enabled)
     self.lane_policy_enabled = enabled
+
+  def set_experimental_mode(self, enabled: bool) -> None:
+    self.params.put_bool("ExperimentalMode", enabled, block=True)
+    self.experimental_mode = enabled
 
 
   @property
@@ -275,7 +341,6 @@ class UIState:
       if self.lane_policy_blending:
         return (97, 183, 230)
     return None
-
 
   def update_params(self) -> None:
     # For slower operations
@@ -292,9 +357,12 @@ class UIState:
     self.is_metric = self.params.get_bool("IsMetric")
     self.initial_cruise_speed = self.params.get("InitialCruiseSpeedKph", return_default=True)
     self.always_on_dm = self.params.get_bool("AlwaysOnDM")
+    self.experimental_mode = self.params.get_bool("ExperimentalMode")
     self.personality_param = self.params.get("LongitudinalPersonality", return_default=True)
     self.navigation_enabled = self.params.get_bool("NavigationEnabled")
     self.nav_destination_set = self.params.get("NavDestination") is not None
+    self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
+    self.slc_settings = SLCSettings.read(self.params)
     self.lane_policy_enabled = get_lane_policy_enabled(self.params)
     self.lane_policy_active = self.params.get_bool("LanePolicyActive")
     self.lane_policy_blending = self.params.get_bool("LanePolicyBlending")

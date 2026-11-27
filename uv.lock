@@ -335,6 +335,14 @@ wheels = [
 ]
 
 [[package]]
+name = "flatbuffers"
+version = "25.12.19"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl", hash = "sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4", size = 26661, upload-time = "2025-12-19T23:16:13.622Z" },
+]
+
+[[package]]
 name = "fonttools"
 version = "4.65.0"
 source = { registry = "https://pypi.org/simple" }
@@ -349,6 +357,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e2/5e/f9600553b9f645e3068553831685ff1dab6259536a23b38d2e048de38f17/fonttools-4.65.0-cp312-cp312-win32.whl", hash = "sha256:04f73dd01005752a6e75cf4a8dc6b70dc724d1d4bc34cc89522153f4a2f07680", size = 2432089, upload-time = "2026-09-10T15:34:02.803Z" },
     { url = "https://files.pythonhosted.org/packages/3a/02/e436a6a1863b9862bab9f82d6da33055dd7aa3738017edd902a163525dc2/fonttools-4.65.0-cp312-cp312-win_amd64.whl", hash = "sha256:3b5d9ba89edf778b376e669b879ae33a198bf45cf5a23c3f6514f935cf9d0d9d", size = 2483475, upload-time = "2026-09-10T15:34:05.09Z" },
     { url = "https://files.pythonhosted.org/packages/e6/35/f894ceb867118c0261d0f69a9bd516b045a3754238f76c88a49513ac7a83/fonttools-4.65.0-py3-none-any.whl", hash = "sha256:3060b8c1fc2329fa20265b7c138614143ea7c1624e26c5c180c76aeb74deae6f", size = 1196441, upload-time = "2026-09-10T15:35:52.347Z" },
+]
+
+[[package]]
+name = "h3"
+version = "4.5.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/a8/307aba523fae45079c7e940ec394ffc81ffe9231f07a982ca97f73b2fa36/h3-4.5.1.tar.gz", hash = "sha256:be7fd86fcf742d23c7e7e249b5a416b5cb36ecc2b2169c585f7d7a17df7f7e66", size = 182858, upload-time = "2026-11-18T20:36:00.935Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b4/dd/9ef5d76e6f8977f3b2aa6ed3c87cddc97e538dd435140444d5be7039fe9e/h3-4.5.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:142a25eccd0ed411792a929d9c381aa270d81a50cbcf3c26fa65d8f3547e50df", size = 874670, upload-time = "2026-11-18T20:35:17.281Z" },
+    { url = "https://files.pythonhosted.org/packages/ac/08/fefeb57f403620d1044d2de4a21aa45b2d7afcd2af6f55119c7662d75763/h3-4.5.1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:166ad618b9594f8fd07a249a82a42fd0487b9dce1889bc6aaf11a77a1394cb0f", size = 1034428, upload-time = "2026-11-18T20:35:18.702Z" },
+    { url = "https://files.pythonhosted.org/packages/22/c3/4f7ad7dd3ada1787cc76892b5a923a43ef23aa542c3cf4ff5d485dddd344/h3-4.5.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e28c6a89de48c8048be789c92d860402f6636de6fd50af0da5710f4fe79ea53e", size = 1087710, upload-time = "2026-11-18T20:35:19.908Z" },
+    { url = "https://files.pythonhosted.org/packages/71/b1/98219168e524d36c16bb79ea02a309376ba409e15d0e66996aa48df61941/h3-4.5.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:51efa05102ea52c30031632a69a55fc703b4c4ffbc82b3324db248d3010b9334", size = 1097918, upload-time = "2026-11-18T20:35:21.051Z" },
+    { url = "https://files.pythonhosted.org/packages/49/f1/ebea8dba0a25c5ab717fe6cedabfc7d3ea678a53eb5b5eefdafecb9ca188/h3-4.5.1-cp312-cp312-win_amd64.whl", hash = "sha256:b3105bac92b5b31909f278e9bdefbce50394b15d030314780b85547b6e5668e1", size = 847031, upload-time = "2026-11-18T20:35:22.101Z" },
+    { url = "https://files.pythonhosted.org/packages/84/f6/0cce2b7ca60233ab6ce367f6782f102f88aea2d9f8f92cd8a1f183e36338/h3-4.5.1-cp312-cp312-win_arm64.whl", hash = "sha256:f7b4eed2234080d8e171bd00871d91cd62dd523591fe8d383986c5bec7b4d4c9", size = 776078, upload-time = "2026-11-18T20:35:23.142Z" },
 ]
 
 [[package]]
@@ -621,7 +643,9 @@ dependencies = [
     { name = "scons" },
     { name = "setproctitle" },
     { name = "sounddevice" },
+    { name = "timezonefinder" },
     { name = "tqdm" },
+    { name = "tzdata" },
     { name = "websocket-client" },
     { name = "zstandard" },
 ]
@@ -688,9 +712,11 @@ requires-dist = [
     { name = "setproctitle" },
     { name = "sounddevice" },
     { name = "teleoprtc", marker = "extra == 'submodules'", editable = "teleoprtc_repo" },
+    { name = "timezonefinder", specifier = "==8.2.0" },
     { name = "tinygrad", marker = "extra == 'submodules'", editable = "tinygrad_repo" },
     { name = "tqdm" },
     { name = "ty", marker = "extra == 'testing'" },
+    { name = "tzdata" },
     { name = "websocket-client" },
     { name = "zstandard" },
 ]
@@ -724,7 +750,7 @@ requires-dist = [
     { name = "comma-deps-gcc-arm-none-eabi", marker = "extra == 'dev'" },
     { name = "libusb-package" },
     { name = "libusb1" },
-    { name = "opendbc", git = "https://github.com/commaai/opendbc.git?rev=master" },
+    { name = "opendbc", git = "https://github.com/gm1500/opendbc.git?rev=196d1b12da7ebf32fbd0081b16d3ff95817fb610" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "scons", marker = "extra == 'dev'" },
     { name = "setuptools", marker = "extra == 'dev'" },
@@ -993,6 +1019,22 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
+name = "timezonefinder"
+version = "8.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi" },
+    { name = "flatbuffers" },
+    { name = "h3" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8e/d9/b8fbd22d2e2ae79eb693da9a929af36baa7aab46858c0f620ce5392d9910/timezonefinder-8.2.0.tar.gz", hash = "sha256:27b662835ae6e9a820431f5fbc54df05f5744e0a2d2f709f028040231838c05b", size = 53091464, upload-time = "2025-12-23T12:33:49.624Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7e/7f/1f07ab7fa752d91902d04f8a49946fbdec65cb5fd017e8d94c216eea6778/timezonefinder-8.2.0-cp39-abi3-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:282ef0571a29b70b92d38f8ca3e444cb0eff9fafd7322e08da0da298a9e35cc8", size = 53093111, upload-time = "2025-12-23T12:33:41.255Z" },
+    { url = "https://files.pythonhosted.org/packages/21/40/42e97f5f02b342b686fa4db7321b5caa2a40ff93247c88eca6e8128fabc9/timezonefinder-8.2.0-cp39-abi3-musllinux_1_1_x86_64.whl", hash = "sha256:9ca70a379de6f43013042c36f78c1727dede5b68e8bd00e75fbe6d7ad869d178", size = 53095095, upload-time = "2025-12-23T12:33:45.927Z" },
+]
+
+[[package]]
 name = "tinygrad"
 version = "0.14.0"
 source = { editable = "tinygrad_repo" }
@@ -1087,6 +1129,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c4/f6/c286d5e1b560cfd16d6e91fdab683718aacf09fc88938ca06dcc9d1c8502/ty-0.0.80-py3-none-win32.whl", hash = "sha256:a81b3b512f7b4c68e42fbd1835633de658809666e9aafd5defa52bbc5197698d", size = 12881806, upload-time = "2026-09-09T21:18:41.507Z" },
     { url = "https://files.pythonhosted.org/packages/fd/c8/3b3a8ac16d47a23ff34bf57c0d99a491860748aea96e0e886b4bfed54f9b/ty-0.0.80-py3-none-win_amd64.whl", hash = "sha256:8043f99878a2ae434781cb881c8a3840dff70c4a5b60bdc5ae84251f35ee063f", size = 13528883, upload-time = "2026-09-09T21:18:43.687Z" },
     { url = "https://files.pythonhosted.org/packages/2e/71/a6c697930fca76596d7d17f8853120f41a298fd9ea632c901cfca8ca869b/ty-0.0.80-py3-none-win_arm64.whl", hash = "sha256:e277ef034331da5319efc839c064968d24f35715b71c70369cf97d36fe4dcbdb", size = 13370135, upload-time = "2026-09-09T21:18:45.758Z" },
+]
+
+[[package]]
+name = "tzdata"
+version = "2026.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7a/29/6a1391d31cd00ff9e927215a224a880e1e84e826b64ba80a499e51c074d8/tzdata-2026.6.tar.gz", hash = "sha256:85d2cd9c09f81f0bb29db27759fc83af4f1e620efb814f8c5bf8b4cc4feece6d", size = 201017, upload-time = "2026-10-28T09:57:09.137Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0a/66/9a06c2227fedfd4919f0eaaa8b94377d9730882a7e4f95823c9a331ab5e1/tzdata-2026.6-py2.py3-none-any.whl", hash = "sha256:0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec", size = 348210, upload-time = "2026-10-28T09:57:07.276Z" },
 ]
 
 [[package]]
