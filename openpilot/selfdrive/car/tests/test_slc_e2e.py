@@ -142,6 +142,72 @@ class TestSLCFallback(unittest.TestCase):
     self.tick(150)
     self.assertEqual(self.helper.v_cruise_kph, 99)
 
+  def test_resume_restores_manual_set_above_map_with_manual_e2e(self):
+    # C2: RES restored 115/110 but the E2E cap immediately replaced it with 100.
+    for slc_enabled in (False, True):
+      for button in (ButtonType.accelCruise, ButtonType.resumeCruise):
+        for saved_speed in (110, 115):
+          with self.subTest(slc_enabled=slc_enabled, button=button, saved_speed=saved_speed):
+            self.setUp()
+            self.toggle = slc_enabled
+            self.manual = True
+            self.limit = 100
+            self.cs.vEgo = saved_speed / 3.6
+            self.tick()
+            self.tick(button=ButtonType.setCruise, pressed=True)
+            self.tick(button=ButtonType.setCruise)
+            self.assertEqual(self.helper.v_cruise_kph, saved_speed)
+            self.enabled = False
+            self.tick(10)
+            self.tick(button=button, pressed=True)
+            previous = car.CarState(**self.cs.to_dict()).as_reader()
+            self.enabled = True
+            self.tick()
+            # Match card's update-before-initialize order on the engagement edge.
+            self.helper.initialize_v_cruise(previous, 100)
+            self.assertEqual(self.helper.v_cruise_kph, saved_speed)
+            self.tick(button=button)
+            self.tick(150)
+            self.assertEqual(self.helper.v_cruise_kph, saved_speed)
+            self.assertEqual(self.helper.v_cruise_cluster_kph, saved_speed)
+            self.assertTrue(self.helper.map_cruise.driver_speed_override)
+            self.assertEqual(self.helper.map_cruise.state(True), 'paused')
+            self.assertIsNone(self.helper.map_pulse.target_kph)
+            self.limit = None
+            self.tick(150)
+            self.limit = 100
+            self.tick(150)
+            self.assertEqual(self.helper.v_cruise_kph, saved_speed)
+            self.limit = 80
+            self.tick()
+            self.assertEqual(self.helper.v_cruise_kph, 80)
+            self.assertFalse(self.helper.map_cruise.driver_speed_override)
+
+  def test_resume_override_respects_explicit_set_policy(self):
+    self.manual = True
+    self.settings = SLCSettings(resume_policy=1)
+    self.limit = 100
+    self.cs.vEgo = 110 / 3.6
+    self.tick()
+    self.tick(button=ButtonType.setCruise, pressed=True)
+    self.tick(button=ButtonType.setCruise)
+    self.enabled = False
+    self.tick(button=ButtonType.accelCruise, pressed=True)
+    self.helper.initialize_v_cruise(self.cs, 100)
+    self.enabled = True
+    self.tick(button=ButtonType.accelCruise)
+    self.limit = 80
+    self.tick(150)
+    self.assertEqual(self.helper.v_cruise_kph, 110)
+    self.enabled = False
+    self.cs.vEgo = 40 / 3.6
+    self.tick(button=ButtonType.decelCruise, pressed=True)
+    self.helper.initialize_v_cruise(self.cs, 100)
+    self.enabled = True
+    self.tick(button=ButtonType.decelCruise)
+    self.assertEqual(self.helper.v_cruise_kph, 80)
+    self.assertFalse(self.helper.map_cruise.driver_speed_override)
+
   def test_manual_e2e_map_cap_yields_to_driver_buttons_with_slc_disabled(self):
     self.toggle = False
     self.limit = 60

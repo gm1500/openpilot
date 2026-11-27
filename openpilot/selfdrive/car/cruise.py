@@ -205,7 +205,9 @@ class VCruiseHelper:
 
     if self.map_cruise.enabled:
       if resume:
-        self.map_cruise.pause()
+        # RES explicitly reselects the saved speed, including its manual map
+        # override. Otherwise the E2E cap immediately undoes the restoration.
+        self.map_cruise.pause(driver_adjusted_speed=True)
       else:
         self._select_map_speed(CS)
         # A fresh no-map engagement already has the stock initial SET.
