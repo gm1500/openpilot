@@ -20,6 +20,8 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
+from openpilot.selfdrive.car.map_cruise import read_map_speed, read_map_preview, fallback_e2e_ready, map_cruise_supported
+from openpilot.selfdrive.car.slc_settings import SLCSettings
 
 REPLAY = "REPLAY" in os.environ
 
@@ -65,8 +67,8 @@ class Car:
 
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
-    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'])
-    self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'radarTracks'])
+    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents', 'mapSpeedLimit', 'longitudinalPlan'])
+    self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'radarTracks', 'mapCruiseState'])
 
     self.can_rcv_cum_timeout_counter = 0
 
@@ -151,6 +153,11 @@ class Car:
 
     self.v_cruise_helper = VCruiseHelper(self.CP)
 
+    self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
+    self.slc_settings = SLCSettings.read(self.params)
+    self.automatic_e2e = map_cruise_supported(self.CP)
+    self.manual_e2e = self.params.get_bool("ExperimentalMode")
+    self._last_map_status = None
     self.is_metric = self.params.get_bool("IsMetric")
     self.initial_cruise_speed = self.params.get("InitialCruiseSpeedKph", return_default=True)
 
@@ -180,7 +187,15 @@ class Car:
     if can_rcv_valid and REPLAY:
       self.can_log_mono_time = messaging.log_from_bytes(can_strs[0]).logMonoTime
 
-    self.v_cruise_helper.update_v_cruise(CS, self.sm['carControl'].enabled, self.is_metric)
+    now = self.can_log_mono_time * 1e-9 if REPLAY else time.monotonic()
+    map_speed, gps_time = read_map_speed(self.sm, now, replay=REPLAY)
+    # Logs predating SLC retain the original manual button behavior.
+    map_enabled = self.map_cruise_enabled and (not REPLAY or self.sm.seen['mapSpeedLimit'])
+    self.v_cruise_helper.update_v_cruise(CS, self.sm['carControl'].enabled, self.is_metric,
+                                      map_enabled=map_enabled, map_speed=map_speed, map_gps_time=gps_time, now=now,
+                                      automatic_e2e=self.automatic_e2e, manual_e2e=self.manual_e2e,
+                                      e2e_ready=fallback_e2e_ready(self.sm, now, replay=REPLAY),
+                                      slc_settings=self.slc_settings, map_preview=read_map_preview(self.sm, now, replay=REPLAY))
     if self.sm['carControl'].enabled and not self.CC_prev.enabled:
       # Use CarState w/ buttons from the step selfdrived enables on
       self.v_cruise_helper.initialize_v_cruise(self.CS_prev, self.initial_cruise_speed)
@@ -214,6 +229,27 @@ class Car:
     cs_send.carState.canErrorCounter = self.can_rcv_cum_timeout_counter
     cs_send.carState.cumLagMs = -self.rk.remaining * 1000.
     self.pm.send('carState', cs_send)
+
+    selector = self.v_cruise_helper.map_cruise
+    adjusting = self.v_cruise_helper.map_pulse.target_kph
+    preview_speed, preview_advisory = selector.preview_speed_ms, selector.preview_advisory
+    status = (selector.state(self.sm['carControl'].enabled and CS.cruiseState.available),
+              selector.target_kph, selector.e2e_fallback, selector.automatic_e2e, CS.vCruise,
+              adjusting, preview_speed, preview_advisory, selector.driver_speed_override)
+    if self.sm.frame % 20 == 0 or status != self._last_map_status:
+      self._last_map_status = status
+      map_msg = messaging.new_message('mapCruiseState', valid=CS.canValid)
+      map_msg.mapCruiseState.state = status[0]
+      map_msg.mapCruiseState.targetSpeed = (selector.target_kph or 0.) / 3.6
+      map_msg.mapCruiseState.adjustingSpeed = (adjusting or 0.) / 3.6
+      map_msg.mapCruiseState.e2eFallback = selector.e2e_fallback
+      map_msg.mapCruiseState.automaticE2e = selector.automatic_e2e
+      map_msg.mapCruiseState.setSpeed = CS.vCruise / 3.6
+      map_msg.mapCruiseState.previewValid = preview_speed is not None
+      map_msg.mapCruiseState.previewSpeed = preview_speed or 0.
+      map_msg.mapCruiseState.previewAdvisory = preview_advisory
+      map_msg.mapCruiseState.driverSpeedOverride = selector.driver_speed_override
+      self.pm.send('mapCruiseState', map_msg)
 
     if RD is not None:
       tracks_msg = messaging.new_message('radarTracks')
@@ -255,6 +291,9 @@ class Car:
 
   def params_thread(self, evt):
     while not evt.is_set():
+      self.map_cruise_enabled = self.params.get("MapCruiseEnabled", return_default=True)
+      self.manual_e2e = self.params.get_bool("ExperimentalMode")
+      self.slc_settings = SLCSettings.read(self.params)
       self.is_metric = self.params.get_bool("IsMetric")
       self.initial_cruise_speed = self.params.get("InitialCruiseSpeedKph", return_default=True)
       time.sleep(0.1)

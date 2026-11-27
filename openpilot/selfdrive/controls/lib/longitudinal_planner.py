@@ -16,6 +16,8 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.e2e_slowing import E2ESlowingAssist, get_model_lead_speed
 from openpilot.selfdrive.controls.lib.e2e_stop import E2EStopTarget
 from openpilot.selfdrive.controls.lib.lead_stop import get_lead_distance, get_lead_stop_distance
+from openpilot.selfdrive.controls.lib.longitudinal_mode import slc_e2e_fallback, full_e2e_requested, e2e_map_speed_cap
+from openpilot.selfdrive.car.map_cruise import map_cruise_supported
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
@@ -60,6 +62,7 @@ class LongitudinalPlanner:
     self.e2e_assist = E2ESlowingAssist(dt)
     self.stop_target = E2EStopTarget()
     self.e2e_assist_active = False
+    self.slc_e2e_fallback = False
 
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.a_cruise = init_a
@@ -74,9 +77,17 @@ class LongitudinalPlanner:
     v_ego = sm['carState'].vEgo
     personality = sm['selfdriveState'].personality
     now = sm.logMonoTime['modelV2'] * 1e-9 if REPLAY else time.monotonic()
-    full_e2e = not self.CP.openpilotLongitudinalControl
+    self.slc_e2e_fallback = map_cruise_supported(self.CP) and slc_e2e_fallback(sm, now, replay=REPLAY)
+    full_e2e = ((map_cruise_supported(self.CP) and full_e2e_requested(sm, now, replay=REPLAY)) or
+                not self.CP.openpilotLongitudinalControl)
     v_cruise_kph = min(sm['carState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
+    if full_e2e and map_cruise_supported(self.CP):
+      map_cap = e2e_map_speed_cap(sm, now, replay=REPLAY)
+      if map_cap is not None:
+        # A new map packet can precede card's next SET publication. Apply the
+        # maximum here too, without ever raising a lower driver-selected SET.
+        v_cruise = min(v_cruise, map_cap)
     if sm['controlsState'].forceDecel:
       v_cruise = 0.0
 
@@ -197,6 +208,7 @@ class LongitudinalPlanner:
     longitudinalPlan.allowBrake = True
 
     longitudinalPlan.e2eAssistActive = bool(self.e2e_assist_active)
+    longitudinalPlan.slcE2eFallback = self.slc_e2e_fallback
     longitudinalPlan.e2eStopActive = self.stop_target.active
     longitudinalPlan.e2eStopDistance = self.stop_target.distance
     target = longitudinalPlan.stopTarget

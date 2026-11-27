@@ -827,6 +827,7 @@ struct SelfdriveState {
   alertHudVisual @12 :Car.CarControl.HUDControl.VisualAlert;
 
   # configurable driving settings
+  experimentalMode @10 :Bool; # manual E2E selection or automatic SLC E2E fallback
   personality @11 :LongitudinalPersonality;
 
   enum AudibleAlert {
@@ -871,7 +872,6 @@ struct SelfdriveState {
 
   deprecated :group {
     alertSound @8 :Car.CarControl.HUDControl.AudibleAlert;
-    experimentalMode @10 :Bool;
   }
 }
 
@@ -1254,6 +1254,7 @@ struct LongitudinalPlan @0xe00b5b3eba12876c {
   stopTarget @45 :Custom.StopTargetState;
   legacyAccelBoostDEPRECATED @46 :Void;
   e2eAssistActive @47 :Bool;
+  slcE2eFallback @48 :Bool; # planner acknowledgment of automatic no-limit E2E
 
 
 
@@ -2655,9 +2656,9 @@ struct Event {
     # DO change the name of the field and struct
     # DON'T change the ID (e.g. @107)
     # DON'T change which struct it points to
-    customReserved0 @107 :Custom.CustomReserved0;
-    customReserved1 @108 :Custom.CustomReserved1;
-    customReserved2 @109 :Custom.CustomReserved2;
+    mapSpeedLimit @107 :Custom.MapSpeedLimit;
+    mapCruiseState @108 :Custom.MapCruiseState;
+    mapTrafficControl @109 :Custom.MapTrafficControl;
     customReserved3 @110 :Custom.CustomReserved3;
     customReserved4 @111 :Custom.CustomReserved4;
     customReserved5 @112 :Custom.CustomReserved5;
