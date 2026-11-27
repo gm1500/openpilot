@@ -34,6 +34,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LanePolicyActive", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
     {"LanePolicyBlending", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
     {"LanePolicyEnabled", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL, "1"}},
+    {"ModelStopFrontOffset", {PERSISTENT, FLOAT, "1.52"}},
     {"MapCruiseEnabled", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL, "1"}},
     {"MapParkedPosition", {PERSISTENT | DONT_LOG, JSON}},
     {"SlcOffsetType", {PERSISTENT, INT, "0"}},

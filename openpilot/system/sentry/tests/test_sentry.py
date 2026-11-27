@@ -560,16 +560,272 @@ def test_parked_time_overrules_thermal_resume_and_uses_controller_clock(monkeypa
   assert not should_shutdown()  # Missing/NaN readings are not proof of overheating.
 
 
+@pytest.mark.parametrize('sensor_event', [False, True])
+def test_eye_touch_suppression_lasts_until_next_timeout(monkeypatch, sensor_event):
+  # SCALE avoids monitor probing when importing the UI in a headless test process.
+  monkeypatch.setenv('SCALE', '1')
+  from openpilot.selfdrive.ui import ui_state as ui
+  clock = [100.]
+  state = SimpleNamespace(eyeEnabled=True, motion=not sensor_event, motionCamera=2,
+                          sensorActive=sensor_event, recordUntilMonoTime=int(190e9) if sensor_event else 0)
+  monkeypatch.setattr(ui, 'ui_state', SimpleNamespace(ignition=False, started=False, sentry_active=True, sm={'sentryState': state}))
+  app = SimpleNamespace(target_fps=20, mouse_events=[], big_ui=lambda: True, set_dim=lambda _: None)
+  monkeypatch.setattr(ui, 'gui_app', app)
+  monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
+  device = ui.Device()
+  monkeypatch.setattr(device, '_set_awake', lambda _: None)
+  device._interaction_time = 90.
+  device._update_wakefulness()
+  assert device.sentry_eye_visible
+  device._update_brightness()
+  assert device._brightness_target == 100
+  app.mouse_events = [SimpleNamespace(left_down=True)]
+  device._update_wakefulness()
+  assert not device.sentry_screen and not device.sentry_eye_visible
+  app.mouse_events = []
+  for t in (100.1, 110., 129.9):
+    clock[0] = t
+    device._update_wakefulness()
+    assert not device.sentry_eye_visible  # continuous motion must not interrupt settings
+  clock[0] = 130.1
+  device._update_wakefulness()
+  assert device.sentry_eye_visible
+  state.motion = False
+  state.sensorActive = False
+  clock[0] = 131.2
+  device._update_wakefulness()
+  assert not device.sentry_eye_visible
+  device._update_brightness()
+  assert device._brightness_target == 0
 
 
+def test_sensor_eye_fades_before_recording_finishes_and_respects_disable_and_session_end(monkeypatch):
+  monkeypatch.setenv('SCALE', '1')
+  from openpilot.selfdrive.ui import ui_state as ui
+  clock = [100.]
+  state = SimpleNamespace(eyeEnabled=True, motion=False, motionCamera=2, sensorActive=True, recordUntilMonoTime=int(175e9))
+  context = SimpleNamespace(ignition=False, started=False, sentry_active=True, sm={'sentryState': state})
+  monkeypatch.setattr(ui, 'ui_state', context)
+  monkeypatch.setattr(ui, 'gui_app', SimpleNamespace(target_fps=20, mouse_events=[], big_ui=lambda: True, set_dim=lambda _: None))
+  monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
+  device = ui.Device()
+  monkeypatch.setattr(device, '_set_awake', lambda _: None)
+  device._interaction_time = 90.
+  for now in (100., 110., 114.9):
+    clock[0] = now
+    device._update_wakefulness()
+    device._update_brightness()
+    assert device.sentry_eye_visible and device._brightness_target == 100
+  state.sensorActive = False
+  clock[0] = 115.3
+  device._update_wakefulness()
+  assert device.sentry_eye_visible  # Short fade, independent of the saved tail.
+  clock[0] = 115.7
+  device._update_wakefulness()
+  device._update_brightness()
+  assert not device.sentry_eye_visible and device._brightness_target == 0
+  state.sensorActive = True
+  device._update_wakefulness()
+  assert device.sentry_eye_visible
+  state.eyeEnabled = False
+  device._update_wakefulness()
+  device._update_brightness()
+  assert not device.sentry_eye_visible and device._brightness_target == 0
+  state.eyeEnabled = True
+  context.sentry_active = False
+  device._update_wakefulness()
+  assert not device.sentry_eye_visible and device.sentry_motion_until == 0.
 
 
+@pytest.mark.parametrize('stop_control', ['button', 'toggle'])
+@pytest.mark.parametrize('ignition,started', [(False, False), (True, False), (False, True), (True, True)])
+def test_settings_remain_editable_in_all_vehicle_states(monkeypatch, tmp_path, stop_control, ignition, started):
+  monkeypatch.setenv('SCALE', '1')
+  import raylib_nb as rl
+  from openpilot.common.params import Params
+  from openpilot.selfdrive.ui import ui_state
+  from openpilot.selfdrive.ui.layouts.settings import sentry as ui
+  from openpilot.system.ui.widgets import list_view
+
+  params = Params(str(tmp_path/'params'))
+  params.put_bool('SentryEnabled', True, block=True)
+  params.put_bool('SentryManualTrigger', True, block=True)
+
+  class SubMaster(dict):
+    valid = {'sentryState': True, 'peripheralState': True}
+    recv_time = dict.fromkeys(valid, ui.time.monotonic())
+
+  class State(SimpleNamespace):
+    sentry_active = ui_state.UIState.sentry_active
+
+  sm = SubMaster(sentryState=SimpleNamespace(capture=True, phase='Recording', locationValid=False),
+                 sentryRecorderState=SimpleNamespace(bufferSeconds=120, bufferBytes=1000),
+                 peripheralState=SimpleNamespace(voltage=12000))
+  state = State(params=params, sm=sm, ignition=ignition, started=started)
+  device = SimpleNamespace(sentry_motion_until=100.)
+  monkeypatch.setattr(ui, 'Params', lambda: params)
+  monkeypatch.setattr(ui, 'ui_state', state)
+  monkeypatch.setattr(ui, 'device', device)
+  # Construct the real settings rows without an OpenGL context.
+  monkeypatch.setattr(ui.gui_app, 'font', lambda *args: rl.Font())
+  monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*20, 40))
+  layout = ui.SentryLayout()
+  assert [row.title for row in layout.scroller._items] == [
+    'Sentry', 'Enable Sentry', 'Livestream trigger', 'Skip Sentry on Wi-Fi', 'Arming delay', 'Pre-event buffer', 'Record after motion stops',
+    'Motion sensitivity', 'Audio sensitivity', 'Gyro sensitivity', 'Battery cutoff', 'Maximum parked time', 'Pause capture above',
+    'Red eye', 'Video watermark', 'Buffered footage', 'Current time',
+  ]
+  assert layout.voltage_status() == 'now 12.0 V'
+  sm.valid['peripheralState'] = False
+  assert layout.voltage_status() == 'now unavailable'
+  assert layout._stop_button.action_item.enabled
+  assert layout._enable_toggle.action_item.enabled
+  assert layout._enable_toggle.action_item.get_state()
+  assert state.sentry_active == (not ignition and not started)
+  for row in layout.scroller._items:
+    if isinstance(row, ui.SentrySlider):
+      assert row.enabled
+    else:
+      assert row.action_item.enabled
+
+  if stop_control == 'button':
+    layout._stop_button.callback()
+  else:
+    layout._enable_toggle.action_item.toggle._handle_mouse_release(rl.Vector2())
+  assert not params.get_bool('SentryEnabled')
+  assert not params.get_bool('SentryManualTrigger')
+  assert not layout._enable_toggle.action_item.get_state()
+  assert not layout._stop_button.action_item.enabled
+  assert layout._stop_button.action_item.value == 'Off'
+  assert device.sentry_motion_until == 0.
+  assert not state.sentry_active  # A fresh capture=true message cannot keep the eye alive.
+
+  assert layout._enable_toggle.action_item.enabled
+  layout._enable_toggle.action_item.toggle._handle_mouse_release(rl.Vector2())
+  assert params.get_bool('SentryEnabled') and layout._enable_toggle.action_item.get_state()
+  assert state.sentry_active == (not ignition and not started)
+  state.ignition = state.started = False
+  assert state.sentry_active
+  # Reflect an external change, e.g. a stop issued over SSH, on the next UI update.
+  params.put_bool('SentryEnabled', False, block=True)
+  layout._update_state()
+  assert not layout._enable_toggle.action_item.get_state()
+  modes = layout._enable_toggle.action_item.modes
+  modes.select_button(2)
+  assert params.get_bool('SentryOffThisDrive')
+  layout._set_sentry_enabled(True)
+  assert params.get_bool('SentryOffThisDrive')  # Master enable does not cancel this parking's skip.
+  assert not state.sentry_active
+  modes.select_button(1)
+  assert params.get('SentryRiskMode') == 1 and not params.get_bool('SentryOffThisDrive')
+  assert state.sentry_active and params.get('SentryParkingModeSource') == 'manual'
+  assert [modes.is_button_selected(i) for i in range(3)] == [False, True, False]
+  layout._enable_toggle.action_item.set_touch_valid_callback(lambda: False)
+  assert not modes._touch_valid() and not layout._enable_toggle.action_item.toggle._touch_valid()
 
 
+@pytest.mark.parametrize('livestream', [False, True])
+def test_enable_switch_and_three_coloured_parking_modes_fit_one_row(monkeypatch, tmp_path, livestream):
+  import raylib_nb as rl
+  from openpilot.common.params import Params
+  from openpilot.selfdrive.ui.layouts.settings import sentry as ui
+  from openpilot.system.ui.widgets import list_view
+  params = Params(str(tmp_path/'params'))
+  params.put_bool('SentryEnabled', True, block=True)
+  monkeypatch.setattr(ui.gui_app, 'font', lambda *args: rl.Font())
+  monkeypatch.setattr(list_view, 'measure_text_cached', lambda font, text, size: rl.Vector2(len(text)*30, 60))
+  monkeypatch.setattr(ui.Toggle, '_render', lambda *args: None)
+  labels, fills = [], []
+  monkeypatch.setattr(ui, 'gui_label', lambda rect, text, size, *args, **kwargs: labels.append((rect, text)))
+  monkeypatch.setattr(rl, 'draw_rectangle_rounded', lambda rect, rounding, segments, color: fills.append((color.r, color.g, color.b)))
+  key = 'SentryLivestreamOverride' if livestream else 'SentryEnabled'
+  title = 'Livestream trigger' if livestream else 'Enable Sentry'
+  action = ui.SentryEnableAction(params, lambda enabled: params.put_bool(key, enabled, block=True),
+                                key=key, mode_key='SentryLivestreamMode' if livestream else None)
+  row = ui.ListItem(title, action_item=action)
+  # 2160px display, 500px sidebar and 50px panel margins on both sides.
+  rect = row.get_right_item_rect(rl.Rectangle(550, 25, 1560, 170))
+  assert rect.x >= 550+20+len(title)*30
+  action._render(rect)
+  toggle = action.toggle.rect
+  assert len(labels) == 3 and toggle.x+toggle.width < labels[0][0].x
+  assert labels[-1][0].x+labels[-1][0].width <= 2110.001  # raylib rectangles store float32 coordinates
+  assert all(box.y+box.height/2 == toggle.y+toggle.height/2 for box, _ in labels)
+  for i, color in enumerate(((245, 196, 46), (190, 35, 42), (71, 184, 104))):
+    box, _ = labels[i]
+    action.modes._handle_mouse_release(rl.Vector2(box.x+box.width/2, box.y+box.height/2))
+    fills.clear()
+    action._render(rect)
+    assert fills[i] == color
+    assert [action.modes.is_button_selected(n) for n in range(3)] == [n == i for n in range(3)]
+    assert params.get_bool('SentryEnabled')
+  if livestream:
+    assert not params.get_bool('SentryOffThisDrive')
+    assert params.get('SentryArmResetAt') is None  # Configure the future action, without applying it now.
+    assert not params.get_bool(key)
+    action.toggle._handle_mouse_release(rl.Vector2())
+    assert params.get_bool(key)
+    assert params.get('SentryLivestreamMode') == 2
+  else:
+    assert params.get_bool('SentryOffThisDrive')
 
 
+@pytest.mark.parametrize('key,shutdown_key', [('SentryMaxHours', 'SentryShutdownOnTimeLimit'), ('SentryMaxTemp', 'SentryShutdownOnOverheat')])
+def test_shutdown_switch_is_independent_of_limit_slider_and_respects_scrolling(monkeypatch, key, shutdown_key):
+  monkeypatch.setenv('SCALE', '1')
+  import raylib_nb as rl
+  from openpilot.selfdrive.ui.layouts.settings import sentry as ui
+  monkeypatch.setattr(ui.gui_app, 'font', lambda *args: rl.Font())
+  monkeypatch.setattr(ui.Toggle, '_render', lambda *args: None)
+  for name in ('draw_text_ex', 'draw_rectangle_rounded', 'draw_circle'):
+    monkeypatch.setattr(rl, name, lambda *args: None)
+
+  class Params(dict):
+    def put_bool(self, key, value, block=False):
+      self[key] = value
+    put = put_bool
+
+  params = Params(config.DEFAULTS)
+  slider = ui.SentrySlider(params, key, 'Limit', shutdown_key=shutdown_key)
+  slider._render(rl.Rectangle(0, 0, 1400, 190))
+  toggle = slider.shutdown_toggle
+  assert 0 <= toggle.rect.x < toggle.rect.x+toggle.rect.width <= 1400
+  pos = rl.Vector2(toggle.rect.x+40, toggle.rect.y+toggle.rect.height-5)
+  slider._handle_mouse_press(pos)
+  assert not slider.dragging  # Tapping the switch must not change the duration/temperature.
+  toggle._handle_mouse_release(pos)
+  assert params[shutdown_key] == (not config.DEFAULTS[shutdown_key])
+  assert params[key] == config.DEFAULTS[key]
+  pos = rl.Vector2(slider.track.x, slider.track.y)
+  slider._handle_mouse_press(pos)
+  slider._handle_mouse_event(SimpleNamespace(pos=pos, left_released=True))
+  assert params[key] == config.RANGES[key][0]
+  assert params[shutdown_key] == (not config.DEFAULTS[shutdown_key])
+  slider.set_touch_valid_callback(lambda: False)
+  assert not toggle._touch_valid()
 
 
+@pytest.mark.parametrize('key', config.DURATION_KEYS)
+def test_duration_buttons_select_one_preset(monkeypatch, tmp_path, key):
+  monkeypatch.setenv('SCALE', '1')
+  import raylib_nb as rl
+  from openpilot.common.params import Params
+  from openpilot.selfdrive.ui.layouts.settings import sentry as ui
+  monkeypatch.setattr(ui.gui_app, 'font', lambda *args: None)
+  state = SimpleNamespace(ignition=False)
+  monkeypatch.setattr(ui, 'ui_state', state)
+  params = Params(str(tmp_path/'params'))
+  buttons = ui.SentryDurationButtons(params, key)
+  buttons.set_rect(rl.Rectangle(0, 0, 670, 170))
+  assert [buttons.is_button_selected(i) for i in range(3)] == [n == config.DEFAULTS[key] for n in config.DURATION_PRESETS]
+  for index, x in enumerate((105, 335, 565)):
+    buttons._handle_mouse_release(rl.Vector2(x, 85))
+    assert params.get(key) == config.DURATION_PRESETS[index]
+    assert [buttons.is_button_selected(i) for i in range(3)] == [i == index for i in range(3)]
+  state.ignition = True
+  assert buttons.enabled
+  buttons._handle_mouse_release(rl.Vector2(105, 85))
+  assert params.get(key) == 15
 
 
 def test_process_gates_do_not_start_driving_controls(monkeypatch):
