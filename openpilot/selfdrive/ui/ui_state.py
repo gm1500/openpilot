@@ -24,6 +24,17 @@ BRIGHTNESS_MIN = BACKLIGHT_MIN * 0.6 if HARDWARE.get_device_type() == "mici" els
 PARAM_UPDATE_TIME = 1 / 5.0
 
 
+def get_lane_policy_enabled(params: Params) -> bool:
+  """Read the typed BOOL parameter while tolerating a legacy raw value."""
+  value = params.get("LanePolicyEnabled")
+  if value is None:
+    # The persistent selector defaults on before a preference has been saved.
+    return True
+  if isinstance(value, (bytes, bytearray)):
+    return value == b"1"
+  return bool(value)
+
+
 class UIStatus(Enum):
   DISENGAGED = "disengaged"
   ENGAGED = "engaged"
@@ -96,6 +107,9 @@ class UIState:
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
     self.navigation_enabled: bool = self.params.get_bool("NavigationEnabled")
     self.nav_destination_set: bool = self.params.get("NavDestination") is not None
+    self.lane_policy_enabled = get_lane_policy_enabled(self.params)
+    self.lane_policy_active = self.params.get_bool("LanePolicyActive")
+    self.lane_policy_blending = self.params.get_bool("LanePolicyBlending")
     self.chestnut_present: bool = False
     self.chestnut_compiled: bool = chestnut_compiled()
     self.chestnut_active: bool | None = None
@@ -247,6 +261,22 @@ class UIState:
     else:
       self.chestnut_state = ChestnutState.ACTIVE
 
+  def set_lane_policy_enabled(self, enabled: bool) -> None:
+    """Persist the HUD selector and update its in-memory state immediately."""
+    self.params.put_bool("LanePolicyEnabled", enabled)
+    self.lane_policy_enabled = enabled
+
+
+  @property
+  def lane_policy_line_color(self) -> tuple[int, int, int] | None:
+    if self.lane_policy_enabled:
+      if self.lane_policy_active:
+        return (128, 216, 166) if self.engaged else (97, 183, 230)
+      if self.lane_policy_blending:
+        return (97, 183, 230)
+    return None
+
+
   def update_params(self) -> None:
     # For slower operations
     # Update longitudinal control state
@@ -265,6 +295,9 @@ class UIState:
     self.personality_param = self.params.get("LongitudinalPersonality", return_default=True)
     self.navigation_enabled = self.params.get_bool("NavigationEnabled")
     self.nav_destination_set = self.params.get("NavDestination") is not None
+    self.lane_policy_enabled = get_lane_policy_enabled(self.params)
+    self.lane_policy_active = self.params.get_bool("LanePolicyActive")
+    self.lane_policy_blending = self.params.get_bool("LanePolicyBlending")
     self.chestnut_active = self.params.get("ChestnutActive")
     self.chestnut_loading = self.params.get_bool("ChestnutLoading")
     self.chestnut_alert = any(self.params.get(k) is not None for k, a in OFFROAD_ALERTS.items() if k.startswith("Offroad_Chestnut") and a["severity"] >= 0)

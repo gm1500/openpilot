@@ -1076,6 +1076,7 @@ struct ModelDataV2 {
   laneLineStds @13 :List(Float32);
   roadEdges @10 :List(XYZTData);
   roadEdgeStds @14 :List(Float32);
+  lanePolicy @28 :Custom.LanePolicyState;
 
   # predicted lead cars
   leadsV3 @18 :List(LeadDataV3);
