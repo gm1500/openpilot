@@ -8,9 +8,6 @@ from openpilot.selfdrive.car.slc_settings import SLCSettings
 MAP_MESSAGE_MAX_AGE = 0.8
 MAP_GPS_MAX_AGE = 3.0
 MAP_MISSING_TIME = 1.0
-MAP_ADVANCE_TIME = 2.0
-MAP_MERGE_ADVANCE_TIME = 8.0
-MAP_APPROACH_DECEL = 1.0
 
 
 @dataclass(frozen=True)
@@ -119,24 +116,15 @@ class MapCruise:
              gps_time >= self._last_fix and
              math.isfinite(preview.speed) and 8 <= round(preview.speed * CV.MS_TO_KPH, 3) <= 145 and preview.way_id > 0 and
              math.isfinite(preview.distance) and 0 <= preview.distance <= 1000 and math.isfinite(v_ego) and 2 <= v_ego <= 75)
-    if valid:
-      target = self.settings.target(preview.speed * CV.MS_TO_KPH, self.metric)
-      # A matched preview is available immediately. Display remains independent
-      # of the distance and road-entry checks that determine when SET changes.
-      if speed_ms is None or round(preview.speed, 4) != round(speed_ms, 4):
-        self.preview_speed_ms = preview.speed
-        self.preview_advisory = preview.advisory
-      # Earlier braking uses the distance needed to shed speed plus two seconds
-      # of travel. This is a distance allowance, not a timer before applying SET.
-      # Raising SET early requires mapd's unique, aligned, model-confirmed merge.
-      lowering = 8 <= self.current_kph <= 145 and target <= self.current_kph and (speed_ms is None or preview.speed < speed_ms)
-      braking_distance = max(0.0, v_ego ** 2 - preview.speed ** 2) / (2 * MAP_APPROACH_DECEL)
-      lower_range = min(300.0, max(50.0, v_ego * MAP_ADVANCE_TIME + braking_distance))
-      merging = preview.merge and not preview.advisory and speed_ms is None and 8 <= self.current_kph <= 145
-      in_range = lowering and preview.distance <= lower_range or merging and preview.distance <= min(250.0, v_ego * MAP_MERGE_ADVANCE_TIME)
-      if in_range:
-        self.preview_active = True
-        return preview.speed
+    if valid and (speed_ms is None or round(preview.speed, 4) != round(speed_ms, 4)):
+      # Advanced SLC uses the same qualified limit for the sign and SET. Keep
+      # selecting it while it remains visible, even before the current road
+      # changes; an expired/withdrawn preview falls back to the current match.
+      # Manual selection and change-policy checks still run in update/cruise.
+      self.preview_speed_ms = preview.speed
+      self.preview_advisory = preview.advisory
+      self.preview_active = True
+      return preview.speed
     return speed_ms
 
   def update(self, enabled: bool, speed_ms: float | None, gps_time: float, now: float, automatic_e2e: bool = False,

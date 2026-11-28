@@ -20,13 +20,14 @@ class Drive:
     self.preview = None
     self.automatic = False
     self.enabled = True
+    self.map_enabled = True
     self.gps = None
     self.tick(220)
 
   def tick(self, count=1):
     for _ in range(count):
       self.now += .01
-      self.helper.update_v_cruise(self.cs, self.enabled, True, map_enabled=True,
+      self.helper.update_v_cruise(self.cs, self.enabled, True, map_enabled=self.map_enabled,
         map_speed=self.speed / 3.6 if self.speed is not None else None,
         map_gps_time=self.now if self.gps is None else self.gps, now=self.now,
         automatic_e2e=self.automatic, e2e_ready=True, slc_settings=self.settings,
@@ -41,16 +42,13 @@ class Drive:
     return self.helper.v_cruise_kph
 
 
-def test_lower_limit_uses_braking_distance_and_keeps_posted_limit_distinct():
+@pytest.mark.parametrize('distance', [0., 50., 100., 800., 1000.])
+def test_visible_lower_limit_applies_immediately_at_any_qualified_distance(distance):
   d = Drive()
-  d.approach()
-  assert d.target == 100
-  d.preview = replace(d.preview, distance=51.1)
-  d.tick()
-  assert d.target == 100
-  d.preview = replace(d.preview, distance=50.)
+  d.preview = MapPreview(70 / 3.6, distance, 2)
   d.tick()
   assert d.target == 70
+  assert d.speed == 100  # The current road and upcoming limit stay distinct.
   assert d.helper.map_cruise.preview_active
   d.speed, d.preview = 70., None
   d.tick()
@@ -58,30 +56,43 @@ def test_lower_limit_uses_braking_distance_and_keeps_posted_limit_distinct():
   assert not d.helper.map_cruise.preview_active
 
 
-def test_higher_limit_waits_for_entry_then_applies_immediately():
+def test_cf_higher_limit_applies_when_first_displayed_and_does_not_revert_before_entry():
   d = Drive()
-  d.approach(110.)
-  d.preview = replace(d.preview, distance=1.)
-  d.tick()
-  assert d.target == 100
   d.speed = 110.
-  # The following boundary can appear in the same map packet as this entry.
-  d.preview = MapPreview(120 / 3.6, 100., 3)
+  d.cs.vEgo = 101.5 / 3.6
   d.tick()
   assert d.target == 110
+  # CF: mapd first showed 120 at 286.8 m, eleven seconds before road entry.
+  d.preview = MapPreview(120 / 3.6, 286.8, 1549731360)
+  d.tick()
+  assert d.target == 120
+  assert d.helper.v_cruise_cluster_kph == 120
+  assert d.helper.map_cruise.preview_speed_ms == 120 / 3.6
+  for distance in (280., 140., 25., 0.):
+    d.preview = replace(d.preview, distance=distance)
+    d.tick(275)
+    assert d.target == 120
+    assert d.helper.map_cruise.preview_active
+  d.speed, d.preview = 120., None
+  d.tick()
+  assert d.target == 120
+  assert not d.helper.map_cruise.preview_active
+  d.preview = MapPreview(130 / 3.6, 100., 3)
+  d.tick()
+  assert d.target == 130
 
 
-def test_upcoming_legal_limit_display_keeps_current_ramp_advisory_target():
+def test_visible_legal_limit_replaces_current_ramp_advisory_target():
   d = Drive()
   d.speed = 40.  # read_map_speed supplies the current advisory when legal speed is absent
   d.preview = MapPreview(100 / 3.6, 80., 2, advisory=False, merge=False)
   d.tick()
-  assert d.target == 40
+  assert d.target == 100
   assert d.helper.map_cruise.preview_speed_ms == pytest.approx(100 / 3.6)
-  assert not d.helper.map_cruise.preview_active
+  assert d.helper.map_cruise.preview_active
   d.preview = replace(d.preview, distance=1.)
   d.tick()
-  assert d.target == 40
+  assert d.target == 100
   d.speed, d.preview = 100., None
   d.tick()
   assert d.target == 100
@@ -110,10 +121,10 @@ def test_unusable_preview_does_not_apply_an_early_lower_limit(issue):
   assert d.target == 70
 
 
-def test_fresh_lower_preview_in_range_applies_on_first_frame_with_unchanged_gps():
+def test_fresh_preview_applies_on_first_frame_with_unchanged_gps():
   d = Drive()
   d.gps = d.now
-  d.preview = MapPreview(70 / 3.6, 20., 2)
+  d.preview = MapPreview(70 / 3.6, 800., 2)
   d.tick()
   assert d.target == 70
   assert d.helper.map_cruise.preview_active
@@ -124,27 +135,28 @@ def test_boundary_gap_never_blocks_new_fresh_current_limit():
   d.approach(110.)
   d.speed, d.preview = None, None
   d.tick(180)
-  assert d.target == 100
+  assert d.target == 110
   assert not d.helper.map_cruise.preview_active
   d.speed = 110.
   d.tick()
   assert d.target == 110
 
 
-@pytest.mark.parametrize('intervention', ['gasPressed', 'brakePressed', 'disabled', 'manual', 'accept'])
+@pytest.mark.parametrize('intervention', ['gasPressed', 'brakePressed', 'disabled', 'off', 'manual', 'accept'])
 def test_early_target_respects_overrides(intervention):
   d = Drive(resume_policy=1, change_policy=2 if intervention == 'accept' else 0)
-  d.approach()
   original = d.target
   if intervention in ('gasPressed', 'brakePressed'):
     setattr(d.cs, intervention, True)
   elif intervention == 'disabled':
     d.enabled = False
+  elif intervention == 'off':
+    d.map_enabled = False
   elif intervention == 'manual':
     d.cs.buttonEvents = [car.CarState.ButtonEvent(type=ButtonType.resumeCruise, pressed=True)]
     d.tick()
     d.cs.buttonEvents = []
-  d.preview = replace(d.preview, distance=20.)
+  d.preview = MapPreview(70 / 3.6, 800., 2)
   d.tick()
   assert d.target == original
 
@@ -157,27 +169,27 @@ def test_lower_only_policy_still_blocks_higher_limit_on_entry():
   assert d.target <= 100
 
 
-def test_uninitialized_set_cannot_treat_a_future_limit_as_an_early_reduction():
+def test_visible_preview_does_not_initialize_an_unset_cruise_target():
   d = Drive()
   d.speed = None
   d.approach(110.)
   d.helper.v_cruise_kph = 255.
   d.preview = replace(d.preview, distance=20.)
   d.tick()
-  assert not d.helper.map_cruise.preview_active
-  assert d.helper.map_cruise.target_kph is None
+  assert d.helper.map_cruise.preview_active
+  assert d.helper.map_cruise.target_kph == 110
+  assert d.target == 255
 
 
-def test_preview_does_not_raise_lower_manual_target_or_release_no_speed_e2e():
-  d = Drive()
+def test_preview_preserves_manual_pause_and_no_speed_e2e():
+  d = Drive(resume_policy=1)
   d.helper.v_cruise_kph = 60.
+  d.helper.map_cruise.pause(driver_adjusted_speed=True)
   d.approach(70.)
-  d.preview = replace(d.preview, distance=20.)
   d.tick()
-  # Restore the manual SET after the normal current limit was processed.
-  d.helper.v_cruise_kph = 60.
-  d.tick()
-  assert not d.helper.map_cruise.preview_active
+  assert d.helper.map_cruise.preview_active
+  assert d.target == 60
+  assert not d.helper.map_cruise.tracking
   d = Drive()
   d.speed, d.automatic = None, True
   d.tick(110)
@@ -297,12 +309,11 @@ def test_confirmed_unrestricted_merge_raises_target_before_highway_entry():
   assert d.speed is None
 
 
-@pytest.mark.parametrize('issue', ['restriction', 'advisory', 'ordinary', 'too_far', 'lower_only', 'manual'])
-def test_merge_target_keeps_restrictions_and_user_controls(issue):
+@pytest.mark.parametrize('issue', ['lower_only', 'manual'])
+def test_merge_preview_preserves_user_controls(issue):
   d = Drive(change_policy=1 if issue == 'lower_only' else 0, resume_policy=1)
-  d.speed = 40. if issue == 'restriction' else None
-  d.preview = MapPreview(100 / 3.6, 170. if issue == 'too_far' else 150., 2,
-                         advisory=issue == 'advisory', merge=issue != 'ordinary')
+  d.speed = None
+  d.preview = MapPreview(100 / 3.6, 800., 2, merge=True)
   d.helper.v_cruise_kph = 70.
   if issue == 'manual':
     d.helper.map_cruise.pause()
@@ -310,12 +321,12 @@ def test_merge_target_keeps_restrictions_and_user_controls(issue):
   assert d.target <= 70.
 
 
-def test_confirmed_merge_applies_immediately_without_requalifying_geometry():
+@pytest.mark.parametrize('merge', [False, True])
+@pytest.mark.parametrize('advisory', [False, True])
+def test_visible_preview_applies_without_a_second_merge_or_distance_gate(merge, advisory):
   d = Drive()
   d.speed = None
-  d.preview = MapPreview(110 / 3.6, 100., 2)
-  d.tick(220)
-  d.preview = replace(d.preview, merge=True)
+  d.preview = MapPreview(110 / 3.6, 800., 2, advisory=advisory, merge=merge)
   d.tick()
   assert d.helper.map_cruise.preview_active and d.target == 110
 
@@ -327,24 +338,24 @@ def test_advisory_fifty_metres_ahead_is_an_early_lower_target():
   assert d.target == 40 and d.helper.map_cruise.preview_active
 
 
-def test_distant_speed_is_visible_without_being_applied():
+def test_distant_visible_speed_applies_without_a_current_map_limit():
   d = Drive()
   d.speed = None
   d.preview = MapPreview(60 / 3.6, 800., 2)
   d.tick(220)
-  assert d.target == 100 and not d.helper.map_cruise.preview_active
+  assert d.target == 60 and d.helper.map_cruise.preview_active
 
 
 @pytest.mark.parametrize('speed,advisory', [(70., False), (110., False), (60., True)])
-def test_new_preview_is_available_immediately_without_changing_set(speed, advisory):
+def test_new_preview_changes_set_immediately_with_the_configured_offset(speed, advisory):
   d = Drive(offset_value=5)
   d.preview = MapPreview(speed / 3.6, 800., 2, advisory=advisory)
   d.tick()
   map_cruise = d.helper.map_cruise
   assert map_cruise.preview_speed_ms == speed / 3.6
   assert map_cruise.preview_advisory == advisory
-  assert not map_cruise.preview_active
-  assert d.target == 105
+  assert map_cruise.preview_active
+  assert d.target == speed + 5
 
 
 @pytest.mark.parametrize('issue', ['missing', 'stale', 'invalid_speed', 'invalid_way', 'same_limit', 'disabled'])
@@ -368,10 +379,12 @@ def test_unusable_or_unchanged_preview_clears_display_candidate(issue):
   d.tick()
   assert d.helper.map_cruise.preview_speed_ms is None
   assert not d.helper.map_cruise.preview_advisory
-  assert d.target == 100
+  # Missing/invalid preview returns to a fresh current-road match. A stale
+  # complete map input holds SET until valid data returns, as before.
+  assert d.target == (70 if issue == 'stale' else 100)
 
 
-def test_preview_wire_keeps_future_posted_speed_distinct_from_actual_adjustment():
+def test_preview_wire_reports_the_shown_limit_and_matching_offset_target():
   packet = log.Event.new_message(valid=True, logMonoTime=int(100e9))
   state = packet.init('mapCruiseState')
   assert not state.previewValid
@@ -388,5 +401,5 @@ def test_preview_wire_keeps_future_posted_speed_distinct_from_actual_adjustment(
     assert decoded.mapCruiseState.previewValid
     assert decoded.mapCruiseState.previewAdvisory
     assert decoded.mapCruiseState.previewSpeed * 3.6 == pytest.approx(70)
-    assert decoded.mapCruiseState.adjustingSpeed * 3.6 == pytest.approx(105)
-    assert decoded.mapCruiseState.setSpeed * 3.6 == pytest.approx(105)
+    assert decoded.mapCruiseState.adjustingSpeed * 3.6 == pytest.approx(75)
+    assert decoded.mapCruiseState.setSpeed * 3.6 == pytest.approx(75)
