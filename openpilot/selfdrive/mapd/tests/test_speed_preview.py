@@ -37,6 +37,100 @@ def test_directed_boundary_and_packed_continuation():
     assert result.distance == pytest.approx(80)
 
 
+@pytest.mark.parametrize('offline', [False, True])
+@pytest.mark.parametrize('next_speed', ['60', '100'])
+def test_first_known_change_survives_unknown_road_farther_ahead(offline, next_speed):
+  roads = (polyline([(0, -100), (0, 200)], '80', 1, oneway='yes', name='Main Road'),
+           polyline([(0, 200), (0, 400)], next_speed, 2, oneway='yes', name='Main Road'),
+           polyline([(0, 400), (0, 800)], None, 3, oneway='yes', name='Main Road'))
+  roads = packed(roads) if offline else roads
+  tracker = osm.RoadTracker(offline_continuity=offline)
+  previewer = SpeedPreviewer()
+  for position in range(0, 200, 10):
+    fix = osm.GpsFix(*point(0, position), 0., 3., 100. + position / 20, speed=20.)
+    match = tracker.update(roads, fix)
+    target = previewer.update(tracker, match, fix)
+    assert match.speed == pytest.approx(80 / 3.6)
+    assert target.way_id == 2
+    assert target.speed == pytest.approx(float(next_speed) / 3.6)
+    assert target.distance == pytest.approx(200 - position)
+
+
+@pytest.mark.parametrize('offline', [False, True])
+def test_unknown_road_before_speed_change_still_blocks_preview(offline):
+  roads = (polyline([(0, -100), (0, 40)], '80', 1, oneway='yes', name='Main Road'),
+           polyline([(0, 40), (0, 80)], None, 2, oneway='yes', name='Main Road'),
+           polyline([(0, 80), (0, 400)], '60', 3, oneway='yes', name='Main Road'))
+  assert preview(packed(roads) if offline else roads, offline=offline) is None
+
+
+@pytest.mark.parametrize('offline', [False, True])
+@pytest.mark.parametrize('first_change_before_fork', [False, True])
+def test_fork_after_first_change_cannot_erase_it_or_resolve_an_earlier_fork(offline, first_change_before_fork):
+  roads = (polyline([(0, -100), (0, 40)], '80', 1, oneway='yes', name='Main Road'),
+           polyline([(0, 40), (0, 80)], '60' if first_change_before_fork else '80', 2, oneway='yes', name='Main Road'),
+           polyline([(0, 80), (200, 400)], '60', 3, oneway='yes'),
+           polyline([(0, 80), (-200, 400)], None, 4, oneway='yes'))
+  target = preview(packed(roads) if offline else roads, offline=offline)
+  if first_change_before_fork:
+    assert target.way_id == 2 and target.speed == pytest.approx(60 / 3.6)
+    assert target.distance == pytest.approx(40)
+  else:
+    assert target is None
+
+
+@pytest.mark.parametrize('offline', [False, True])
+def test_first_change_survives_unknown_side_road_at_later_interior_node(offline):
+  # The side road enters the 300 m horizon while the earlier 60 boundary is
+  # still ahead. Its unknown limit says nothing about that first speed change.
+  roads = (polyline([(0, -100), (0, 210)], '80', 1, oneway='yes', name='Main Road'),
+           polyline([(0, 210), (0, 462.3), (0, 800)], '60', 2, oneway='yes', name='Main Road'),
+           polyline([(0, 462.3), (200, 462.3)], None, 3, oneway='yes'))
+  roads = packed(roads) if offline else roads
+  tracker = osm.RoadTracker(offline_continuity=offline)
+  previewer = SpeedPreviewer()
+  for position in range(0, 210, 10):
+    fix = osm.GpsFix(*point(0, position), 0., 3., 100. + position / 20, speed=20.)
+    match = tracker.update(roads, fix)
+    target = previewer.update(tracker, match, fix, straight_prediction())
+    assert match.road.way_id == 1 and match.speed == pytest.approx(80 / 3.6)
+    assert target.way_id == 2 and target.speed == pytest.approx(60 / 3.6)
+    assert target.distance == pytest.approx(210 - position)
+
+
+@pytest.mark.parametrize('reverse_geometry', [False, True])
+def test_packed_endpoint_keeps_zero_distance_preview_until_current_match_changes(reverse_geometry):
+  roads = (polyline([(0, -100), (0, 200)], '80', 1, oneway='yes', name='Main Road'),
+           polyline([(0, 200), (0, 800)], '60', 2, oneway='yes', name='Main Road'))
+  if reverse_geometry:
+    roads = tuple(replace(r, geometry=r.geometry[::-1], node_ids=r.node_ids[::-1], tags={**r.tags, 'oneway': '-1'}) for r in roads)
+  roads = packed(roads)
+  tracker = osm.RoadTracker(offline_continuity=True)
+  previewer = SpeedPreviewer()
+  for position in range(0, 220, 10):
+    fix = osm.GpsFix(*point(0, position), 0., 3., 100. + position / 20, speed=20.)
+    match = tracker.update(roads, fix)
+    target = previewer.update(tracker, match, fix)
+    if position <= 200:
+      assert match.road.way_id == 1 and match.speed == pytest.approx(80 / 3.6)
+      assert target.way_id == 2 and target.speed == pytest.approx(60 / 3.6)
+      assert target.distance == pytest.approx(200 - position)
+    else:
+      assert match.road.way_id == 2 and match.speed == pytest.approx(60 / 3.6)
+      assert target is None
+
+
+def test_endpoint_with_ambiguous_exits_still_requires_a_route():
+  roads = fork()
+  fix = osm.GpsFix(*point(0, 40), 0., 3., 100., speed=20.)
+  for offline in (False, True):
+    active_roads = packed(roads) if offline else roads
+    tracker = osm.RoadTracker(offline_continuity=offline)
+    match = tracker.update(active_roads, replace(fix, latitude=point(0, 0)[0], timestamp=99.))
+    match = tracker.update(active_roads, fix)
+    assert SpeedPreviewer().update(tracker, match, fix) is None
+
+
 def test_untagged_ramp_can_preview_sole_aligned_receiving_road():
   ramp, receiving = pair(speed=None)
   ramp = replace(ramp, tags={**ramp.tags, 'highway': 'primary_link'})

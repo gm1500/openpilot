@@ -171,9 +171,8 @@ class SpeedPreviewer:
         match.distance > 12 or match.heading_error is None or match.heading_error > 12 or
         fix.motion_bearing is not None and abs((match.bearing - fix.motion_bearing + 180) % 360 - 180) > 12):
       return None
-    # An advisory-only ramp can show its upcoming legal limit while the current
-    # advisory remains the cruise target. It cannot qualify for an early raise
-    # below: that still requires an unrestricted, model-confirmed merge.
+    # An advisory-only ramp can supply its upcoming legal limit independently
+    # of the current advisory. Advanced SLC applies qualified previews directly.
     current, current_advisory = preview_speed(match.road, match.forward, tracker._local_time)
     advisory_ramp = current_advisory and match.road.tags.get('highway', '').endswith('_link')
     if (match.advisory_speed is not None and not advisory_ramp) or (current is None and
@@ -181,8 +180,8 @@ class SpeedPreviewer:
          any(k == 'maxspeed' or k.startswith('maxspeed:') for k in match.road.tags))):
       return None
     self._prepare(tracker)
-    # Ramp pieces can span several hundred metres. Searching farther
-    # does not apply a target farther away: cruise has its own bounded trigger.
+    # Ramp pieces can span several hundred metres. Advanced SLC applies a
+    # qualified preview as soon as it is available within this search distance.
     maximum = 1000. if current is None or advisory_ramp else 300.
     receiving = {}
     routes = []
@@ -196,8 +195,12 @@ class SpeedPreviewer:
       for index in (range(len(nodes)) if forward else reversed(range(len(nodes)))):
         _, position = nodes[index]
         step = (position - along) * (1 if forward else -1)
-        if step <= .1:
+        # A packed match can stay at its endpoint until there is positive
+        # progress onto the next way. Still inspect that endpoint's exits;
+        # interior zero-step nodes would recurse into the same road.
+        if step < -.1 or step <= .1 and index != (len(nodes) - 1 if forward else 0):
           continue
+        step = max(0., step)
         point = np.array(offset_metres(*road.geometry[index], origin))
         points = points + [(distance + step, point)]
         distance += step
@@ -219,7 +222,9 @@ class SpeedPreviewer:
             unknown = speed is None and (not other.tags.get('highway', '').endswith('_link') or
                                          any(k == 'maxspeed' or k.startswith('maxspeed:') for k in other.tags))
             if unknown:
-              routes.append((points, None))
+              # An unknown later road ends the search, but cannot erase the
+              # first known speed change already reached on this route.
+              routes.append((points, target))
             else:
               upcoming = target
               if target is None and speed is not None and (current is None or abs(speed - current) > .01):
@@ -270,7 +275,7 @@ class SpeedPreviewer:
           return None
         winner = best
       target = routes[winner][1]
-    if target is None or not 0 < target.distance <= maximum or not 8 / 3.6 <= target.speed <= 145 / 3.6:
+    if target is None or not 0 <= target.distance <= maximum or not 8 / 3.6 <= target.speed <= 145 / 3.6:
       return None
     # The advance is observed wheel motion to the model's capture time. Future
     # model travel may select a candidate but never advances the boundary clock.
